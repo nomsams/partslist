@@ -3,490 +3,661 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DataFlow | Pro CSV Studio</title>
-    <!-- PapaParse for parsing CSV files -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <title>Visual Data Flow | Sublime Engine</title>
     <style>
-        /* Apple-style UI Variables */
+        /* Sublime Text Monokai Theme Variables */
         :root {
-            --bg-color: #f5f5f7;
-            --surface-color: rgba(255, 255, 255, 0.75);
-            --modal-bg: rgba(255, 255, 255, 0.9);
-            --text-main: #1d1d1f;
-            --text-muted: #86868b;
-            --border-color: rgba(0, 0, 0, 0.1);
-            --accent-color: #0071e3;
-            --accent-hover: #0077ED;
-            --danger-color: #ff3b30;
-            --table-header-bg: rgba(255, 255, 255, 0.95);
-            --table-row-hover: rgba(0, 0, 0, 0.03);
-            --input-bg: rgba(0, 0, 0, 0.04);
-            --glass-blur: blur(24px);
-            --shadow: 0 8px 32px rgba(0,0,0,0.08);
-            --radius: 14px;
+            --bg-dark: #272822;
+            --bg-panel: #1e1f1c;
+            --border-color: #3e3d32;
+            --text-main: #f8f8f2;
+            --text-muted: #75715e;
+            --neon-pink: #f92672;
+            --neon-green: #a6e22e;
+            --neon-blue: #66d9ef;
+            --neon-orange: #fd971f;
+            --neon-yellow: #e6db74;
+            --neon-purple: #ae81ff;
         }
 
-        /* Dark Mode Variables */
-        [data-theme="dark"] {
-            --bg-color: #000000;
-            --surface-color: rgba(28, 28, 30, 0.75);
-            --modal-bg: rgba(44, 44, 46, 0.95);
-            --text-main: #f5f5f7;
-            --text-muted: #98989d;
-            --border-color: rgba(255, 255, 255, 0.1);
-            --accent-color: #0a84ff;
-            --accent-hover: #409cff;
-            --danger-color: #ff453a;
-            --table-header-bg: rgba(28, 28, 30, 0.95);
-            --table-row-hover: rgba(255, 255, 255, 0.06);
-            --input-bg: rgba(255, 255, 255, 0.08);
-            --shadow: 0 8px 32px rgba(255,255,255,0.03);
-        }
+        * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
 
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, Helvetica, sans-serif;
-            background-color: var(--bg-color);
+            font-family: Consolas, "Courier New", monospace;
+            background-color: var(--bg-dark);
             color: var(--text-main);
-            padding: 2rem;
-            min-height: 100vh;
-            transition: background-color 0.4s, color 0.4s;
+            overflow: hidden; 
         }
 
-        .container { max-width: 1400px; margin: 0 auto; }
-
-        /* Header & Ticker */
-        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
-        h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; }
-        .ticker { font-size: 13px; color: var(--text-muted); font-weight: 500; background: var(--surface-color); padding: 6px 16px; border-radius: 20px; border: 1px solid var(--border-color); backdrop-filter: var(--glass-blur); }
-
-        /* Buttons */
-        button {
-            background-color: var(--surface-color); color: var(--text-main);
-            border: 1px solid var(--border-color); padding: 8px 18px;
-            border-radius: 20px; font-size: 14px; font-weight: 500;
-            cursor: pointer; backdrop-filter: var(--glass-blur);
-            -webkit-backdrop-filter: var(--glass-blur); transition: all 0.2s;
-        }
-        button:hover { background-color: var(--table-row-hover); }
-        button.primary { background-color: var(--accent-color); color: white; border: none; box-shadow: 0 2px 12px rgba(0, 113, 227, 0.3); }
-        button.primary:hover { background-color: var(--accent-hover); }
-        button.danger { color: var(--danger-color); }
-
-        /* Inputs */
-        input[type="text"] {
-            padding: 10px 16px; border-radius: 20px; border: 1px solid var(--border-color);
-            background-color: var(--input-bg); color: var(--text-main);
-            font-size: 14px; outline: none; transition: border-color 0.2s;
-        }
-        input[type="text"]:focus { border-color: var(--accent-color); }
-
-        /* Drag & Drop */
-        #drop-zone {
-            background-color: var(--surface-color); border: 2px dashed var(--border-color);
-            border-radius: var(--radius); padding: 80px 20px; text-align: center;
-            cursor: pointer; backdrop-filter: var(--glass-blur); margin-bottom: 2rem;
-            transition: border-color 0.3s, background-color 0.3s;
-        }
-        #drop-zone.dragover { border-color: var(--accent-color); background-color: var(--table-row-hover); }
-        #drop-zone p { color: var(--text-muted); margin-bottom: 16px; font-size: 16px; }
-        #file-input { display: none; }
-
-        /* Dashboard & Toolbar */
-        .dashboard { display: none; flex-direction: column; gap: 1rem; margin-bottom: 1rem; }
-        .toolbar { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 1rem; align-items: center; }
-        .toolbar-group { display: flex; gap: 8px; }
-
-        /* Table */
-        .table-container {
-            display: none; background-color: var(--surface-color); border-radius: var(--radius);
-            overflow-x: auto; overflow-y: auto; max-height: 65vh; border: 1px solid var(--border-color);
-            backdrop-filter: var(--glass-blur); box-shadow: var(--shadow);
-        }
-        table { width: 100%; border-collapse: collapse; text-align: left; font-size: 14px; }
-        th, td { padding: 12px 16px; border-bottom: 1px solid var(--border-color); white-space: nowrap; }
-        
-        /* Sticky Headers & Footers */
-        th { background-color: var(--table-header-bg); color: var(--text-muted); font-weight: 600; position: sticky; top: 0; z-index: 10; user-select: none; backdrop-filter: var(--glass-blur); }
-        tfoot th { position: sticky; bottom: 0; background-color: var(--table-header-bg); border-top: 2px solid var(--border-color); border-bottom: none; color: var(--text-main); }
-        
-        tr:hover td { background-color: var(--table-row-hover); }
-        td[contenteditable="true"]:focus { background-color: var(--input-bg); box-shadow: 0 0 0 2px var(--accent-color) inset; outline: none; border-radius: 4px; }
-        
-        /* Formula Modal */
-        .modal-overlay {
-            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.4); z-index: 100; justify-content: center; align-items: center;
+        /* Toolbar */
+        .toolbar {
+            position: absolute;
+            top: 20px; left: 20px;
+            background: rgba(30, 31, 28, 0.9);
+            border: 1px solid var(--border-color);
+            padding: 10px;
+            border-radius: 6px;
+            z-index: 1000;
+            display: flex;
+            gap: 10px;
             backdrop-filter: blur(5px);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
         }
-        .modal {
-            background: var(--modal-bg); border-radius: 20px; padding: 24px; width: 400px;
-            box-shadow: var(--shadow); border: 1px solid var(--border-color);
-            backdrop-filter: var(--glass-blur);
+
+        button {
+            background: #272822; color: var(--neon-green);
+            border: 1px solid var(--border-color); padding: 6px 12px;
+            font-family: inherit; font-size: 13px; cursor: pointer;
+            border-radius: 4px; transition: color 0.2s, border-color 0.2s;
         }
-        .modal h3 { margin-bottom: 16px; }
-        .modal label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 6px; font-weight: 600; }
-        .modal input { width: 100%; margin-bottom: 16px; }
-        .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
-        .help-text { font-size: 12px; color: var(--text-muted); margin-bottom: 16px; background: var(--input-bg); padding: 10px; border-radius: 8px; }
-        .help-text code { color: var(--accent-color); font-weight: bold; }
+        button:hover { color: var(--neon-pink); border-color: var(--neon-pink); }
+        button.action-btn { color: var(--neon-blue); }
+        button.action-btn:hover { border-color: var(--neon-blue); }
+
+        /* Canvas Wrapper for Panning */
+        #viewport {
+            width: 100vw; height: 100vh;
+            position: relative;
+        }
+
+        #canvas {
+            position: absolute;
+            top: 0; left: 0;
+            width: 5000px; height: 5000px;
+            transform-origin: 0 0;
+            background-image: 
+                linear-gradient(var(--border-color) 1px, transparent 1px),
+                linear-gradient(90deg, var(--border-color) 1px, transparent 1px);
+            background-size: 40px 40px;
+            background-position: -1px -1px;
+            cursor: grab;
+        }
+        #canvas.panning { cursor: grabbing; }
+
+        svg {
+            position: absolute; top: 0; left: 0;
+            width: 100%; height: 100%;
+            pointer-events: none; /* Let clicks pass through unless on stroke */
+            z-index: 0;
+        }
+
+        path.wire {
+            fill: none; stroke-width: 3; stroke-linecap: round;
+            filter: drop-shadow(0 0 5px currentColor);
+            pointer-events: visibleStroke; /* Allow clicking the wire */
+            cursor: pointer;
+            transition: stroke-width 0.2s;
+        }
+        path.wire:hover { stroke-width: 6; }
+
+        /* Nodes */
+        .node {
+            position: absolute;
+            background-color: var(--bg-panel);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            min-width: 250px;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            cursor: default;
+        }
+
+        .node-header {
+            background-color: #3e3d32; padding: 8px 12px; font-size: 14px;
+            font-weight: bold; color: var(--neon-blue); cursor: grab;
+            border-top-left-radius: 6px; border-top-right-radius: 6px;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .node-header:active { cursor: grabbing; }
+        
+        .delete-btn {
+            color: var(--text-muted); font-size: 16px; cursor: pointer;
+            line-height: 1; transition: color 0.2s;
+        }
+        .delete-btn:hover { color: var(--neon-pink); }
+
+        .node-content { padding: 10px; }
+
+        /* Rows & Cells */
+        .row {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 8px; position: relative;
+        }
+        .row:last-child { margin-bottom: 0; }
+
+        .label { font-size: 13px; color: var(--neon-pink); width: 80px; text-shadow: 0 0 2px rgba(249,38,114,0.3); }
+
+        .input-wrapper {
+            display: flex; align-items: center; background: #272822;
+            border: 1px solid var(--border-color); border-radius: 4px;
+            padding: 2px 6px; flex-grow: 1; margin: 0 10px;
+        }
+
+        input {
+            background: transparent; border: none; color: var(--neon-yellow);
+            font-family: inherit; font-size: 13px; width: 100%; outline: none;
+        }
+        input:focus { color: var(--text-main); }
+        input[readonly] { color: var(--text-muted); }
+
+        /* Connection Ports */
+        .port {
+            width: 14px; height: 14px; background-color: var(--border-color);
+            border-radius: 50%; cursor: crosshair; position: absolute;
+            transition: transform 0.2s, background-color 0.2s; pointer-events: auto;
+        }
+        .port:hover { transform: scale(1.5); }
+        .port.in { left: -17px; border: 2px solid var(--bg-panel); }
+        .port.out { right: -17px; border: 2px solid var(--bg-panel); }
+
     </style>
 </head>
 <body>
 
-    <div class="container">
-        <header>
-            <h1>DataFlow</h1>
-            <div class="ticker" id="currency-ticker">Fetching live rates...</div>
-            <button id="theme-toggle">Dark Mode</button>
-        </header>
-
-        <div id="drop-zone">
-            <p>Drop a CSV file here to start editing</p>
-            <button>Browse Files</button>
-            <input type="file" id="file-input" accept=".csv">
-        </div>
-
-        <div class="dashboard" id="dashboard">
-            <div class="toolbar">
-                <div class="toolbar-group">
-                    <input type="text" id="search-input" placeholder="Search data...">
-                </div>
-                <div class="toolbar-group">
-                    <button id="add-row-btn">+ Row</button>
-                    <button id="add-col-btn">+ Column</button>
-                    <button id="add-formula-btn" class="primary">ƒx Computed Column</button>
-                    <button id="delete-row-btn" class="danger">Delete Selected</button>
-                </div>
-                <div class="toolbar-group">
-                    <button id="clear-btn">Close File</button>
-                    <button id="export-btn" class="primary">Export CSV</button>
-                </div>
-            </div>
-        </div>
-
-        <div class="table-container" id="table-container">
-            <table id="csv-table">
-                <thead id="csv-header"></thead>
-                <tbody id="csv-body"></tbody>
-                <tfoot id="csv-footer"></tfoot>
-            </table>
-        </div>
+    <div class="toolbar">
+        <span style="color: var(--text-muted); line-height: 26px; margin-right: 10px;"><b>DataFlow</b> | Pro</span>
+        <button onclick="addVariableNode()">+ Variable</button>
+        <button onclick="addTableNode()">+ Table</button>
+        <button onclick="addMathNode()" style="color: var(--neon-orange); border-color: var(--border-color);">+ Formula</button>
+        <div style="width: 20px;"></div>
+        <button class="action-btn" onclick="saveWorkspace()">Save</button>
+        <button class="action-btn" onclick="loadWorkspace()">Load</button>
+        <button class="action-btn" style="color: var(--neon-pink);" onclick="clearCanvas()">Clear</button>
     </div>
 
-    <!-- Formula Column Modal -->
-    <div class="modal-overlay" id="formula-modal">
-        <div class="modal">
-            <h3>Add Computed Column</h3>
-            <div class="help-text">
-                Use brackets for column names: <code>[QTY] * [PRICE]</code><br>
-                Use live currency rates: <code>[TOTAL] * fx.SEK</code><br>
-                Valid math operators: <code>+ - * / ( )</code>
-            </div>
-            <label>Column Name</label>
-            <input type="text" id="formula-col-name" placeholder="e.g. Total (SEK)">
-            <label>Formula Expression</label>
-            <input type="text" id="formula-expr" placeholder="e.g. ([QTY] * [PRICE]) * fx.SEK">
-            
-            <div class="modal-actions">
-                <button id="cancel-formula">Cancel</button>
-                <button id="apply-formula" class="primary">Apply</button>
-            </div>
+    <div id="viewport">
+        <div id="canvas">
+            <svg id="svg-canvas"></svg>
         </div>
     </div>
 
     <script>
-        // --- State ---
-        let originalData = [];
-        let headers = [];
-        let currentFileName = "";
-        let computedColumns = []; // Array of { name, formula }
-        let fx = {}; // Live currency rates
+        // --- State Management ---
+        const colors = ['#f92672', '#a6e22e', '#66d9ef', '#fd971f', '#ae81ff', '#e6db74'];
+        let connections = []; // { from: portId, to: portId, color: hex, index: number }
+        let wireCounter = 0;
+        let nodeIdCounter = 1;
+        let portIdCounter = 1;
+        
+        const canvas = document.getElementById('canvas');
+        const svg = document.getElementById('svg-canvas');
+        const viewport = document.getElementById('viewport');
 
-        // --- DOM Elements ---
-        const dropZone = document.getElementById('drop-zone');
-        const fileInput = document.getElementById('file-input');
-        const dashboard = document.getElementById('dashboard');
-        const tableContainer = document.getElementById('table-container');
-        const csvHeader = document.getElementById('csv-header');
-        const csvBody = document.getElementById('csv-body');
-        const csvFooter = document.getElementById('csv-footer');
-        const searchInput = document.getElementById('search-input');
-        const currencyTicker = document.getElementById('currency-ticker');
-        const formulaModal = document.getElementById('formula-modal');
+        // Panning State
+        let isPanning = false;
+        let panStartX = 0, panStartY = 0;
+        let panOffsetX = -500, panOffsetY = -500; // Start slightly offset
+        canvas.style.transform = `translate(${panOffsetX}px, ${panOffsetY}px)`;
 
-        // --- Init: Fetch Live Currency ---
-        async function fetchCurrency() {
-            try {
-                const res = await fetch('https://open.er-api.com/v6/latest/USD');
-                const data = await res.json();
-                fx = data.rates;
-                currencyTicker.innerText = `Live Rates (USD Base): SEK ${fx.SEK.toFixed(2)} | EUR ${fx.EUR.toFixed(2)} | GBP ${fx.GBP.toFixed(2)}`;
-            } catch (e) {
-                currencyTicker.innerText = "Currency API Offline";
-                fx = { SEK: 10.5, EUR: 0.9, GBP: 0.8 }; // Fallbacks
+        // Dragging & Wiring State
+        let isDraggingNode = false;
+        let dragTarget = null;
+        let nodeOffsetX = 0, nodeOffsetY = 0;
+
+        let isDrawingWire = false;
+        let activeStartPort = null;
+        let mouseX = 0, mouseY = 0;
+
+        // --- Event Listeners: Interaction ---
+        
+        // Right click to Pan
+        viewport.addEventListener('mousedown', (e) => {
+            if (e.button === 2) { // Right click
+                isPanning = true;
+                panStartX = e.clientX - panOffsetX;
+                panStartY = e.clientY - panOffsetY;
+                canvas.classList.add('panning');
+            }
+        });
+        window.addEventListener('contextmenu', e => e.preventDefault()); // prevent context menu
+
+        // Node & Wire Interactions
+        document.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return; // Only left click
+
+            // Start dragging Node
+            if (e.target.classList.contains('node-header') || e.target.closest('.node-header')) {
+                const header = e.target.classList.contains('node-header') ? e.target : e.target.closest('.node-header');
+                // Ignore delete button clicks
+                if (e.target.classList.contains('delete-btn')) return;
+                
+                isDraggingNode = true;
+                dragTarget = header.parentElement;
+                
+                // Calculate correct offset including pan
+                const rect = dragTarget.getBoundingClientRect();
+                nodeOffsetX = e.clientX - rect.left;
+                nodeOffsetY = e.clientY - rect.top;
+                dragTarget.style.zIndex = 100;
+            }
+            // Start drawing Wire
+            else if (e.target.classList.contains('port') && e.target.classList.contains('out')) {
+                isDrawingWire = true;
+                activeStartPort = e.target;
+                updateMousePos(e);
+                renderWires();
+            }
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (isPanning) {
+                panOffsetX = e.clientX - panStartX;
+                panOffsetY = e.clientY - panStartY;
+                canvas.style.transform = `translate(${panOffsetX}px, ${panOffsetY}px)`;
+            }
+            if (isDraggingNode && dragTarget) {
+                // Adjust for panning
+                const newLeft = (e.clientX - nodeOffsetX - panOffsetX);
+                const newTop = (e.clientY - nodeOffsetY - panOffsetY);
+                dragTarget.style.left = newLeft + 'px';
+                dragTarget.style.top = newTop + 'px';
+                renderWires();
+            }
+            if (isDrawingWire) {
+                updateMousePos(e);
+                renderWires();
+            }
+        });
+
+        document.addEventListener('mouseup', (e) => {
+            if (isPanning) {
+                isPanning = false;
+                canvas.classList.remove('panning');
+            }
+            if (isDraggingNode) {
+                isDraggingNode = false;
+                if(dragTarget) dragTarget.style.zIndex = 10;
+                dragTarget = null;
+            }
+            if (isDrawingWire) {
+                isDrawingWire = false;
+                if (e.target.classList.contains('port') && e.target.classList.contains('in')) {
+                    createConnection(activeStartPort, e.target);
+                }
+                activeStartPort = null;
+                renderWires();
+            }
+        });
+
+        // Delete Wire on Double Click
+        svg.addEventListener('dblclick', (e) => {
+            if (e.target.classList.contains('wire')) {
+                const idx = parseInt(e.target.getAttribute('data-index'));
+                const conn = connections.find(c => c.index === idx);
+                if (conn) {
+                    // Reset port color
+                    const targetPort = document.querySelector(`[data-id="${conn.to}"]`);
+                    if(targetPort) targetPort.style.backgroundColor = '';
+                    
+                    connections = connections.filter(c => c.index !== idx);
+                    renderWires();
+                    propagateGraph(); // Recalculate without wire
+                }
+            }
+        });
+
+        // --- Helper Functions ---
+        function updateMousePos(e) {
+            // Mouse position relative to the scaled/translated canvas
+            mouseX = e.clientX - panOffsetX;
+            mouseY = e.clientY - panOffsetY;
+        }
+
+        function createConnection(startPort, endPort) {
+            const fromId = startPort.getAttribute('data-id');
+            const toId = endPort.getAttribute('data-id');
+            
+            // Auto color assignment
+            const color = startPort.style.backgroundColor || colors[wireCounter % colors.length];
+            endPort.style.backgroundColor = color;
+            startPort.style.backgroundColor = color;
+
+            // Remove existing connection to this exact input port (inputs only take 1 wire)
+            connections = connections.filter(c => c.to !== toId);
+            connections.push({ from: fromId, to: toId, color: color, index: wireCounter++ });
+            
+            propagateGraph();
+        }
+
+        // --- Wire Rendering ---
+        function renderWires() {
+            svg.innerHTML = ''; 
+
+            connections.forEach(conn => {
+                const fromEl = document.querySelector(`[data-id="${conn.from}"]`);
+                const toEl = document.querySelector(`[data-id="${conn.to}"]`);
+                if(fromEl && toEl) drawCurve(fromEl, toEl, conn.color, conn.index);
+            });
+
+            if (isDrawingWire && activeStartPort) {
+                const rect = activeStartPort.getBoundingClientRect();
+                // Adjust for canvas pan
+                const startX = rect.left + rect.width / 2 - panOffsetX;
+                const startY = rect.top + rect.height / 2 - panOffsetY;
+                
+                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                const cp1x = startX + Math.abs(mouseX - startX) * 0.5;
+                const cp2x = mouseX - Math.abs(mouseX - startX) * 0.5;
+                
+                path.setAttribute('d', `M ${startX} ${startY} C ${cp1x} ${startY}, ${cp2x} ${mouseY}, ${mouseX} ${mouseY}`);
+                path.setAttribute('class', 'wire');
+                path.setAttribute('stroke', activeStartPort.style.backgroundColor || '#66d9ef');
+                svg.appendChild(path);
             }
         }
-        fetchCurrency();
 
-        // --- Theme Toggle ---
-        const themeToggle = document.getElementById('theme-toggle');
-        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-            document.body.setAttribute('data-theme', 'dark');
-            themeToggle.innerText = 'Light Mode';
+        function drawCurve(fromEl, toEl, color, index) {
+            const rect1 = fromEl.getBoundingClientRect();
+            const rect2 = toEl.getBoundingClientRect();
+            
+            const startX = rect1.left + rect1.width / 2 - panOffsetX;
+            const startY = rect1.top + rect1.height / 2 - panOffsetY;
+            const endX = rect2.left + rect2.width / 2 - panOffsetX;
+            const endY = rect2.top + rect2.height / 2 - panOffsetY;
+
+            const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            const cp1x = startX + Math.abs(endX - startX) * 0.5;
+            const cp2x = endX - Math.abs(endX - startX) * 0.5;
+
+            path.setAttribute('d', `M ${startX} ${startY} C ${cp1x} ${startY}, ${cp2x} ${endY}, ${endX} ${endY}`);
+            path.setAttribute('class', 'wire');
+            path.setAttribute('stroke', color);
+            path.setAttribute('data-index', index);
+            
+            // Title for hover tooltip
+            const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+            title.textContent = "Double-click to delete";
+            path.appendChild(title);
+            
+            svg.appendChild(path);
         }
-        themeToggle.addEventListener('click', () => {
-            const isDark = document.body.getAttribute('data-theme') === 'dark';
-            document.body.setAttribute('data-theme', isDark ? 'light' : 'dark');
-            themeToggle.innerText = isDark ? 'Dark Mode' : 'Light Mode';
-        });
 
-        // --- File Upload ---
-        dropZone.addEventListener('click', () => fileInput.click());
-        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
-        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-        dropZone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            dropZone.classList.remove('dragover');
-            if (e.dataTransfer.files.length) processFile(e.dataTransfer.files[0]);
-        });
-        fileInput.addEventListener('change', (e) => { if (e.target.files.length) processFile(e.target.files[0]); });
+        // --- Node Factories ---
+        function deleteNode(nodeId) {
+            const node = document.getElementById(nodeId);
+            if(!node) return;
+            
+            // Remove connections attached to this node
+            const ports = node.querySelectorAll('.port');
+            ports.forEach(p => {
+                const pid = p.getAttribute('data-id');
+                connections = connections.filter(c => c.from !== pid && c.to !== pid);
+            });
+            
+            node.remove();
+            renderWires();
+            propagateGraph();
+        }
 
-        function processFile(file) {
-            currentFileName = file.name;
-            Papa.parse(file, {
-                header: true, skipEmptyLines: true,
-                complete: function(results) {
-                    // Give each row a unique ID and a selected state
-                    originalData = results.data.map((row, i) => ({ ...row, _uid: i, _selected: false }));
-                    headers = results.meta.fields;
-                    updateUI();
+        function buildNodeFrame(type, title, titleColor, content) {
+            const id = `node-${nodeIdCounter++}`;
+            const x = -panOffsetX + 300 + Math.random() * 200;
+            const y = -panOffsetY + 200 + Math.random() * 200;
+            
+            const node = document.createElement('div');
+            node.className = 'node';
+            node.id = id;
+            node.style.left = `${x}px`;
+            node.style.top = `${y}px`;
+            node.setAttribute('data-type', type);
+            
+            node.innerHTML = `
+                <div class="node-header">
+                    <span><span style="color: ${titleColor};">${type}</span> ${title}</span>
+                    <span class="delete-btn" onclick="deleteNode('${id}')">×</span>
+                </div>
+                <div class="node-content">${content}</div>
+            `;
+            canvas.appendChild(node);
+            return id;
+        }
+
+        function addVariableNode(name = "Value", value = "0", pOut = null) {
+            const pId = pOut || `out-${portIdCounter++}`;
+            const content = `
+                <div class="row">
+                    <div class="label" style="color:var(--neon-blue)">Data</div>
+                    <div class="input-wrapper">
+                        <input type="text" value="${value}" oninput="propagateGraph()">
+                    </div>
+                    <div class="port out" data-id="${pId}"></div>
+                </div>`;
+            buildNodeFrame('var', name, 'var(--neon-purple)', content);
+        }
+
+        function addTableNode() {
+            const pIn1 = `in-${portIdCounter++}`; const pOut1 = `out-${portIdCounter++}`;
+            const pIn2 = `in-${portIdCounter++}`; const pOut2 = `out-${portIdCounter++}`;
+            const content = `
+                <div class="row">
+                    <div class="port in" data-id="${pIn1}"></div>
+                    <div class="label">Item</div>
+                    <div class="input-wrapper"><input type="text" value="Engine Part" oninput="propagateGraph()"></div>
+                    <div class="port out" data-id="${pOut1}"></div>
+                </div>
+                <div class="row">
+                    <div class="port in" data-id="${pIn2}"></div>
+                    <div class="label">Amount</div>
+                    <div class="input-wrapper"><input type="text" value="100" oninput="propagateGraph()"></div>
+                    <div class="port out" data-id="${pOut2}"></div>
+                </div>`;
+            buildNodeFrame('table', `Sheet_${Math.floor(Math.random()*100)}`, 'var(--neon-pink)', content);
+        }
+
+        function addMathNode() {
+            const pInA = `in-${portIdCounter++}`; 
+            const pInB = `in-${portIdCounter++}`;
+            const pOut = `out-${portIdCounter++}`;
+            const content = `
+                <div class="row">
+                    <div class="port in" data-id="${pInA}"></div>
+                    <div class="label" style="color:var(--neon-orange)">Input A</div>
+                    <div class="input-wrapper"><input type="text" data-var="A" value="0" readonly></div>
+                </div>
+                <div class="row">
+                    <div class="port in" data-id="${pInB}"></div>
+                    <div class="label" style="color:var(--neon-orange)">Input B</div>
+                    <div class="input-wrapper"><input type="text" data-var="B" value="0" readonly></div>
+                </div>
+                <div class="row" style="margin-top: 15px; border-top: 1px solid var(--border-color); padding-top: 10px;">
+                    <div class="label" style="color:var(--neon-green); width:60px">f(x) =</div>
+                    <div class="input-wrapper" style="width: 140px;">
+                        <input type="text" class="formula-input" value="A * B" placeholder="e.g. A + B" oninput="propagateGraph()">
+                    </div>
+                </div>
+                <div class="row" style="margin-top: 10px;">
+                    <div class="label" style="color:var(--text-main)">Result</div>
+                    <div class="input-wrapper"><input type="text" class="formula-result" value="0" readonly></div>
+                    <div class="port out" data-id="${pOut}" style="background-color: var(--neon-green)"></div>
+                </div>`;
+            buildNodeFrame('math', 'Formula', 'var(--neon-orange)', content);
+        }
+
+        // --- Core Reactive Engine ---
+        function propagateGraph() {
+            // 1. Pass data across all wires (Output -> Input)
+            connections.forEach(conn => {
+                const fromPort = document.querySelector(`[data-id="${conn.from}"]`);
+                const toPort = document.querySelector(`[data-id="${conn.to}"]`);
+                if(fromPort && toPort) {
+                    const fromInput = fromPort.parentElement.querySelector('input');
+                    const toInput = toPort.parentElement.querySelector('input');
+                    if(fromInput && toInput) {
+                        toInput.value = fromInput.value;
+                    }
+                }
+            });
+
+            // 2. Evaluate Math Nodes internally
+            const mathNodes = document.querySelectorAll('.node[data-type="math"]');
+            mathNodes.forEach(node => {
+                const inputA = parseFloat(node.querySelector('[data-var="A"]').value) || 0;
+                const inputB = parseFloat(node.querySelector('[data-var="B"]').value) || 0;
+                const formula = node.querySelector('.formula-input').value;
+                const resultBox = node.querySelector('.formula-result');
+
+                try {
+                    // Safe evaluation using scoped variables A and B
+                    const calc = new Function('A', 'B', `return ${formula}`);
+                    const res = calc(inputA, inputB);
+                    resultBox.value = Number.isInteger(res) ? res : res.toFixed(2);
+                } catch(e) {
+                    resultBox.value = "ERR";
+                }
+            });
+
+            // 3. Since a math node evaluation changes its output, we need to pass data again
+            // In a production app this would use Topological Sort. 
+            // For this UI demo, a quick 2-pass update covers most immediate chains.
+            connections.forEach(conn => {
+                const fromPort = document.querySelector(`[data-id="${conn.from}"]`);
+                const toPort = document.querySelector(`[data-id="${conn.to}"]`);
+                if(fromPort && toPort && fromPort.closest('.node').getAttribute('data-type') === 'math') {
+                    const fromInput = fromPort.parentElement.querySelector('input');
+                    const toInput = toPort.parentElement.querySelector('input');
+                    if(fromInput && toInput) toInput.value = fromInput.value;
                 }
             });
         }
 
-        // --- Main Render Logic ---
-        function updateUI() {
-            dropZone.style.display = 'none';
-            dashboard.style.display = 'flex';
-            tableContainer.style.display = 'block';
-            renderTable();
-        }
-
-        function getDisplayData() {
-            const query = searchInput.value.toLowerCase();
-            let data = originalData;
-            
-            // Re-calculate formulas before displaying
-            data.forEach(row => {
-                computedColumns.forEach(comp => {
-                    row[comp.name] = evaluateFormula(comp.formula, row);
+        // --- Save / Load Logic ---
+        function saveWorkspace() {
+            const nodes = [];
+            document.querySelectorAll('.node').forEach(node => {
+                // Save raw HTML state of nodes to easily reconstruct
+                nodes.push({
+                    id: node.id,
+                    left: node.style.left,
+                    top: node.style.top,
+                    html: node.innerHTML,
+                    type: node.getAttribute('data-type')
                 });
-            });
-
-            // Filter
-            if (query) {
-                data = data.filter(row => headers.some(field => String(row[field]).toLowerCase().includes(query)));
-            }
-            return data;
-        }
-
-        function renderTable() {
-            const displayData = getDisplayData();
-            
-            // Generate Headers
-            csvHeader.innerHTML = '';
-            const trHead = document.createElement('tr');
-            
-            // Checkbox Header
-            const thCheck = document.createElement('th');
-            thCheck.innerHTML = `<input type="checkbox" id="select-all">`;
-            trHead.appendChild(thCheck);
-
-            headers.forEach(field => {
-                const th = document.createElement('th');
-                th.innerText = field;
-                trHead.appendChild(th);
-            });
-            csvHeader.appendChild(trHead);
-
-            // Generate Body
-            csvBody.innerHTML = '';
-            displayData.forEach(row => {
-                const tr = document.createElement('tr');
                 
-                // Row Checkbox
-                const tdCheck = document.createElement('td');
-                tdCheck.innerHTML = `<input type="checkbox" class="row-checkbox" data-uid="${row._uid}" ${row._selected ? 'checked' : ''}>`;
-                tr.appendChild(tdCheck);
-
-                headers.forEach(field => {
-                    const td = document.createElement('td');
-                    td.innerText = row[field] || '';
-                    
-                    // Allow editing for standard columns
-                    if (!computedColumns.some(c => c.name === field)) {
-                        td.setAttribute('contenteditable', 'true');
-                        td.addEventListener('blur', (e) => {
-                            const newVal = e.target.innerText.trim();
-                            if (row[field] !== newVal) {
-                                row[field] = newVal;
-                                renderTable(); // re-render to update formulas & footer
-                            }
-                        });
-                    } else {
-                        // Formula columns are locked, distinct color
-                        td.style.color = "var(--accent-color)";
-                        td.style.fontWeight = "500";
-                    }
-                    tr.appendChild(td);
+                // Update HTML string to retain current input values
+                const inputs = node.querySelectorAll('input');
+                inputs.forEach((inp, idx) => {
+                    inp.setAttribute('value', inp.value);
                 });
-                csvBody.appendChild(tr);
+                nodes[nodes.length-1].html = node.innerHTML; 
             });
 
-            // Handle Checkbox Events
-            document.getElementById('select-all').addEventListener('change', (e) => {
-                const checked = e.target.checked;
-                displayData.forEach(r => r._selected = checked);
-                renderTable();
-            });
-            document.querySelectorAll('.row-checkbox').forEach(cb => {
-                cb.addEventListener('change', (e) => {
-                    const uid = parseInt(e.target.getAttribute('data-uid'));
-                    const targetRow = originalData.find(r => r._uid === uid);
-                    if(targetRow) targetRow._selected = e.target.checked;
-                });
-            });
-
-            renderFooter(displayData);
+            const data = {
+                nodes: nodes,
+                connections: connections,
+                counters: { wire: wireCounter, node: nodeIdCounter, port: portIdCounter },
+                pan: { x: panOffsetX, y: panOffsetY }
+            };
+            localStorage.setItem('visual_data_save', JSON.stringify(data));
+            alert('Workspace Saved!');
         }
 
-        // --- Summary Footer Logic ---
-        function renderFooter(data) {
-            csvFooter.innerHTML = '';
-            if(data.length === 0) return;
+        function loadWorkspace() {
+            const raw = localStorage.getItem('visual_data_save');
+            if(!raw) return alert('No saved workspace found.');
+            
+            clearCanvas(false);
+            const data = JSON.parse(raw);
+            
+            // Restore Counters & Pan
+            wireCounter = data.counters.wire;
+            nodeIdCounter = data.counters.node;
+            portIdCounter = data.counters.port;
+            panOffsetX = data.pan.x;
+            panOffsetY = data.pan.y;
+            canvas.style.transform = `translate(${panOffsetX}px, ${panOffsetY}px)`;
 
-            const trSum = document.createElement('tr');
-            trSum.appendChild(document.createElement('th')); // spacer for checkbox
-
-            headers.forEach(field => {
-                const th = document.createElement('th');
+            // Restore Nodes
+            data.nodes.forEach(n => {
+                const node = document.createElement('div');
+                node.className = 'node';
+                node.id = n.id;
+                node.style.left = n.left;
+                node.style.top = n.top;
+                node.setAttribute('data-type', n.type);
+                node.innerHTML = n.html;
                 
-                // Determine if column is numeric
-                let isNumeric = false;
-                let sum = 0;
-                let validCount = 0;
-
-                data.forEach(row => {
-                    const val = parseFloat(row[field]);
-                    if (!isNaN(val)) {
-                        isNumeric = true;
-                        sum += val;
-                        validCount++;
-                    }
+                // Re-bind input events that get lost in innerHTML transfer
+                node.querySelectorAll('input:not([readonly])').forEach(inp => {
+                    inp.addEventListener('input', propagateGraph);
                 });
+                
+                canvas.appendChild(node);
+            });
 
-                if (isNumeric && validCount > 0) {
-                    const avg = sum / validCount;
-                    // Auto-format large numbers or decimals
-                    let displaySum = Number.isInteger(sum) ? sum : sum.toFixed(2);
-                    let displayAvg = Number.isInteger(avg) ? avg : avg.toFixed(2);
-                    
-                    th.innerHTML = `<span style="font-size:11px; color:var(--text-muted); display:block;">Sum / Avg</span>
-                                    ${displaySum} <br> <span style="font-weight:normal; font-size:12px;">(${displayAvg})</span>`;
-                } else {
-                    th.innerText = field === headers[0] ? "Totals:" : "-";
+            // Restore Connections
+            connections = data.connections;
+            
+            // Fix port background colors based on connections
+            connections.forEach(c => {
+                const fromPort = document.querySelector(`[data-id="${c.from}"]`);
+                const toPort = document.querySelector(`[data-id="${c.to}"]`);
+                if(fromPort && toPort) {
+                    toPort.style.backgroundColor = c.color;
+                    fromPort.style.backgroundColor = c.color;
                 }
-                trSum.appendChild(th);
             });
-            csvFooter.appendChild(trSum);
+
+            renderWires();
+            propagateGraph();
         }
 
-        // --- Formula Engine ---
-        function evaluateFormula(expr, row) {
-            try {
-                // 1. Replace [COLUMN] with the actual numeric value from the row
-                let parsedExpr = expr.replace(/\[(.*?)\]/g, (match, colName) => {
-                    let val = parseFloat(row[colName]);
-                    return isNaN(val) ? 0 : val;
-                });
-
-                // 2. Safe Evaluation using Function constructor
-                // We pass in 'fx' object so users can type fx.SEK in their formulas
-                const calc = new Function('fx', `return ${parsedExpr}`);
-                const result = calc(fx);
-                
-                // Format to 2 decimal places if it's a float
-                return Number.isInteger(result) ? result : parseFloat(result).toFixed(2);
-            } catch (e) {
-                return "#ERROR!";
-            }
+        function clearCanvas(ask = true) {
+            if(ask && !confirm("Clear entire workspace?")) return;
+            document.querySelectorAll('.node').forEach(n => n.remove());
+            connections = [];
+            svg.innerHTML = '';
         }
 
-        // --- Toolbar Actions ---
-        searchInput.addEventListener('input', renderTable);
+        // --- Initialize Demo Setup ---
+        window.onload = () => {
+            // Setup an initial demo scene
+            addVariableNode("Live SEK", "10.52", "out-1");
+            addTableNode(); // Will generate in-2, out-2, in-3, out-3
+            addMathNode();  // Will generate in-4, in-5, out-4
 
-        document.getElementById('add-row-btn').addEventListener('click', () => {
-            const newRow = { _uid: Date.now(), _selected: false };
-            headers.forEach(h => newRow[h] = "");
-            originalData.unshift(newRow); // Add to top
-            renderTable();
-        });
-
-        document.getElementById('add-col-btn').addEventListener('click', () => {
-            const colName = prompt("Enter new column name:");
-            if (colName && !headers.includes(colName)) {
-                headers.push(colName);
-                originalData.forEach(row => row[colName] = "");
-                renderTable();
-            }
-        });
-
-        document.getElementById('delete-row-btn').addEventListener('click', () => {
-            originalData = originalData.filter(row => !row._selected);
-            renderTable();
-        });
-
-        // Formula Modal Flow
-        document.getElementById('add-formula-btn').addEventListener('click', () => formulaModal.style.display = 'flex');
-        document.getElementById('cancel-formula').addEventListener('click', () => formulaModal.style.display = 'none');
-        document.getElementById('apply-formula').addEventListener('click', () => {
-            const name = document.getElementById('formula-col-name').value.trim();
-            const expr = document.getElementById('formula-expr').value.trim();
-            if (name && expr) {
-                if (!headers.includes(name)) headers.push(name);
-                computedColumns.push({ name: name, formula: expr });
-                formulaModal.style.display = 'none';
+            setTimeout(() => {
+                // Arrange them nicely
+                document.getElementById('node-1').style.left = '600px';
+                document.getElementById('node-1').style.top = '600px';
                 
-                // Reset inputs
-                document.getElementById('formula-col-name').value = '';
-                document.getElementById('formula-expr').value = '';
+                const table = document.getElementById('node-2');
+                table.style.left = '900px'; table.style.top = '550px';
+                table.querySelector('.label').innerText = "Price USD";
+                table.querySelector('input').value = "443.16";
                 
-                renderTable();
-            }
-        });
+                const tableOutId = table.querySelectorAll('.out')[0].getAttribute('data-id');
 
-        // --- Clear & Export ---
-        document.getElementById('clear-btn').addEventListener('click', () => location.reload());
+                const math = document.getElementById('node-3');
+                math.style.left = '1250px'; math.style.top = '550px';
+                const mathInA = math.querySelectorAll('.in')[0].getAttribute('data-id');
+                const mathInB = math.querySelectorAll('.in')[1].getAttribute('data-id');
 
-        document.getElementById('export-btn').addEventListener('click', () => {
-            const dataToExport = getDisplayData().map(row => {
-                const cleanRow = { ...row };
-                delete cleanRow._uid;
-                delete cleanRow._selected;
-                return cleanRow;
-            });
-            const csv = Papa.unparse(dataToExport);
-            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.setAttribute('download', (currentFileName || 'export').replace('.csv', '') + '_computed.csv');
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        });
+                // Connect them: Variable (SEK) -> Math (In A)
+                connections.push({ from: 'out-1', to: mathInA, color: '#a6e22e', index: wireCounter++ });
+                // Connect them: Table (Price) -> Math (In B)
+                connections.push({ from: tableOutId, to: mathInB, color: '#66d9ef', index: wireCounter++ });
+                
+                // Colorize ports
+                document.querySelector(`[data-id="${mathInA}"]`).style.backgroundColor = '#a6e22e';
+                document.querySelector(`[data-id="out-1"]`).style.backgroundColor = '#a6e22e';
+                document.querySelector(`[data-id="${mathInB}"]`).style.backgroundColor = '#66d9ef';
+                document.querySelector(`[data-id="${tableOutId}"]`).style.backgroundColor = '#66d9ef';
+
+                renderWires();
+                propagateGraph();
+                
+                // Fetch live API data to prove reactivity
+                fetch('https://open.er-api.com/v6/latest/USD')
+                    .then(r => r.json())
+                    .then(d => {
+                        const sekNodeInput = document.getElementById('node-1').querySelector('input');
+                        sekNodeInput.value = d.rates.SEK.toFixed(2);
+                        propagateGraph();
+                    }).catch(e => console.log("API offline, using mock data."));
+            }, 100);
+        };
     </script>
 </body>
 </html>
