@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DataFlow | Pro CSV Studio</title>
+    <!-- PapaParse for parsing CSV files -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <style>
+        /* Apple-style UI Variables */
+        :root {
+            --bg-color: #f5f5f7;
+            --surface-color: rgba(255, 255, 255, 0.75);
+            --modal-bg: rgba(255, 255, 255, 0.9);
+            --text-main: #1d1d1f;
+            --text-muted: #86868b;
+            --border-color: rgba(0, 0, 0, 0.1);
+            --accent-color: #0071e3;
+            --accent-hover: #0077ED;
+            --danger-color: #ff3b30;
+            --table-header-bg: rgba(255, 255, 255, 0.95);
+            --table-row-hover: rgba(0, 0, 0, 0.03);
+            --input-bg: rgba(0, 0, 0, 0.04);
+            --glass-blur: blur(24px);
+            --shadow: 0 8px 32px rgba(0,0,0,0.08);
+            --radius: 14px;
+        }
+
+        /* Dark Mode Variables */
+        [data-theme="dark"] {
+            --bg-color: #000000;
+            --surface-color: rgba(28, 28, 30, 0.75);
+            --modal-bg: rgba(44, 44, 46, 0.95);
+            --text-main: #f5f5f7;
+            --text-muted: #98989d;
+            --border-color: rgba(255, 255, 255, 0.1);
+            --accent-color: #0a84ff;
+            --accent-hover: #409cff;
+            --danger-color: #ff453a;
+            --table-header-bg: rgba(28, 28, 30, 0.95);
+            --table-row-hover: rgba(255, 255, 255, 0.06);
+            --input-bg: rgba(255, 255, 255, 0.08);
+            --shadow: 0 8px 32px rgba(255,255,255,0.03);
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, Helvetica, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            padding: 2rem;
+            min-height: 100vh;
+            transition: background-color 0.4s, color 0.4s;
+        }
+
+        .container { max-width: 1400px; margin: 0 auto; }
+
+        /* Header & Ticker */
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+        h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; }
+        .ticker { font-size: 13px; color: var(--text-muted); font-weight: 500; background: var(--surface-color); padding: 6px 16px; border-radius: 20px; border: 1px solid var(--border-color); backdrop-filter: var(--glass-blur); }
+
+        /* Buttons */
+        button {
+            background-color: var(--surface-color); color: var(--text-main);
+            border: 1px solid var(--border-color); padding: 8px 18px;
+            border-radius: 20px; font-size: 14px; font-weight: 500;
+            cursor: pointer; backdrop-filter: var(--glass-blur);
+            -webkit-backdrop-filter: var(--glass-blur); transition: all 0.2s;
+        }
+        button:hover { background-color: var(--table-row-hover); }
+        button.primary { background-color: var(--accent-color); color: white; border: none; box-shadow: 0 2px 12px rgba(0, 113, 227, 0.3); }
+        button.primary:hover { background-color: var(--accent-hover); }
+        button.danger { color: var(--danger-color); }
+
+        /* Inputs */
+        input[type="text"] {
+            padding: 10px 16px; border-radius: 20px; border: 1px solid var(--border-color);
+            background-color: var(--input-bg); color: var(--text-main);
+            font-size: 14px; outline: none; transition: border-color 0.2s;
+        }
+        input[type="text"]:focus { border-color: var(--accent-color); }
+
+        /* Drag & Drop */
+        #drop-zone {
+            background-color: var(--surface-color); border: 2px dashed var(--border-color);
+            border-radius: var(--radius); padding: 80px 20px; text-align: center;
+            cursor: pointer; backdrop-filter: var(--glass-blur); margin-bottom: 2rem;
+            transition: border-color 0.3s, background-color 0.3s;
+        }
+        #drop-zone.dragover { border-color: var(--accent-color); background-color: var(--table-row-hover); }
+        #drop-zone p { color: var(--text-muted); margin-bottom: 16px; font-size: 16px; }
+        #file-input { display: none; }
+
+        /* Dashboard & Toolbar */
+        .dashboard { display: none; flex-direction: column; gap: 1rem; margin-bottom: 1rem; }
+        .toolbar { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 1rem; align-items: center; }
+        .toolbar-group { display: flex; gap: 8px; }
+
+        /* Table */
+        .table-container {
+            display: none; background-color: var(--surface-color); border-radius: var(--radius);
+            overflow-x: auto; overflow-y: auto; max-height: 65vh; border: 1px solid var(--border-color);
+            backdrop-filter: var(--glass-blur); box-shadow: var(--shadow);
+        }
+        table { width: 100%; border-collapse: collapse; text-align: left; font-size: 14px; }
+        th, td { padding: 12px 16px; border-bottom: 1px solid var(--border-color); white-space: nowrap; }
+        
+        /* Sticky Headers & Footers */
+        th { background-color: var(--table-header-bg); color: var(--text-muted); font-weight: 600; position: sticky; top: 0; z-index: 10; user-select: none; backdrop-filter: var(--glass-blur); }
+        tfoot th { position: sticky; bottom: 0; background-color: var(--table-header-bg); border-top: 2px solid var(--border-color); border-bottom: none; color: var(--text-main); }
+        
+        tr:hover td { background-color: var(--table-row-hover); }
+        td[contenteditable="true"]:focus { background-color: var(--input-bg); box-shadow: 0 0 0 2px var(--accent-color) inset; outline: none; border-radius: 4px; }
+        
+        /* Formula Modal */
+        .modal-overlay {
+            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.4); z-index: 100; justify-content: center; align-items: center;
+            backdrop-filter: blur(5px);
+        }
+        .modal {
+            background: var(--modal-bg); border-radius: 20px; padding: 24px; width: 400px;
+            box-shadow: var(--shadow); border: 1px solid var(--border-color);
+            backdrop-filter: var(--glass-blur);
+        }
+        .modal h3 { margin-bottom: 16px; }
+        .modal label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 6px; font-weight: 600; }
+        .modal input { width: 100%; margin-bottom: 16px; }
+        .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+        .help-text { font-size: 12px; color: var(--text-muted); margin-bottom: 16px; background: var(--input-bg); padding: 10px; border-radius: 8px; }
+        .help-text code { color: var(--accent-color); font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <header>
+            <h1>DataFlow</h1>
+            <div class="ticker" id="currency-ticker">Fetching live rates...</div>
+            <button id="theme-toggle">Dark Mode</button>
+        </header>
+
+        <div id="drop-zone">
+            <p>Drop a CSV file here to start editing</p>
+            <button>Browse Files</button>
+            <input type="file" id="file-input" accept=".csv">
+        </div>
+
+        <div class="dashboard" id="dashboard">
+            <div class="toolbar">
+                <div class="toolbar-group">
+                    <input type="text" id="search-input" placeholder="Search data...">
+                </div>
+                <div class="toolbar-group">
+                    <button id="add-row-btn">+ Row</button>
+                    <button id="add-col-btn">+ Column</button>
+                    <button id="add-formula-btn" class="primary">ƒx Computed Column</button>
+                    <button id="delete-row-btn" class="danger">Delete Selected</button>
+                </div>
+                <div class="toolbar-group">
+                    <button id="clear-btn">Close File</button>
+                    <button id="export-btn" class="primary">Export CSV</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="table-container" id="table-container">
+            <table id="csv-table">
+                <thead id="csv-header"></thead>
+                <tbody id="csv-body"></tbody>
+                <tfoot id="csv-footer"></tfoot>
+            </table>
+        </div>
+    </div>
+
+    <!-- Formula Column Modal -->
+    <div class="modal-overlay" id="formula-modal">
+        <div class="modal">
+            <h3>Add Computed Column</h3>
+            <div class="help-text">
+                Use brackets for column names: <code>[QTY] * [PRICE]</code><br>
+                Use live currency rates: <code>[TOTAL] * fx.SEK</code><br>
+                Valid math operators: <code>+ - * / ( )</code>
+            </div>
+            <label>Column Name</label>
+            <input type="text" id="formula-col-name" placeholder="e.g. Total (SEK)">
+            <label>Formula Expression</label>
+            <input type="text" id="formula-expr" placeholder="e.g. ([QTY] * [PRICE]) * fx.SEK">
+            
+            <div class="modal-actions">
+                <button id="cancel-formula">Cancel</button>
+                <button id="apply-formula" class="primary">Apply</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- State ---
+        let originalData = [];
+        let headers = [];
+        let currentFileName = "";
+        let computedColumns = []; // Array of { name, formula }
+        let fx = {}; // Live currency rates
+
+        // --- DOM Elements ---
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const dashboard = document.getElementById('dashboard');
+        const tableContainer = document.getElementById('table-container');
+        const csvHeader = document.getElementById('csv-header');
+        const csvBody = document.getElementById('csv-body');
+        const csvFooter = document.getElementById('csv-footer');
+        const searchInput = document.getElementById('search-input');
+        const currencyTicker = document.getElementById('currency-ticker');
+        const formulaModal = document.getElementById('formula-modal');
+
+        // --- Init: Fetch Live Currency ---
+        async function fetchCurrency() {
+            try {
+                const res = await fetch('https://open.er-api.com/v6/latest/USD');
+                const data = await res.json();
+                fx = data.rates;
+                currencyTicker.innerText = `Live Rates (USD Base): SEK ${fx.SEK.toFixed(2)} | EUR ${fx.EUR.toFixed(2)} | GBP ${fx.GBP.toFixed(2)}`;
+            } catch (e) {
+                currencyTicker.innerText = "Currency API Offline";
+                fx = { SEK: 10.5, EUR: 0.9, GBP: 0.8 }; // Fallbacks
+            }
+        }
+        fetchCurrency();
+
+        // --- Theme Toggle ---
+        const themeToggle = document.getElementById('theme-toggle');
+        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            document.body.setAttribute('data-theme', 'dark');
+            themeToggle.innerText = 'Light Mode';
+        }
+        themeToggle.addEventListener('click', () => {
+            const isDark = document.body.getAttribute('data-theme') === 'dark';
+            document.body.setAttribute('data-theme', isDark ? 'light' : 'dark');
+            themeToggle.innerText = isDark ? 'Dark Mode' : 'Light Mode';
+        });
+
+        // --- File Upload ---
+        dropZone.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) processFile(e.dataTransfer.files[0]);
+        });
+        fileInput.addEventListener('change', (e) => { if (e.target.files.length) processFile(e.target.files[0]); });
+
+        function processFile(file) {
+            currentFileName = file.name;
+            Papa.parse(file, {
+                header: true, skipEmptyLines: true,
+                complete: function(results) {
+                    // Give each row a unique ID and a selected state
+                    originalData = results.data.map((row, i) => ({ ...row, _uid: i, _selected: false }));
+                    headers = results.meta.fields;
+                    updateUI();
+                }
+            });
+        }
+
+        // --- Main Render Logic ---
+        function updateUI() {
+            dropZone.style.display = 'none';
+            dashboard.style.display = 'flex';
+            tableContainer.style.display = 'block';
+            renderTable();
+        }
+
+        function getDisplayData() {
+            const query = searchInput.value.toLowerCase();
+            let data = originalData;
+            
+            // Re-calculate formulas before displaying
+            data.forEach(row => {
+                computedColumns.forEach(comp => {
+                    row[comp.name] = evaluateFormula(comp.formula, row);
+                });
+            });
+
+            // Filter
+            if (query) {
+                data = data.filter(row => headers.some(field => String(row[field]).toLowerCase().includes(query)));
+            }
+            return data;
+        }
+
+        function renderTable() {
+            const displayData = getDisplayData();
+            
+            // Generate Headers
+            csvHeader.innerHTML = '';
+            const trHead = document.createElement('tr');
+            
+            // Checkbox Header
+            const thCheck = document.createElement('th');
+            thCheck.innerHTML = `<input type="checkbox" id="select-all">`;
+            trHead.appendChild(thCheck);
+
+            headers.forEach(field => {
+                const th = document.createElement('th');
+                th.innerText = field;
+                trHead.appendChild(th);
+            });
+            csvHeader.appendChild(trHead);
+
+            // Generate Body
+            csvBody.innerHTML = '';
+            displayData.forEach(row => {
+                const tr = document.createElement('tr');
+                
+                // Row Checkbox
+                const tdCheck = document.createElement('td');
+                tdCheck.innerHTML = `<input type="checkbox" class="row-checkbox" data-uid="${row._uid}" ${row._selected ? 'checked' : ''}>`;
+                tr.appendChild(tdCheck);
+
+                headers.forEach(field => {
+                    const td = document.createElement('td');
+                    td.innerText = row[field] || '';
+                    
+                    // Allow editing for standard columns
+                    if (!computedColumns.some(c => c.name === field)) {
+                        td.setAttribute('contenteditable', 'true');
+                        td.addEventListener('blur', (e) => {
+                            const newVal = e.target.innerText.trim();
+                            if (row[field] !== newVal) {
+                                row[field] = newVal;
+                                renderTable(); // re-render to update formulas & footer
+                            }
+                        });
+                    } else {
+                        // Formula columns are locked, distinct color
+                        td.style.color = "var(--accent-color)";
+                        td.style.fontWeight = "500";
+                    }
+                    tr.appendChild(td);
+                });
+                csvBody.appendChild(tr);
+            });
+
+            // Handle Checkbox Events
+            document.getElementById('select-all').addEventListener('change', (e) => {
+                const checked = e.target.checked;
+                displayData.forEach(r => r._selected = checked);
+                renderTable();
+            });
+            document.querySelectorAll('.row-checkbox').forEach(cb => {
+                cb.addEventListener('change', (e) => {
+                    const uid = parseInt(e.target.getAttribute('data-uid'));
+                    const targetRow = originalData.find(r => r._uid === uid);
+                    if(targetRow) targetRow._selected = e.target.checked;
+                });
+            });
+
+            renderFooter(displayData);
+        }
+
+        // --- Summary Footer Logic ---
+        function renderFooter(data) {
+            csvFooter.innerHTML = '';
+            if(data.length === 0) return;
+
+            const trSum = document.createElement('tr');
+            trSum.appendChild(document.createElement('th')); // spacer for checkbox
+
+            headers.forEach(field => {
+                const th = document.createElement('th');
+                
+                // Determine if column is numeric
+                let isNumeric = false;
+                let sum = 0;
+                let validCount = 0;
+
+                data.forEach(row => {
+                    const val = parseFloat(row[field]);
+                    if (!isNaN(val)) {
+                        isNumeric = true;
+                        sum += val;
+                        validCount++;
+                    }
+                });
+
+                if (isNumeric && validCount > 0) {
+                    const avg = sum / validCount;
+                    // Auto-format large numbers or decimals
+                    let displaySum = Number.isInteger(sum) ? sum : sum.toFixed(2);
+                    let displayAvg = Number.isInteger(avg) ? avg : avg.toFixed(2);
+                    
+                    th.innerHTML = `<span style="font-size:11px; color:var(--text-muted); display:block;">Sum / Avg</span>
+                                    ${displaySum} <br> <span style="font-weight:normal; font-size:12px;">(${displayAvg})</span>`;
+                } else {
+                    th.innerText = field === headers[0] ? "Totals:" : "-";
+                }
+                trSum.appendChild(th);
+            });
+            csvFooter.appendChild(trSum);
+        }
+
+        // --- Formula Engine ---
+        function evaluateFormula(expr, row) {
+            try {
+                // 1. Replace [COLUMN] with the actual numeric value from the row
+                let parsedExpr = expr.replace(/\[(.*?)\]/g, (match, colName) => {
+                    let val = parseFloat(row[colName]);
+                    return isNaN(val) ? 0 : val;
+                });
+
+                // 2. Safe Evaluation using Function constructor
+                // We pass in 'fx' object so users can type fx.SEK in their formulas
+                const calc = new Function('fx', `return ${parsedExpr}`);
+                const result = calc(fx);
+                
+                // Format to 2 decimal places if it's a float
+                return Number.isInteger(result) ? result : parseFloat(result).toFixed(2);
+            } catch (e) {
+                return "#ERROR!";
+            }
+        }
+
+        // --- Toolbar Actions ---
+        searchInput.addEventListener('input', renderTable);
+
+        document.getElementById('add-row-btn').addEventListener('click', () => {
+            const newRow = { _uid: Date.now(), _selected: false };
+            headers.forEach(h => newRow[h] = "");
+            originalData.unshift(newRow); // Add to top
+            renderTable();
+        });
+
+        document.getElementById('add-col-btn').addEventListener('click', () => {
+            const colName = prompt("Enter new column name:");
+            if (colName && !headers.includes(colName)) {
+                headers.push(colName);
+                originalData.forEach(row => row[colName] = "");
+                renderTable();
+            }
+        });
+
+        document.getElementById('delete-row-btn').addEventListener('click', () => {
+            originalData = originalData.filter(row => !row._selected);
+            renderTable();
+        });
+
+        // Formula Modal Flow
+        document.getElementById('add-formula-btn').addEventListener('click', () => formulaModal.style.display = 'flex');
+        document.getElementById('cancel-formula').addEventListener('click', () => formulaModal.style.display = 'none');
+        document.getElementById('apply-formula').addEventListener('click', () => {
+            const name = document.getElementById('formula-col-name').value.trim();
+            const expr = document.getElementById('formula-expr').value.trim();
+            if (name && expr) {
+                if (!headers.includes(name)) headers.push(name);
+                computedColumns.push({ name: name, formula: expr });
+                formulaModal.style.display = 'none';
+                
+                // Reset inputs
+                document.getElementById('formula-col-name').value = '';
+                document.getElementById('formula-expr').value = '';
+                
+                renderTable();
+            }
+        });
+
+        // --- Clear & Export ---
+        document.getElementById('clear-btn').addEventListener('click', () => location.reload());
+
+        document.getElementById('export-btn').addEventListener('click', () => {
+            const dataToExport = getDisplayData().map(row => {
+                const cleanRow = { ...row };
+                delete cleanRow._uid;
+                delete cleanRow._selected;
+                return cleanRow;
+            });
+            const csv = Papa.unparse(dataToExport);
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.setAttribute('download', (currentFileName || 'export').replace('.csv', '') + '_computed.csv');
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        });
+    </script>
+</body>
+</html>
