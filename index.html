@@ -3,9 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Visual Data Flow | Sublime Engine</title>
+    <title>Excel to Visual Canvas | Pure JavaScript Engine</title>
+    <!-- SheetJS for parsing XLSX files directly in the browser -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <style>
-        /* Sublime Text Monokai Theme Variables */
         :root {
             --bg-dark: #272822;
             --bg-panel: #1e1f1c;
@@ -26,35 +27,36 @@
             font-family: Consolas, "Courier New", monospace;
             background-color: var(--bg-dark);
             color: var(--text-main);
-            overflow: hidden; 
+            overflow: hidden;
         }
 
         /* Toolbar */
         .toolbar {
             position: absolute;
             top: 20px; left: 20px;
-            background: rgba(30, 31, 28, 0.9);
+            background: rgba(30, 31, 28, 0.95);
             border: 1px solid var(--border-color);
-            padding: 10px;
+            padding: 12px 18px;
             border-radius: 6px;
             z-index: 1000;
             display: flex;
-            gap: 10px;
+            gap: 12px;
+            align-items: center;
             backdrop-filter: blur(5px);
-            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.6);
         }
 
-        button {
+        button, label.upload-btn {
             background: #272822; color: var(--neon-green);
-            border: 1px solid var(--border-color); padding: 6px 12px;
+            border: 1px solid var(--border-color); padding: 6px 14px;
             font-family: inherit; font-size: 13px; cursor: pointer;
             border-radius: 4px; transition: color 0.2s, border-color 0.2s;
+            display: inline-block; text-align: center;
         }
-        button:hover { color: var(--neon-pink); border-color: var(--neon-pink); }
-        button.action-btn { color: var(--neon-blue); }
-        button.action-btn:hover { border-color: var(--neon-blue); }
+        button:hover, label.upload-btn:hover { color: var(--neon-pink); border-color: var(--neon-pink); }
+        input[type="file"] { display: none; }
 
-        /* Canvas Wrapper for Panning */
+        /* Canvas & Viewport */
         #viewport {
             width: 100vw; height: 100vh;
             position: relative;
@@ -63,7 +65,7 @@
         #canvas {
             position: absolute;
             top: 0; left: 0;
-            width: 5000px; height: 5000px;
+            width: 8000px; height: 8000px;
             transform-origin: 0 0;
             background-image: 
                 linear-gradient(var(--border-color) 1px, transparent 1px),
@@ -77,27 +79,27 @@
         svg {
             position: absolute; top: 0; left: 0;
             width: 100%; height: 100%;
-            pointer-events: none; /* Let clicks pass through unless on stroke */
+            pointer-events: none;
             z-index: 0;
         }
 
         path.wire {
             fill: none; stroke-width: 3; stroke-linecap: round;
             filter: drop-shadow(0 0 5px currentColor);
-            pointer-events: visibleStroke; /* Allow clicking the wire */
+            pointer-events: visibleStroke;
             cursor: pointer;
             transition: stroke-width 0.2s;
         }
         path.wire:hover { stroke-width: 6; }
 
-        /* Nodes */
+        /* Nodes (Tables) */
         .node {
             position: absolute;
             background-color: var(--bg-panel);
             border: 1px solid var(--border-color);
             border-radius: 6px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-            min-width: 250px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+            min-width: 320px;
             z-index: 10;
             display: flex;
             flex-direction: column;
@@ -105,66 +107,62 @@
         }
 
         .node-header {
-            background-color: #3e3d32; padding: 8px 12px; font-size: 14px;
+            background-color: #3e3d32; padding: 10px 14px; font-size: 13px;
             font-weight: bold; color: var(--neon-blue); cursor: grab;
             border-top-left-radius: 6px; border-top-right-radius: 6px;
             display: flex; justify-content: space-between; align-items: center;
         }
         .node-header:active { cursor: grabbing; }
-        
-        .delete-btn {
-            color: var(--text-muted); font-size: 16px; cursor: pointer;
-            line-height: 1; transition: color 0.2s;
-        }
-        .delete-btn:hover { color: var(--neon-pink); }
 
-        .node-content { padding: 10px; }
+        .node-content { padding: 10px; max-height: 450px; overflow-y: auto; }
 
         /* Rows & Cells */
         .row {
             display: flex; align-items: center; justify-content: space-between;
-            margin-bottom: 8px; position: relative;
+            margin-bottom: 6px; position: relative; font-size: 12px;
         }
-        .row:last-child { margin-bottom: 0; }
 
-        .label { font-size: 13px; color: var(--neon-pink); width: 80px; text-shadow: 0 0 2px rgba(249,38,114,0.3); }
+        .cell-label {
+            color: var(--neon-orange); width: 65px; font-size: 11px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
 
         .input-wrapper {
             display: flex; align-items: center; background: #272822;
             border: 1px solid var(--border-color); border-radius: 4px;
-            padding: 2px 6px; flex-grow: 1; margin: 0 10px;
+            padding: 2px 6px; flex-grow: 1; margin: 0 8px;
         }
 
         input {
             background: transparent; border: none; color: var(--neon-yellow);
-            font-family: inherit; font-size: 13px; width: 100%; outline: none;
+            font-family: inherit; font-size: 12px; width: 100%; outline: none;
         }
         input:focus { color: var(--text-main); }
-        input[readonly] { color: var(--text-muted); }
 
-        /* Connection Ports */
+        /* Ports */
         .port {
-            width: 14px; height: 14px; background-color: var(--border-color);
+            width: 12px; height: 12px; background-color: var(--border-color);
             border-radius: 50%; cursor: crosshair; position: absolute;
             transition: transform 0.2s, background-color 0.2s; pointer-events: auto;
         }
-        .port:hover { transform: scale(1.5); }
-        .port.in { left: -17px; border: 2px solid var(--bg-panel); }
-        .port.out { right: -17px; border: 2px solid var(--bg-panel); }
+        .port:hover { transform: scale(1.6); }
+        .port.in { left: -15px; border: 2px solid var(--bg-panel); }
+        .port.out { right: -15px; border: 2px solid var(--bg-panel); }
 
+        #status-msg {
+            font-size: 12px; color: var(--neon-green); margin-left: 10px;
+        }
     </style>
 </head>
 <body>
 
     <div class="toolbar">
-        <span style="color: var(--text-muted); line-height: 26px; margin-right: 10px;"><b>DataFlow</b> | Pro</span>
-        <button onclick="addVariableNode()">+ Variable</button>
-        <button onclick="addTableNode()">+ Table</button>
-        <button onclick="addMathNode()" style="color: var(--neon-orange); border-color: var(--border-color);">+ Formula</button>
-        <div style="width: 20px;"></div>
-        <button class="action-btn" onclick="saveWorkspace()">Save</button>
-        <button class="action-btn" onclick="loadWorkspace()">Load</button>
-        <button class="action-btn" style="color: var(--neon-pink);" onclick="clearCanvas()">Clear</button>
+        <span style="color: var(--text-muted);"><b>Excel2Canvas</b> (Pure JS)</span>
+        <label class="upload-btn">
+            📂 Load .xlsx Workbook
+            <input type="file" id="excel-file" accept=".xlsx, .xls" onchange="handleExcelUpload(event)">
+        </label>
+        <span id="status-msg">Upload your spare parts Excel file to parse sheets & formulas</span>
     </div>
 
     <div id="viewport">
@@ -174,69 +172,47 @@
     </div>
 
     <script>
-        // --- State Management ---
-        const colors = ['#f92672', '#a6e22e', '#66d9ef', '#fd971f', '#ae81ff', '#e6db74'];
-        let connections = []; // { from: portId, to: portId, color: hex, index: number }
+        let connections = [];
         let wireCounter = 0;
-        let nodeIdCounter = 1;
-        let portIdCounter = 1;
-        
+        let cellPortMap = {}; 
+
+        // Viewport Panning State
+        let isPanning = false;
+        let panStartX = 0, panStartY = 0;
+        let panOffsetX = -300, panOffsetY = -200;
         const canvas = document.getElementById('canvas');
         const svg = document.getElementById('svg-canvas');
         const viewport = document.getElementById('viewport');
-
-        // Panning State
-        let isPanning = false;
-        let panStartX = 0, panStartY = 0;
-        let panOffsetX = -500, panOffsetY = -500; // Start slightly offset
         canvas.style.transform = `translate(${panOffsetX}px, ${panOffsetY}px)`;
 
-        // Dragging & Wiring State
-        let isDraggingNode = false;
-        let dragTarget = null;
-        let nodeOffsetX = 0, nodeOffsetY = 0;
+        // Dragging Nodes
+        let isDraggingNode = false, dragTarget = null, nodeOffsetX = 0, nodeOffsetY = 0;
+        // Drawing Wires
+        let isDrawingWire = false, activeStartPort = null, mouseX = 0, mouseY = 0;
 
-        let isDrawingWire = false;
-        let activeStartPort = null;
-        let mouseX = 0, mouseY = 0;
-
-        // --- Event Listeners: Interaction ---
-        
-        // Right click to Pan
         viewport.addEventListener('mousedown', (e) => {
-            if (e.button === 2) { // Right click
+            if (e.button === 2 || e.target === viewport || e.target === canvas) {
                 isPanning = true;
                 panStartX = e.clientX - panOffsetX;
                 panStartY = e.clientY - panOffsetY;
                 canvas.classList.add('panning');
             }
         });
-        window.addEventListener('contextmenu', e => e.preventDefault()); // prevent context menu
+        window.addEventListener('contextmenu', e => e.preventDefault());
 
-        // Node & Wire Interactions
         document.addEventListener('mousedown', (e) => {
-            if (e.button !== 0) return; // Only left click
-
-            // Start dragging Node
+            if (e.button !== 0) return;
             if (e.target.classList.contains('node-header') || e.target.closest('.node-header')) {
-                const header = e.target.classList.contains('node-header') ? e.target : e.target.closest('.node-header');
-                // Ignore delete button clicks
-                if (e.target.classList.contains('delete-btn')) return;
-                
                 isDraggingNode = true;
-                dragTarget = header.parentElement;
-                
-                // Calculate correct offset including pan
+                dragTarget = e.target.closest('.node-header').parentElement;
                 const rect = dragTarget.getBoundingClientRect();
                 nodeOffsetX = e.clientX - rect.left;
                 nodeOffsetY = e.clientY - rect.top;
                 dragTarget.style.zIndex = 100;
-            }
-            // Start drawing Wire
-            else if (e.target.classList.contains('port') && e.target.classList.contains('out')) {
+            } else if (e.target.classList.contains('port') && e.target.classList.contains('out')) {
                 isDrawingWire = true;
                 activeStartPort = e.target;
-                updateMousePos(e);
+                updateMouse(e);
                 renderWires();
             }
         });
@@ -248,416 +224,221 @@
                 canvas.style.transform = `translate(${panOffsetX}px, ${panOffsetY}px)`;
             }
             if (isDraggingNode && dragTarget) {
-                // Adjust for panning
-                const newLeft = (e.clientX - nodeOffsetX - panOffsetX);
-                const newTop = (e.clientY - nodeOffsetY - panOffsetY);
-                dragTarget.style.left = newLeft + 'px';
-                dragTarget.style.top = newTop + 'px';
+                dragTarget.style.left = (e.clientX - nodeOffsetX - panOffsetX) + 'px';
+                dragTarget.style.top = (e.clientY - nodeOffsetY - panOffsetY) + 'px';
                 renderWires();
             }
             if (isDrawingWire) {
-                updateMousePos(e);
+                updateMouse(e);
                 renderWires();
             }
         });
 
         document.addEventListener('mouseup', (e) => {
-            if (isPanning) {
-                isPanning = false;
-                canvas.classList.remove('panning');
-            }
-            if (isDraggingNode) {
-                isDraggingNode = false;
-                if(dragTarget) dragTarget.style.zIndex = 10;
-                dragTarget = null;
-            }
+            isPanning = false; canvas.classList.remove('panning');
+            if (isDraggingNode) { isDraggingNode = false; if(dragTarget) dragTarget.style.zIndex = 10; dragTarget = null; }
             if (isDrawingWire) {
                 isDrawingWire = false;
                 if (e.target.classList.contains('port') && e.target.classList.contains('in')) {
-                    createConnection(activeStartPort, e.target);
+                    const fromId = activeStartPort.getAttribute('data-id');
+                    const toId = e.target.getAttribute('data-id');
+                    const color = '#66d9ef';
+                    e.target.style.backgroundColor = color;
+                    activeStartPort.style.backgroundColor = color;
+                    connections = connections.filter(c => c.to !== toId);
+                    connections.push({ from: fromId, to: toId, color, index: wireCounter++ });
+                    evaluateGraph();
                 }
                 activeStartPort = null;
                 renderWires();
             }
         });
 
-        // Delete Wire on Double Click
         svg.addEventListener('dblclick', (e) => {
             if (e.target.classList.contains('wire')) {
                 const idx = parseInt(e.target.getAttribute('data-index'));
-                const conn = connections.find(c => c.index === idx);
-                if (conn) {
-                    // Reset port color
-                    const targetPort = document.querySelector(`[data-id="${conn.to}"]`);
-                    if(targetPort) targetPort.style.backgroundColor = '';
-                    
-                    connections = connections.filter(c => c.index !== idx);
-                    renderWires();
-                    propagateGraph(); // Recalculate without wire
-                }
+                connections = connections.filter(c => c.index !== idx);
+                renderWires();
             }
         });
 
-        // --- Helper Functions ---
-        function updateMousePos(e) {
-            // Mouse position relative to the scaled/translated canvas
+        function updateMouse(e) {
             mouseX = e.clientX - panOffsetX;
             mouseY = e.clientY - panOffsetY;
         }
 
-        function createConnection(startPort, endPort) {
-            const fromId = startPort.getAttribute('data-id');
-            const toId = endPort.getAttribute('data-id');
-            
-            // Auto color assignment
-            const color = startPort.style.backgroundColor || colors[wireCounter % colors.length];
-            endPort.style.backgroundColor = color;
-            startPort.style.backgroundColor = color;
+        // --- EXCEL PARSING ENGINE USING SHEETJS ---
+        function handleExcelUpload(e) {
+            const file = e.target.files[0];
+            if (!file) return;
 
-            // Remove existing connection to this exact input port (inputs only take 1 wire)
-            connections = connections.filter(c => c.to !== toId);
-            connections.push({ from: fromId, to: toId, color: color, index: wireCounter++ });
-            
-            propagateGraph();
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const data = new Uint8Array(e.target.result);
+                const workbook = XLSX.read(data, { type: 'array', cellFormula: true, cellStyles: true });
+
+                document.getElementById('status-msg').innerText = `Loaded: ${file.name} (${workbook.SheetNames.length} sheets parsed)`;
+                
+                document.querySelectorAll('.node').forEach(n => n.remove());
+                connections = []; cellPortMap = {}; svg.innerHTML = '';
+
+                let posX = 100, posY = 150;
+                let sheetIndex = 0;
+
+                workbook.SheetNames.forEach(sheetName => {
+                    const worksheet = workbook.Sheets[sheetName];
+                    const jsonRows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: "" });
+                    
+                    createTableNode(sheetName, jsonRows, worksheet, posX, posY);
+                    posX += 420;
+                    if (++sheetIndex % 3 === 0) { posX = 100; posY += 550; }
+                });
+
+                autoDetectDependencies(workbook);
+            };
+            reader.readAsArrayBuffer(file);
         }
 
-        // --- Wire Rendering ---
-        function renderWires() {
-            svg.innerHTML = ''; 
+        function createTableNode(sheetName, rows, worksheet, x, y) {
+            const nodeId = `node-${sheetName.replace(/\s+/g, '_')}`;
+            let contentHTML = '';
 
+            const maxRows = Math.min(rows.length, 18);
+            for (let r = 0; r < maxRows; r++) {
+                const rowVals = rows[r];
+                if (!rowVals || rowVals.every(val => val === "")) continue;
+
+                const cellAddress = XLSX.utils.encode_cell({ r: r, c: 0 }); 
+                const cellVal = rowVals[0] !== undefined ? rowVals[0] : "";
+                
+                const inPortId = `port-in-${sheetName}-${r}`;
+                const outPortId = `port-out-${sheetName}-${r}`;
+                
+                cellPortMap[`${sheetName}!${cellAddress}`] = outPortId;
+
+                contentHTML += `
+                    <div class="row">
+                        <div class="port in" data-id="${inPortId}"></div>
+                        <span class="cell-label">Row ${r+1}</span>
+                        <div class="input-wrapper">
+                            <input type="text" value="${cellVal}" data-cell="${sheetName}!${cellAddress}" oninput="evaluateGraph()">
+                        </div>
+                        <div class="port out" data-id="${outPortId}"></div>
+                    </div>
+                `;
+            }
+
+            const node = document.createElement('div');
+            node.className = 'node';
+            node.style.left = `${x}px`;
+            node.style.top = `${y}px`;
+            node.innerHTML = `
+                <div class="node-header">
+                    <span>📊 ${sheetName}</span>
+                </div>
+                <div class="node-content">${contentHTML}</div>
+            `;
+            canvas.appendChild(node);
+        }
+
+        function autoDetectDependencies(workbook) {
+            workbook.SheetNames.forEach(sheetName => {
+                const worksheet = workbook.Sheets[sheetName];
+                for (let cellKey in worksheet) {
+                    if (cellKey[0] === '!') continue;
+                    const cell = worksheet[cellKey];
+                    if (cell.f) { 
+                        const formula = cell.f;
+                        workbook.SheetNames.forEach(targetSheet => {
+                            if (formula.includes(targetSheet) || sheetName === targetSheet) {
+                                const matches = formula.match(/[A-Z]+\d+/g);
+                                if (matches) {
+                                    matches.forEach(matchCell => {
+                                        const sourceKey = `${targetSheet}!${matchCell}`;
+                                        const targetKey = `${sheetName}!${cellKey}`;
+                                        
+                                        const outPort = cellPortMap[sourceKey];
+                                        const targetInput = document.querySelector(`input[data-cell="${targetKey}"]`);
+                                        if (outPort && targetInput) {
+                                            const rowEl = targetInput.closest('.row');
+                                            const inPort = rowEl.querySelector('.port.in');
+                                            if (inPort) {
+                                                const inPortId = inPort.getAttribute('data-id');
+                                                const color = '#a6e22e';
+                                                inPort.style.backgroundColor = color;
+                                                document.querySelector(`[data-id="${outPort}"]`).style.backgroundColor = color;
+                                                
+                                                connections.push({
+                                                    from: outPort,
+                                                    to: inPortId,
+                                                    color: color,
+                                                    index: wireCounter++
+                                                });
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        });
+                    }
+                }
+            });
+            renderWires();
+        }
+
+        function renderWires() {
+            svg.innerHTML = '';
             connections.forEach(conn => {
                 const fromEl = document.querySelector(`[data-id="${conn.from}"]`);
                 const toEl = document.querySelector(`[data-id="${conn.to}"]`);
-                if(fromEl && toEl) drawCurve(fromEl, toEl, conn.color, conn.index);
+                if (fromEl && toEl) drawCurve(fromEl, toEl, conn.color, conn.index);
             });
 
             if (isDrawingWire && activeStartPort) {
                 const rect = activeStartPort.getBoundingClientRect();
-                // Adjust for canvas pan
                 const startX = rect.left + rect.width / 2 - panOffsetX;
                 const startY = rect.top + rect.height / 2 - panOffsetY;
-                
                 const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                 const cp1x = startX + Math.abs(mouseX - startX) * 0.5;
                 const cp2x = mouseX - Math.abs(mouseX - startX) * 0.5;
-                
                 path.setAttribute('d', `M ${startX} ${startY} C ${cp1x} ${startY}, ${cp2x} ${mouseY}, ${mouseX} ${mouseY}`);
                 path.setAttribute('class', 'wire');
-                path.setAttribute('stroke', activeStartPort.style.backgroundColor || '#66d9ef');
+                path.setAttribute('stroke', '#66d9ef');
                 svg.appendChild(path);
             }
         }
 
         function drawCurve(fromEl, toEl, color, index) {
-            const rect1 = fromEl.getBoundingClientRect();
-            const rect2 = toEl.getBoundingClientRect();
-            
-            const startX = rect1.left + rect1.width / 2 - panOffsetX;
-            const startY = rect1.top + rect1.height / 2 - panOffsetY;
-            const endX = rect2.left + rect2.width / 2 - panOffsetX;
-            const endY = rect2.top + rect2.height / 2 - panOffsetY;
+            const r1 = fromEl.getBoundingClientRect();
+            const r2 = toEl.getBoundingClientRect();
+            const startX = r1.left + r1.width / 2 - panOffsetX;
+            const startY = r1.top + r1.height / 2 - panOffsetY;
+            const endX = r2.left + r2.width / 2 - panOffsetX;
+            const endY = r2.top + r2.height / 2 - panOffsetY;
 
             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
             const cp1x = startX + Math.abs(endX - startX) * 0.5;
             const cp2x = endX - Math.abs(endX - startX) * 0.5;
-
             path.setAttribute('d', `M ${startX} ${startY} C ${cp1x} ${startY}, ${cp2x} ${endY}, ${endX} ${endY}`);
             path.setAttribute('class', 'wire');
             path.setAttribute('stroke', color);
             path.setAttribute('data-index', index);
-            
-            // Title for hover tooltip
-            const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
-            title.textContent = "Double-click to delete";
-            path.appendChild(title);
-            
             svg.appendChild(path);
         }
 
-        // --- Node Factories ---
-        function deleteNode(nodeId) {
-            const node = document.getElementById(nodeId);
-            if(!node) return;
-            
-            // Remove connections attached to this node
-            const ports = node.querySelectorAll('.port');
-            ports.forEach(p => {
-                const pid = p.getAttribute('data-id');
-                connections = connections.filter(c => c.from !== pid && c.to !== pid);
-            });
-            
-            node.remove();
-            renderWires();
-            propagateGraph();
-        }
-
-        function buildNodeFrame(type, title, titleColor, content) {
-            const id = `node-${nodeIdCounter++}`;
-            const x = -panOffsetX + 300 + Math.random() * 200;
-            const y = -panOffsetY + 200 + Math.random() * 200;
-            
-            const node = document.createElement('div');
-            node.className = 'node';
-            node.id = id;
-            node.style.left = `${x}px`;
-            node.style.top = `${y}px`;
-            node.setAttribute('data-type', type);
-            
-            node.innerHTML = `
-                <div class="node-header">
-                    <span><span style="color: ${titleColor};">${type}</span> ${title}</span>
-                    <span class="delete-btn" onclick="deleteNode('${id}')">×</span>
-                </div>
-                <div class="node-content">${content}</div>
-            `;
-            canvas.appendChild(node);
-            return id;
-        }
-
-        function addVariableNode(name = "Value", value = "0", pOut = null) {
-            const pId = pOut || `out-${portIdCounter++}`;
-            const content = `
-                <div class="row">
-                    <div class="label" style="color:var(--neon-blue)">Data</div>
-                    <div class="input-wrapper">
-                        <input type="text" value="${value}" oninput="propagateGraph()">
-                    </div>
-                    <div class="port out" data-id="${pId}"></div>
-                </div>`;
-            buildNodeFrame('var', name, 'var(--neon-purple)', content);
-        }
-
-        function addTableNode() {
-            const pIn1 = `in-${portIdCounter++}`; const pOut1 = `out-${portIdCounter++}`;
-            const pIn2 = `in-${portIdCounter++}`; const pOut2 = `out-${portIdCounter++}`;
-            const content = `
-                <div class="row">
-                    <div class="port in" data-id="${pIn1}"></div>
-                    <div class="label">Item</div>
-                    <div class="input-wrapper"><input type="text" value="Engine Part" oninput="propagateGraph()"></div>
-                    <div class="port out" data-id="${pOut1}"></div>
-                </div>
-                <div class="row">
-                    <div class="port in" data-id="${pIn2}"></div>
-                    <div class="label">Amount</div>
-                    <div class="input-wrapper"><input type="text" value="100" oninput="propagateGraph()"></div>
-                    <div class="port out" data-id="${pOut2}"></div>
-                </div>`;
-            buildNodeFrame('table', `Sheet_${Math.floor(Math.random()*100)}`, 'var(--neon-pink)', content);
-        }
-
-        function addMathNode() {
-            const pInA = `in-${portIdCounter++}`; 
-            const pInB = `in-${portIdCounter++}`;
-            const pOut = `out-${portIdCounter++}`;
-            const content = `
-                <div class="row">
-                    <div class="port in" data-id="${pInA}"></div>
-                    <div class="label" style="color:var(--neon-orange)">Input A</div>
-                    <div class="input-wrapper"><input type="text" data-var="A" value="0" readonly></div>
-                </div>
-                <div class="row">
-                    <div class="port in" data-id="${pInB}"></div>
-                    <div class="label" style="color:var(--neon-orange)">Input B</div>
-                    <div class="input-wrapper"><input type="text" data-var="B" value="0" readonly></div>
-                </div>
-                <div class="row" style="margin-top: 15px; border-top: 1px solid var(--border-color); padding-top: 10px;">
-                    <div class="label" style="color:var(--neon-green); width:60px">f(x) =</div>
-                    <div class="input-wrapper" style="width: 140px;">
-                        <input type="text" class="formula-input" value="A * B" placeholder="e.g. A + B" oninput="propagateGraph()">
-                    </div>
-                </div>
-                <div class="row" style="margin-top: 10px;">
-                    <div class="label" style="color:var(--text-main)">Result</div>
-                    <div class="input-wrapper"><input type="text" class="formula-result" value="0" readonly></div>
-                    <div class="port out" data-id="${pOut}" style="background-color: var(--neon-green)"></div>
-                </div>`;
-            buildNodeFrame('math', 'Formula', 'var(--neon-orange)', content);
-        }
-
-        // --- Core Reactive Engine ---
-        function propagateGraph() {
-            // 1. Pass data across all wires (Output -> Input)
+        function evaluateGraph() {
             connections.forEach(conn => {
                 const fromPort = document.querySelector(`[data-id="${conn.from}"]`);
                 const toPort = document.querySelector(`[data-id="${conn.to}"]`);
-                if(fromPort && toPort) {
-                    const fromInput = fromPort.parentElement.querySelector('input');
-                    const toInput = toPort.parentElement.querySelector('input');
-                    if(fromInput && toInput) {
-                        toInput.value = fromInput.value;
+                if (fromPort && toPort) {
+                    const fromInp = fromPort.closest('.row').querySelector('input');
+                    const toInp = toPort.closest('.row').querySelector('input');
+                    if (fromInp && toInp) {
+                        toInp.value = fromInp.value;
                     }
                 }
             });
-
-            // 2. Evaluate Math Nodes internally
-            const mathNodes = document.querySelectorAll('.node[data-type="math"]');
-            mathNodes.forEach(node => {
-                const inputA = parseFloat(node.querySelector('[data-var="A"]').value) || 0;
-                const inputB = parseFloat(node.querySelector('[data-var="B"]').value) || 0;
-                const formula = node.querySelector('.formula-input').value;
-                const resultBox = node.querySelector('.formula-result');
-
-                try {
-                    // Safe evaluation using scoped variables A and B
-                    const calc = new Function('A', 'B', `return ${formula}`);
-                    const res = calc(inputA, inputB);
-                    resultBox.value = Number.isInteger(res) ? res : res.toFixed(2);
-                } catch(e) {
-                    resultBox.value = "ERR";
-                }
-            });
-
-            // 3. Since a math node evaluation changes its output, we need to pass data again
-            // In a production app this would use Topological Sort. 
-            // For this UI demo, a quick 2-pass update covers most immediate chains.
-            connections.forEach(conn => {
-                const fromPort = document.querySelector(`[data-id="${conn.from}"]`);
-                const toPort = document.querySelector(`[data-id="${conn.to}"]`);
-                if(fromPort && toPort && fromPort.closest('.node').getAttribute('data-type') === 'math') {
-                    const fromInput = fromPort.parentElement.querySelector('input');
-                    const toInput = toPort.parentElement.querySelector('input');
-                    if(fromInput && toInput) toInput.value = fromInput.value;
-                }
-            });
         }
-
-        // --- Save / Load Logic ---
-        function saveWorkspace() {
-            const nodes = [];
-            document.querySelectorAll('.node').forEach(node => {
-                // Save raw HTML state of nodes to easily reconstruct
-                nodes.push({
-                    id: node.id,
-                    left: node.style.left,
-                    top: node.style.top,
-                    html: node.innerHTML,
-                    type: node.getAttribute('data-type')
-                });
-                
-                // Update HTML string to retain current input values
-                const inputs = node.querySelectorAll('input');
-                inputs.forEach((inp, idx) => {
-                    inp.setAttribute('value', inp.value);
-                });
-                nodes[nodes.length-1].html = node.innerHTML; 
-            });
-
-            const data = {
-                nodes: nodes,
-                connections: connections,
-                counters: { wire: wireCounter, node: nodeIdCounter, port: portIdCounter },
-                pan: { x: panOffsetX, y: panOffsetY }
-            };
-            localStorage.setItem('visual_data_save', JSON.stringify(data));
-            alert('Workspace Saved!');
-        }
-
-        function loadWorkspace() {
-            const raw = localStorage.getItem('visual_data_save');
-            if(!raw) return alert('No saved workspace found.');
-            
-            clearCanvas(false);
-            const data = JSON.parse(raw);
-            
-            // Restore Counters & Pan
-            wireCounter = data.counters.wire;
-            nodeIdCounter = data.counters.node;
-            portIdCounter = data.counters.port;
-            panOffsetX = data.pan.x;
-            panOffsetY = data.pan.y;
-            canvas.style.transform = `translate(${panOffsetX}px, ${panOffsetY}px)`;
-
-            // Restore Nodes
-            data.nodes.forEach(n => {
-                const node = document.createElement('div');
-                node.className = 'node';
-                node.id = n.id;
-                node.style.left = n.left;
-                node.style.top = n.top;
-                node.setAttribute('data-type', n.type);
-                node.innerHTML = n.html;
-                
-                // Re-bind input events that get lost in innerHTML transfer
-                node.querySelectorAll('input:not([readonly])').forEach(inp => {
-                    inp.addEventListener('input', propagateGraph);
-                });
-                
-                canvas.appendChild(node);
-            });
-
-            // Restore Connections
-            connections = data.connections;
-            
-            // Fix port background colors based on connections
-            connections.forEach(c => {
-                const fromPort = document.querySelector(`[data-id="${c.from}"]`);
-                const toPort = document.querySelector(`[data-id="${c.to}"]`);
-                if(fromPort && toPort) {
-                    toPort.style.backgroundColor = c.color;
-                    fromPort.style.backgroundColor = c.color;
-                }
-            });
-
-            renderWires();
-            propagateGraph();
-        }
-
-        function clearCanvas(ask = true) {
-            if(ask && !confirm("Clear entire workspace?")) return;
-            document.querySelectorAll('.node').forEach(n => n.remove());
-            connections = [];
-            svg.innerHTML = '';
-        }
-
-        // --- Initialize Demo Setup ---
-        window.onload = () => {
-            // Setup an initial demo scene
-            addVariableNode("Live SEK", "10.52", "out-1");
-            addTableNode(); // Will generate in-2, out-2, in-3, out-3
-            addMathNode();  // Will generate in-4, in-5, out-4
-
-            setTimeout(() => {
-                // Arrange them nicely
-                document.getElementById('node-1').style.left = '600px';
-                document.getElementById('node-1').style.top = '600px';
-                
-                const table = document.getElementById('node-2');
-                table.style.left = '900px'; table.style.top = '550px';
-                table.querySelector('.label').innerText = "Price USD";
-                table.querySelector('input').value = "443.16";
-                
-                const tableOutId = table.querySelectorAll('.out')[0].getAttribute('data-id');
-
-                const math = document.getElementById('node-3');
-                math.style.left = '1250px'; math.style.top = '550px';
-                const mathInA = math.querySelectorAll('.in')[0].getAttribute('data-id');
-                const mathInB = math.querySelectorAll('.in')[1].getAttribute('data-id');
-
-                // Connect them: Variable (SEK) -> Math (In A)
-                connections.push({ from: 'out-1', to: mathInA, color: '#a6e22e', index: wireCounter++ });
-                // Connect them: Table (Price) -> Math (In B)
-                connections.push({ from: tableOutId, to: mathInB, color: '#66d9ef', index: wireCounter++ });
-                
-                // Colorize ports
-                document.querySelector(`[data-id="${mathInA}"]`).style.backgroundColor = '#a6e22e';
-                document.querySelector(`[data-id="out-1"]`).style.backgroundColor = '#a6e22e';
-                document.querySelector(`[data-id="${mathInB}"]`).style.backgroundColor = '#66d9ef';
-                document.querySelector(`[data-id="${tableOutId}"]`).style.backgroundColor = '#66d9ef';
-
-                renderWires();
-                propagateGraph();
-                
-                // Fetch live API data to prove reactivity
-                fetch('https://open.er-api.com/v6/latest/USD')
-                    .then(r => r.json())
-                    .then(d => {
-                        const sekNodeInput = document.getElementById('node-1').querySelector('input');
-                        sekNodeInput.value = d.rates.SEK.toFixed(2);
-                        propagateGraph();
-                    }).catch(e => console.log("API offline, using mock data."));
-            }, 100);
-        };
     </script>
 </body>
 </html>
