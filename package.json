@@ -1,0 +1,9 @@
+{
+  "name": "partslist-workbook",
+  "private": true,
+  "scripts": {
+    "start": "node scripts/dev-server.js",
+    "test": "node --test",
+    "check": "node --check app.js && node --test"
+  }
+}

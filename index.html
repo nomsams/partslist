@@ -9,6 +9,7 @@
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/hyperformula@3.4.0/dist/hyperformula.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js" defer></script>
+  <script src="partslist-core.js"></script>
 </head>
 <body>
   <header class="app-header">
@@ -232,6 +233,7 @@
           <span id="dashboard-badge" class="quote-badge">SEK · excl. VAT</span>
         </div>
         <div id="dashboard-kit-bar" class="kit-bar dashboard-kit-bar" aria-label="Kits included in the consolidation"></div>
+        <div id="dashboard-incomplete" class="calculation-warning hidden" role="alert"></div>
         <div class="dashboard-layout">
           <aside class="dashboard-side">
             <section class="dash-card">
@@ -267,6 +269,20 @@
                 <input id="group-name" maxlength="40" placeholder="New group name" aria-label="New group name" autocomplete="off">
                 <button class="button small" type="submit">Add group</button>
               </form>
+            </section>
+
+            <section class="dash-card">
+              <p class="eyebrow">What-if</p>
+              <h3>Scenario comparison</h3>
+              <p class="fine-print">Adjust the current calculated result without changing workbook prices or quantities.</p>
+              <div class="warehouse-fields scenario-fields">
+                <label>Sales volume <span class="input-suffix"><input type="number" min="-100" max="500" step="1" value="0" data-bind="scenario.salesDelta"><span>%</span></span></label>
+                <label>Purchase / FX cost <span class="input-suffix"><input type="number" min="-100" max="500" step="1" value="0" data-bind="scenario.purchaseDelta"><span>%</span></span></label>
+                <label>Inbound freight <span class="input-suffix"><input type="number" min="-100" max="500" step="1" value="0" data-bind="scenario.inboundDelta"><span>%</span></span></label>
+                <label>Warehouse &amp; logistics <span class="input-suffix"><input type="number" min="-100" max="500" step="1" value="0" data-bind="scenario.warehouseDelta"><span>%</span></span></label>
+              </div>
+              <div id="scenario-summary" class="scenario-summary"></div>
+              <button id="scenario-reset" class="button small ghost" type="button">Reset scenario</button>
             </section>
           </aside>
 
@@ -369,7 +385,7 @@
                 <button id="warehouse-rates-export" class="button small" type="button">Export rates JSON</button>
                 <label class="button small ghost" for="warehouse-rates-file">Import rates JSON</label>
                 <input id="warehouse-rates-file" type="file" accept=".json,application/json">
-                <span id="warehouse-rates-status" class="rate-save-status">Caesar-14 encoded · saved locally</span>
+                <span id="warehouse-rates-status" class="rate-save-status">Session only · export JSON or save an encrypted project to keep</span>
               </div>
               <p class="rate-security-note">Caesar-14 is reversible obfuscation, not access control. Use the password-encrypted secure project when the rates must be protected.</p>
               <div id="warehouse-rate-inputs" class="warehouse-fields rate-fields">
@@ -439,7 +455,10 @@
                 <option value="underhood">Under the hood</option>
               </select>
             </label>
-            <button id="wire-expand" class="button small" type="button">Expand view</button>
+            <div class="wire-view-actions">
+              <button id="wire-reset-layout" class="button small ghost" type="button">Reset layout</button>
+              <button id="wire-expand" class="button small" type="button">Expand view</button>
+            </div>
             <div class="wire-legend" aria-label="Wire colors">
               <span><i class="incoming"></i>Incoming</span>
               <span><i class="outgoing"></i>Outgoing</span>

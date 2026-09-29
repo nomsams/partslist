@@ -1,9 +1,10 @@
-/* global XLSX, HyperFormula */
+/* global XLSX, HyperFormula, PartsListCore */
 
 (() => {
   'use strict';
 
   const FormulaEngine = window.HyperFormula?.HyperFormula || window.HyperFormula;
+  const Core = window.PartsListCore;
   const MAX_IMPORT_ROWS = 5000;
   const MAX_IMPORT_COLS = 100;
   const MAX_GRID_ROWS = 250;
@@ -80,7 +81,7 @@
   // Validated categorical order (dataviz reference palette); groups take slots in creation order.
   const GROUP_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
   const MAX_GROUPS = GROUP_COLORS.length;
-  const SETTINGS_STORAGE_PREFIX = 'partslist.settings.caesar14.v1:';
+  const LEGACY_SETTINGS_STORAGE_PREFIX = 'partslist.settings.caesar14.v1:';
   const SETTINGS_SHEET_MARKER = 'partslist settings';
   const VIEW = Object.freeze({ consolidated: ':consolidated', dashboard: ':dashboard', warehouse: ':warehouse', wire: ':wire' });
   const SPECIAL_VIEWS = new Set(Object.values(VIEW));
@@ -158,6 +159,7 @@
     groups: [],
     items: {},
     sales: { ...SALES_DEFAULTS },
+    scenario: { salesDelta: 0, purchaseDelta: 0, inboundDelta: 0, warehouseDelta: 0 },
     supplier: { ...SUPPLIER_DEFAULTS },
     flowOverrides: { outboundPerUnit: null, outtakePerUnit: null, storagePerUnitMonth: null },
     flowUnlocked: false,
@@ -173,8 +175,11 @@
     consolidatedSearch: '',
     consolidatedFilter: 'all',
     pendingDisabledKits: null,
-    settingsSaveTimer: null,
+    importWarnings: [],
     wireRelations: [],
+    wireNodePositions: { overview: {}, underhood: {} },
+    wireDrag: null,
+    suppressWireClickUntil: 0,
     selectedWireNode: 'consolidated.quantity',
     wireMode: 'overview',
     wireExpanded: false,
@@ -260,6 +265,7 @@
     wireCustomList: el('wire-custom-list'),
     wireDetailMode: el('wire-detail-mode'),
     wireExpand: el('wire-expand'),
+    wireResetLayout: el('wire-reset-layout'),
     sheetView: el('sheet-view'),
     grid: el('sheet-grid'),
     selectedAddress: el('selected-address'),
@@ -284,6 +290,7 @@
     dashboardSubtitle: el('dashboard-subtitle'),
     dashboardBadge: el('dashboard-badge'),
     dashboardKitBar: el('dashboard-kit-bar'),
+    dashboardIncomplete: el('dashboard-incomplete'),
     dashboardKpis: el('dashboard-kpis'),
     vatSummary: el('vat-summary'),
     groupList: el('group-list'),
@@ -296,6 +303,8 @@
     chartGroups: el('chart-groups'),
     groupTable: el('group-table'),
     dashboardItems: el('dashboard-items'),
+    scenarioSummary: el('scenario-summary'),
+    scenarioReset: el('scenario-reset'),
     chartTooltip: el('chart-tooltip'),
     flowOverview: el('flow-overview'),
     flowFactoryStats: el('flow-factory-stats'),
@@ -322,16 +331,16 @@
   initialize();
 
   async function initialize() {
+    purgeLegacyLocalBusinessData();
     populateCurrencySelect(dom.sourceCurrency, state.config.sourceCurrency);
     populateCurrencySelect(dom.outputCurrency, state.config.outputCurrency);
     document.querySelectorAll('[data-currency-select]').forEach((select) => populateCurrencySelect(select, getPath(select.dataset.bind)));
     populateOriginSelects();
     syncBoundInputs();
-    const restoredRates = loadPersistedWarehouseRates();
-    if (!restoredRates) await loadPrivateWarehouseRateFile();
+    await loadPrivateWarehouseRateFile();
     syncWarehouseRateInputs();
     bindEvents();
-    if (!window.XLSX || !FormulaEngine) {
+    if (!window.XLSX || !FormulaEngine || !Core) {
       setStatus('The spreadsheet libraries could not be loaded. Check the internet connection and reload.', 'error');
     }
   }
@@ -390,6 +399,11 @@
       event.preventDefault();
       const group = addGroup(dom.groupName.value);
       if (group) dom.groupName.value = '';
+    });
+    dom.scenarioReset.addEventListener('click', () => {
+      state.scenario = { salesDelta: 0, purchaseDelta: 0, inboundDelta: 0, warehouseDelta: 0 };
+      saveSettingsSoon();
+      refreshViews();
     });
     dom.groupList.addEventListener('click', (event) => {
       const remove = event.target.closest('[data-remove-group]');
@@ -461,6 +475,11 @@
       renderWireView();
     });
     dom.wireExpand.addEventListener('click', toggleWireExpanded);
+    dom.wireResetLayout.addEventListener('click', resetWireLayout);
+    dom.wireCanvas.addEventListener('pointerdown', startWireDrag);
+    dom.wireCanvas.addEventListener('pointermove', moveWireDrag);
+    dom.wireCanvas.addEventListener('pointerup', finishWireDrag);
+    dom.wireCanvas.addEventListener('pointercancel', finishWireDrag);
     document.addEventListener('keydown', (event) => {
       if (event.key === 'Escape' && state.wireExpanded) toggleWireExpanded(false);
     });
@@ -650,6 +669,10 @@
       setSupplierOrigin(state.supplier.country);
       return;
     }
+    if (path.startsWith('scenario.')) {
+      refreshViews();
+      return;
+    }
     if (path.startsWith('warehouse.') || path.startsWith('supplier.') || path.startsWith('sales.')) {
       if (path === 'sales.defaultValue' || path === 'sales.defaultMode') rebuildConsolidation();
       else refreshViews();
@@ -771,8 +794,10 @@
       groups: state.groups.map((group) => ({ ...group })),
       items: JSON.parse(JSON.stringify(state.items)),
       sales: { ...state.sales },
+      scenario: { ...state.scenario },
       supplier: { ...state.supplier },
       flowOverrides: { ...state.flowOverrides },
+      wireNodePositions: Core.sanitizeWirePositions(state.wireNodePositions),
       warehouse,
       disabledKits: state.workbook ? state.workbook.SheetNames.filter((name) => isSourceKit(name) && !state.mappings[name].enabled) : [],
     };
@@ -852,8 +877,15 @@
       horizonMonths: Math.round(finiteOr(sales.horizonMonths, SALES_DEFAULTS.horizonMonths, 6, 120)),
       customerPaysOutbound: sales.customerPaysOutbound === true,
     };
+    const scenario = settings.scenario || {};
+    state.scenario = {
+      salesDelta: finiteOr(scenario.salesDelta, 0, -100, 500),
+      purchaseDelta: finiteOr(scenario.purchaseDelta, 0, -100, 500),
+      inboundDelta: finiteOr(scenario.inboundDelta, 0, -100, 500),
+      warehouseDelta: finiteOr(scenario.warehouseDelta, 0, -100, 500),
+    };
     const supplier = settings.supplier || {};
-    const country = /^d{3}$/.test(supplier.country) ? supplier.country : SUPPLIER_DEFAULTS.country;
+    const country = Core.normalizeCountryCode(supplier.country, SUPPLIER_DEFAULTS.country);
     state.supplier = {
       name: typeof supplier.name === 'string' ? supplier.name.slice(0, 80) : SUPPLIER_DEFAULTS.name,
       location: typeof supplier.location === 'string' ? supplier.location.slice(0, 80) : SUPPLIER_DEFAULTS.location,
@@ -863,6 +895,7 @@
       lon: finiteOr(supplier.lon, ORIGIN_PRESETS[country]?.lon ?? SUPPLIER_DEFAULTS.lon, -180, 180),
     };
     FLOW_OVERRIDE_KEYS.forEach((key) => { state.flowOverrides[key] = nullableNumber(settings.flowOverrides?.[key]); });
+    state.wireNodePositions = Core.sanitizeWirePositions(settings.wireNodePositions);
 
     const warehouse = settings.warehouse || {};
     Object.keys(WAREHOUSE_DEFAULTS).forEach((key) => {
@@ -888,45 +921,21 @@
     state.pendingDisabledKits = null;
   }
 
-  function settingsStorageKey(fileName = state.fileName) {
-    const base = String(fileName || '').replace(/\.[^.]+$/, '').replace(/-consolidated$/i, '').trim();
-    return base ? `${SETTINGS_STORAGE_PREFIX}${base}` : '';
-  }
-
-  function encodeCaesarEnvelope(format, payload) {
-    const shifted = rotatePrintableAscii(JSON.stringify(payload), CAESAR_SHIFT);
-    return { format, version: 1, cipher: { name: 'CAESAR-PRINTABLE-ASCII', shift: CAESAR_SHIFT }, payload: bytesToBase64(new TextEncoder().encode(shifted)) };
-  }
-
-  function decodeCaesarEnvelope(envelope, format) {
-    if (envelope?.format !== format || envelope.cipher?.shift !== CAESAR_SHIFT) throw new Error('Unsupported settings envelope.');
-    return JSON.parse(rotatePrintableAscii(new TextDecoder().decode(base64ToBytes(envelope.payload)), -CAESAR_SHIFT));
-  }
-
   function saveSettingsSoon() {
-    if (!state.workbook) return;
-    clearTimeout(state.settingsSaveTimer);
-    state.settingsSaveTimer = setTimeout(() => {
-      const key = settingsStorageKey();
-      if (!key) return;
-      try {
-        localStorage.setItem(key, JSON.stringify(encodeCaesarEnvelope('partslist-settings-local', collectSettings())));
-      } catch (error) {
-        console.warn('Project settings could not be saved locally.', error);
-      }
-    }, 350);
+    // Business data is intentionally not written to browser storage. It remains in
+    // memory until exported inside the workbook or an AES-GCM secure project.
   }
 
-  function loadLocalSettings(fileName) {
-    const key = settingsStorageKey(fileName);
-    if (!key) return false;
+  function purgeLegacyLocalBusinessData() {
     try {
-      const stored = localStorage.getItem(key);
-      if (!stored) return false;
-      return applySettings(decodeCaesarEnvelope(JSON.parse(stored), 'partslist-settings-local'));
+      const keys = [];
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (key?.startsWith(LEGACY_SETTINGS_STORAGE_PREFIX) || key === WAREHOUSE_RATE_STORAGE_KEY) keys.push(key);
+      }
+      keys.forEach((key) => localStorage.removeItem(key));
     } catch (error) {
-      console.warn('Saved project settings were ignored.', error);
-      return false;
+      console.warn('Legacy local business data could not be cleared.', error);
     }
   }
 
@@ -939,10 +948,10 @@
     state.groups = [];
     state.items = {};
     state.sales = { ...SALES_DEFAULTS };
+    state.scenario = { salesDelta: 0, purchaseDelta: 0, inboundDelta: 0, warehouseDelta: 0 };
     state.supplier = { ...SUPPLIER_DEFAULTS };
     FLOW_OVERRIDE_KEYS.forEach((key) => { state.flowOverrides[key] = null; });
     state.selectedKeys.clear();
-    try { localStorage.removeItem(settingsStorageKey()); } catch { /* Local storage is optional. */ }
     renderMappings();
     renderGroups();
     renderAllSelectionBars();
@@ -1002,7 +1011,7 @@
     return rates;
   }
 
-  function applyWarehouseRates(rates, statusText = 'Caesar-14 encoded · saved locally') {
+  function applyWarehouseRates(rates, statusText = 'Loaded for this session · export or save a secure project to keep') {
     state.warehouse.rates = { ...WAREHOUSE_RATE_DEFAULTS, ...rates };
     syncWarehouseRateInputs();
     if (dom.warehouseRatesStatus) dom.warehouseRatesStatus.textContent = statusText;
@@ -1015,25 +1024,7 @@
   }
 
   function persistWarehouseRates() {
-    try {
-      localStorage.setItem(WAREHOUSE_RATE_STORAGE_KEY, JSON.stringify(createWarehouseRateEnvelope()));
-      if (dom.warehouseRatesStatus) dom.warehouseRatesStatus.textContent = 'Caesar-14 encoded · saved locally';
-    } catch (error) {
-      console.warn('Warehouse rates could not be stored locally.', error);
-      if (dom.warehouseRatesStatus) dom.warehouseRatesStatus.textContent = 'Local save unavailable';
-    }
-  }
-
-  function loadPersistedWarehouseRates() {
-    try {
-      const stored = localStorage.getItem(WAREHOUSE_RATE_STORAGE_KEY);
-      if (!stored) return false;
-      applyWarehouseRates(decodeWarehouseRateEnvelope(JSON.parse(stored)), 'Restored from local Caesar-14 JSON');
-      return true;
-    } catch (error) {
-      console.warn('Stored warehouse rates were ignored.', error);
-      return false;
-    }
+    if (dom.warehouseRatesStatus) dom.warehouseRatesStatus.textContent = 'Session only · export JSON or save an encrypted project to keep';
   }
 
   async function loadPrivateWarehouseRateFile() {
@@ -1041,8 +1032,7 @@
       const response = await fetch(WAREHOUSE_RATE_PRIVATE_FILE, { cache: 'no-store' });
       if (!response.ok) return false;
       const envelope = await response.json();
-      applyWarehouseRates(decodeWarehouseRateEnvelope(envelope), 'Loaded private Caesar-14 quote · saved locally');
-      persistWarehouseRates();
+      applyWarehouseRates(decodeWarehouseRateEnvelope(envelope), 'Loaded private Caesar-14 quote file · not stored in browser');
       return true;
     } catch (error) {
       console.info('No local private warehouse-rate file was loaded.', error);
@@ -1062,7 +1052,6 @@
       anchor.click();
       anchor.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      persistWarehouseRates();
       showToast('Caesar-14 warehouse-rate JSON exported.');
     } catch (error) {
       console.error(error);
@@ -1075,10 +1064,9 @@
       if (file.size > 1024 * 1024) throw new Error('The warehouse-rate JSON file is unexpectedly large.');
       const envelope = JSON.parse(await file.text());
       const rates = decodeWarehouseRateEnvelope(envelope);
-      applyWarehouseRates(rates, 'Imported Caesar-14 quote · saved locally');
-      persistWarehouseRates();
+      applyWarehouseRates(rates, 'Imported for this session · export JSON or save an encrypted project to keep');
       refreshViews();
-      showToast('Warehouse rates imported and saved locally.');
+      showToast('Warehouse rates imported for this session.');
     } catch (error) {
       console.error(error);
       showToast(error.message || 'The warehouse-rate JSON could not be imported.', true);
@@ -1116,9 +1104,9 @@
     const shelfUnits = inventoryUnits * shelfShare;
     const drawerUnits = inventoryUnits * drawerShare;
     const palletUnits = inventoryUnits * palletShare;
-    const shelfLocations = shelfUnits > 0 ? Math.ceil(shelfUnits / unitsPerShelf) : 0;
-    const drawerLocations = drawerUnits > 0 ? Math.ceil(drawerUnits / warehouse.unitsPerDrawer) : 0;
-    const pallets = palletUnits > 0 ? Math.ceil(palletUnits / warehouse.unitsPerPallet) : 0;
+    const shelfLocations = Core.requiredLocations(shelfUnits, unitsPerShelf);
+    const drawerLocations = Core.requiredLocations(drawerUnits, warehouse.unitsPerDrawer);
+    const pallets = Core.requiredLocations(palletUnits, warehouse.unitsPerPallet);
     const racks = shelfLocations > 0 ? Math.ceil(shelfLocations / warehouse.shelvesPerRack) : 0;
     const totalBins = shelfLocations * warehouse.binsPerShelf;
     const palletRateKey = `${warehouse.palletType}${warehouse.palletHeight}`;
@@ -1543,7 +1531,7 @@
 
   function renderWireView() {
     if (!dom.wireCanvas || !state.workbook) return;
-    const model = buildWireModel();
+    const model = applySavedWirePositions(buildWireModel());
     if (!model.nodes.some((node) => node.id === state.selectedWireNode)) state.selectedWireNode = model.nodes[0]?.id || null;
     const selected = state.selectedWireNode;
     const nodeById = new Map(model.nodes.map((node) => [node.id, node]));
@@ -1594,6 +1582,7 @@
     dom.wireCanvas.innerHTML = `<svg viewBox="0 0 ${width} ${height}" style="min-width:${width}px" role="img" aria-label="Data relationship wire diagram"><defs><marker id="arrow-default" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#a8b5ad"/></marker><marker id="arrow-in" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#3478b7"/></marker>${outgoingMarkers}<marker id="arrow-custom" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#8266a4"/></marker></defs>${paths}${nodes}</svg>`;
     dom.wireCanvas.querySelectorAll('[data-wire-node]').forEach((node) => {
       node.addEventListener('click', () => {
+        if (Date.now() < state.suppressWireClickUntil) return;
         state.selectedWireNode = node.dataset.wireNode;
         renderWireView();
       });
@@ -1609,6 +1598,96 @@
     renderWireInspector(model);
     populateWireSelectors(model.nodes);
     renderCustomWires(model.nodes);
+  }
+
+  function applySavedWirePositions(model) {
+    const positions = state.wireNodePositions[state.wireMode] || {};
+    const maxY = Math.max(560, 55 + (model.nodeHeight || 50) + Math.max(...model.nodes.map((node) => node.y)));
+    model.nodes = model.nodes.map((node) => {
+      const saved = positions[node.id];
+      if (!saved) return node;
+      return {
+        ...node,
+        ...Core.clampWirePosition(saved, {
+          width: model.width || 980,
+          height: Math.max(maxY, saved.y + (model.nodeHeight || 50)),
+          nodeWidth: model.nodeWidth || 180,
+          nodeHeight: model.nodeHeight || 50,
+        }),
+      };
+    });
+    return model;
+  }
+
+  function wirePointerPosition(event, svg) {
+    const bounds = svg.getBoundingClientRect();
+    const viewBox = svg.viewBox.baseVal;
+    return {
+      x: viewBox.x + (event.clientX - bounds.left) * viewBox.width / Math.max(1, bounds.width),
+      y: viewBox.y + (event.clientY - bounds.top) * viewBox.height / Math.max(1, bounds.height),
+    };
+  }
+
+  function startWireDrag(event) {
+    if (event.button !== 0) return;
+    const nodeElement = event.target.closest?.('[data-wire-node]');
+    const svg = dom.wireCanvas.querySelector('svg');
+    if (!nodeElement || !svg) return;
+    const model = applySavedWirePositions(buildWireModel());
+    const node = model.nodes.find((item) => item.id === nodeElement.dataset.wireNode);
+    if (!node) return;
+    const point = wirePointerPosition(event, svg);
+    state.selectedWireNode = node.id;
+    state.wireDrag = {
+      pointerId: event.pointerId,
+      nodeId: node.id,
+      offsetX: point.x - node.x,
+      offsetY: point.y - node.y,
+      startX: point.x,
+      startY: point.y,
+      moved: false,
+    };
+    dom.wireCanvas.classList.add('dragging-node');
+    dom.wireCanvas.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  }
+
+  function moveWireDrag(event) {
+    const drag = state.wireDrag;
+    const svg = dom.wireCanvas.querySelector('svg');
+    if (!drag || drag.pointerId !== event.pointerId || !svg) return;
+    const point = wirePointerPosition(event, svg);
+    const model = buildWireModel();
+    const viewBox = svg.viewBox.baseVal;
+    const position = Core.clampWirePosition({ x: point.x - drag.offsetX, y: point.y - drag.offsetY }, {
+      width: viewBox.width,
+      height: viewBox.height,
+      nodeWidth: model.nodeWidth || 180,
+      nodeHeight: model.nodeHeight || 50,
+    });
+    state.wireNodePositions[state.wireMode][drag.nodeId] = position;
+    if (Math.hypot(point.x - drag.startX, point.y - drag.startY) > 3) drag.moved = true;
+    renderWireView();
+    event.preventDefault();
+  }
+
+  function finishWireDrag(event) {
+    const drag = state.wireDrag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (drag.moved) state.suppressWireClickUntil = Date.now() + 250;
+    dom.wireCanvas.releasePointerCapture?.(event.pointerId);
+    dom.wireCanvas.classList.remove('dragging-node');
+    state.wireDrag = null;
+    saveSettingsSoon();
+    renderWireView();
+  }
+
+  function resetWireLayout() {
+    state.wireNodePositions[state.wireMode] = {};
+    state.wireDrag = null;
+    saveSettingsSoon();
+    renderWireView();
+    showToast(`${state.wireMode === 'underhood' ? 'Under-the-hood' : 'Overview'} wire layout reset.`);
   }
 
   function renderWireInspector(model) {
@@ -1728,6 +1807,8 @@
       state.mappings = {};
       state.variables = [];
       state.wireRelations = [];
+      state.wireNodePositions = { overview: {}, underhood: {} };
+      state.wireDrag = null;
       state.selectedWireNode = 'consolidated.quantity';
       state.rates = {};
       state.rateDates = {};
@@ -1745,6 +1826,7 @@
       state.groups = [];
       state.items = {};
       state.sales = { ...SALES_DEFAULTS };
+      state.scenario = { salesDelta: 0, purchaseDelta: 0, inboundDelta: 0, warehouseDelta: 0 };
       state.supplier = { ...SUPPLIER_DEFAULTS };
       FLOW_OVERRIDE_KEYS.forEach((key) => { state.flowOverrides[key] = null; });
       state.flowUnlocked = false;
@@ -1754,12 +1836,12 @@
       state.consolidatedSearch = '';
       state.consolidatedFilter = 'all';
       state.pendingDisabledKits = null;
-      const restoredLocal = loadLocalSettings(file.name);
+      state.importWarnings = [];
       const restoredWorkbook = hydrateExportedSettings(workbook);
 
       const engineSheets = {};
       workbook.SheetNames.forEach((sheetName) => {
-        const matrix = worksheetToFormulaMatrix(workbook.Sheets[sheetName]);
+        const matrix = worksheetToFormulaMatrix(workbook.Sheets[sheetName], sheetName);
         state.matrices[sheetName] = matrix;
         engineSheets[sheetName] = prepareEngineMatrix(sheetName, workbook.Sheets[sheetName], matrix);
         state.mappings[sheetName] = detectMapping(matrix);
@@ -1803,8 +1885,10 @@
       saveSettingsSoon();
 
       const enabled = Object.values(state.mappings).filter((mapping) => mapping.enabled).length;
-      const restoredNote = restoredWorkbook ? ' Saved settings were restored from the workbook.' : restoredLocal ? ' Saved kit, freight and group settings for this workbook were restored.' : '';
-      setStatus(`Loaded ${file.name}. ${enabled} of ${workbook.SheetNames.length} sheets are included in consolidation.${restoredNote}`);
+      const restoredNote = restoredWorkbook ? ' Saved settings were restored from the workbook.' : '';
+      const warningNote = state.importWarnings.length ? ` Warning: ${state.importWarnings.join(' ')}` : '';
+      setStatus(`Loaded ${file.name}. ${enabled} of ${workbook.SheetNames.length} sheets are included in consolidation.${restoredNote}${warningNote}`, state.importWarnings.length ? 'warning' : '');
+      if (state.importWarnings.length) showToast(`Import warning: ${state.importWarnings.join(' ')}`);
       await refreshRates(false);
     } catch (error) {
       console.error(error);
@@ -1888,11 +1972,17 @@
     if (CURRENCIES.includes(outputCurrency)) state.config.outputCurrency = outputCurrency;
   }
 
-  function worksheetToFormulaMatrix(worksheet) {
+  function worksheetToFormulaMatrix(worksheet, sheetName = 'Worksheet') {
     if (!worksheet || !worksheet['!ref']) return [[]];
     const range = XLSX.utils.decode_range(worksheet['!ref']);
-    const lastRow = Math.min(range.e.r, MAX_IMPORT_ROWS - 1);
-    const lastCol = Math.min(range.e.c, MAX_IMPORT_COLS - 1);
+    const bounds = Core.importBounds(range.e.r, range.e.c, MAX_IMPORT_ROWS, MAX_IMPORT_COLS);
+    const lastRow = bounds.lastRow;
+    const lastCol = bounds.lastColumn;
+    if (bounds.truncatedRows || bounds.truncatedColumns) {
+      const imported = `${lastRow + 1} rows × ${lastCol + 1} columns`;
+      const source = `${bounds.sourceRows} rows × ${bounds.sourceColumns} columns`;
+      state.importWarnings.push(`“${sheetName}” was limited to ${imported} from ${source}.`);
+    }
     const matrix = [];
 
     for (let row = 0; row <= lastRow; row += 1) {
@@ -2259,7 +2349,8 @@
   }
 
   function buildConsolidatedItem(occurrences) {
-    const sources = [...new Set(occurrences.map((item) => item.sheetName))];
+    const occurrenceSummary = Core.summarizeOccurrences(occurrences);
+    const sources = occurrenceSummary.sources;
     const ordered = [...occurrences].sort((a, b) => {
       const qtyDiff = (b.quantity ?? -Infinity) - (a.quantity ?? -Infinity);
       if (qtyDiff !== 0) return qtyDiff;
@@ -2271,7 +2362,7 @@
     const key = representative.key;
     const override = state.items[key] || {};
     const group = groupById(override.group);
-    const sourceMaxQuantity = Math.max(...occurrences.map((item) => item.quantity));
+    const sourceMaxQuantity = occurrenceSummary.maxQuantity;
     const quantityOverridden = Number.isFinite(override.quantity);
     const maxQuantity = quantityOverridden ? override.quantity : sourceMaxQuantity;
     const multiplier = effectiveMultiplier(key);
@@ -2288,7 +2379,7 @@
       key,
       part: representative.part,
       description: representative.description,
-      common: sources.length > 1,
+      common: occurrenceSummary.common,
       sourceMaxQuantity,
       maxQuantity,
       quantityOverridden,
@@ -2317,12 +2408,6 @@
     };
   }
 
-  function allocationWeight(item) {
-    if (state.freight.allocation === 'quantity') return Math.max(0, item.maxQuantity || 0);
-    if (state.freight.allocation === 'lines') return item.maxQuantity > 0 ? 1 : 0;
-    return Math.max(0, item.discountedTotal ?? 0);
-  }
-
   // Adds consolidated freight, duty, insurance, clearance, VAT and landed cost to each line.
   function applyLandedCosts(items, allocateShipment) {
     const freight = state.freight;
@@ -2330,29 +2415,31 @@
     const vatRate = state.config.vatRate;
     const shipment = allocateShipment ? toOutput(freight.consolidatedShipment, freight.consolidatedCurrency) : 0;
     const clearance = allocateShipment ? toOutput(freight.clearanceFee, freight.clearanceCurrency) : 0;
-    const totalWeight = items.reduce((sum, item) => sum + allocationWeight(item), 0);
+    const shares = Core.allocationShares(items, freight.allocation);
 
-    items.forEach((item) => {
-      const share = allocateShipment && totalWeight > 0 ? allocationWeight(item) / totalWeight : 0;
+    items.forEach((item, index) => {
+      const share = allocateShipment ? shares[index] : 0;
       const purchase = item.discountedTotal;
       item.allocationShare = share;
       item.consolidatedFreight = shipment === null ? null : shipment * share;
       item.clearance = clearance === null ? null : clearance * share;
       item.insurance = purchase === null ? null : purchase * freight.insuranceRate;
-      const customsValue = (purchase ?? 0) + (item.kitFreight ?? 0) + (item.consolidatedFreight ?? 0) + (item.insurance ?? 0);
-      item.duty = purchase === null ? null : customsValue * freight.dutyRate;
-      item.importCosts = (item.insurance ?? 0) + (item.duty ?? 0) + (item.clearance ?? 0);
-      item.freightAndImport = (item.kitFreight ?? 0) + (item.consolidatedFreight ?? 0) + item.importCosts;
+      item.missingFreight = item.kitFreight === null || (allocateShipment && (shipment === null || clearance === null));
+      const costComponents = [purchase, item.kitFreight, item.consolidatedFreight, item.insurance, item.clearance];
+      const costsComplete = costComponents.every((value) => value !== null && Number.isFinite(value));
+      const customsValue = costsComplete ? purchase + item.kitFreight + item.consolidatedFreight + item.insurance : null;
+      item.duty = customsValue === null ? null : customsValue * freight.dutyRate;
+      item.importCosts = costsComplete ? item.insurance + item.duty + item.clearance : null;
+      item.freightAndImport = costsComplete ? item.kitFreight + item.consolidatedFreight + item.importCosts : null;
       item.shippingMargin = margin;
-      item.freightWithMargin = item.freightAndImport / (1 - margin);
-      item.lineTotal = item.sellingTotal === null ? null : item.sellingTotal + item.freightWithMargin;
+      item.freightWithMargin = item.freightAndImport === null ? null : item.freightAndImport / (1 - margin);
+      item.lineTotal = item.sellingTotal === null || item.freightWithMargin === null ? null : item.sellingTotal + item.freightWithMargin;
       item.vat = item.lineTotal === null ? null : item.lineTotal * vatRate;
       item.lineTotalInclVat = item.lineTotal === null ? null : item.lineTotal + item.vat;
-      item.landedCost = purchase === null ? null : purchase + item.freightAndImport;
-      item.importVat = purchase === null ? null : (customsValue + (item.duty ?? 0)) * vatRate;
+      item.landedCost = purchase === null || item.freightAndImport === null ? null : purchase + item.freightAndImport;
+      item.importVat = customsValue === null || item.duty === null ? null : (customsValue + item.duty) * vatRate;
       item.unitSalesPrice = item.lineTotal !== null && item.maxQuantity > 0 ? item.lineTotal / item.maxQuantity : null;
       item.unitLandedCost = item.landedCost !== null && item.maxQuantity > 0 ? item.landedCost / item.maxQuantity : null;
-      item.missingFreight = item.kitFreight === null || (allocateShipment && (shipment === null || clearance === null));
       // Legacy names used by the warehouse sheet and older exports.
       item.shipping = item.kitFreight;
       item.shippingWithMargin = item.freightWithMargin;
@@ -3101,6 +3188,7 @@
       perUnit[key] = manual[key] ? state.flowOverrides[key] : derived[key];
     });
     const outboundPerUnit = state.sales.customerPaysOutbound ? 0 : perUnit.outboundPerUnit ?? 0;
+    const completeness = Core.assessProfitabilityCompleteness({ warehouseRateMissing: nok === null, items });
 
     const rows = items.map((item) => {
       const sales = item.salesPerYear || 0;
@@ -3116,6 +3204,7 @@
         sales,
         unitPrice,
         unitCost,
+        complete: completeness.complete && unitPrice !== null && unitCost !== null,
         unitMargin: unitPrice === null || unitCost === null ? null : unitPrice - unitCost,
         revenue,
         cogs,
@@ -3181,6 +3270,9 @@
       outputVat: revenue * vatRate,
       importVat: items.reduce((sum, item) => sum + (item.importVat ?? 0), 0),
       warehouseRateMissing: nok === null,
+      complete: completeness.complete,
+      missingItemCount: completeness.missingItemCount,
+      missingReasons: completeness.reasons,
       averageUnitPrice: salesUnits > 0 ? revenue / salesUnits : null,
     };
   }
@@ -3209,7 +3301,7 @@
     if (options.status) {
       const status = document.createElement('span');
       status.className = `kpi-status ${options.status}`;
-      status.textContent = options.status === 'good' ? '▲ Profitable' : '▼ Loss-making';
+      status.textContent = options.status === 'good' ? '▲ Profitable' : options.status === 'incomplete' ? 'Estimate incomplete' : '▼ Loss-making';
       tile.append(status);
     }
     if (detail) {
@@ -3235,15 +3327,17 @@
     const model = calculateProfitability();
     state.lastProfitability = model;
     const output = state.config.outputCurrency;
-    dom.dashboardSubtitle.textContent = `${model.rows.length} parts from ${enabledSheetCount()} kits · ${formatNumber(model.salesUnits, 1)} expected units sold per year · ${formatNumber(model.inventoryUnits, 0)} units in stock.${model.warehouseRateMissing ? ' The NOK rate is unavailable, so warehouse costs are counted as zero.' : ''}`;
+    dom.dashboardSubtitle.textContent = `${model.rows.length} parts from ${enabledSheetCount()} kits · ${formatNumber(model.salesUnits, 1)} expected units sold per year · ${formatNumber(model.inventoryUnits, 0)} units in stock.${model.complete ? '' : ' Charts below show only the costs that can currently be calculated.'}`;
     dom.dashboardBadge.textContent = `${output} · excl. VAT`;
+    dom.dashboardIncomplete.classList.toggle('hidden', model.complete);
+    dom.dashboardIncomplete.textContent = model.complete ? '' : `Profitability is not final: missing ${model.missingReasons.join(' and ')}. Complete these inputs before relying on profit, ROI or payback.`;
     const logistics = model.storage + model.outtake + model.outbound + model.fixed;
     dom.dashboardKpis.replaceChildren(
-      kpiTile('Annual net profit', formatWhole(model.net), `${formatWhole(model.monthlyNet)} per month${model.revenue > 0 ? ` · ${formatPercent(model.net / model.revenue)} of revenue` : ''}`, { hero: true, status: model.net >= 0 ? 'good' : 'critical' }),
+      kpiTile('Annual net profit', model.complete ? formatWhole(model.net) : 'Incomplete', model.complete ? `${formatWhole(model.monthlyNet)} per month${model.revenue > 0 ? ` · ${formatPercent(model.net / model.revenue)} of revenue` : ''}` : `${formatWhole(model.net)} known-cost result; do not use as final`, { hero: true, status: model.complete ? (model.net >= 0 ? 'good' : 'critical') : 'incomplete' }),
       kpiTile('Revenue / yr', formatWhole(model.revenue), `${formatWhole(model.revenue * (1 + state.config.vatRate))} incl. VAT`),
       kpiTile('Gross profit / yr', formatWhole(model.gross), model.grossMargin === null ? 'No expected revenue' : `${formatPercent(model.grossMargin)} gross margin`),
       kpiTile('Warehouse & logistics / yr', formatWhole(logistics), `Storage ${formatWhole(model.storage)} · handling ${formatWhole(model.outtake + model.outbound + model.fixed)}`),
-      kpiTile('Payback on stock', model.paybackMonths === null ? 'Not reached' : `${formatNumber(model.paybackMonths, 1)} months`, `${formatWhole(model.investment)} landed stock${model.roi === null ? '' : ` · ${formatPercent(model.roi)} annual return`}`),
+      kpiTile('Payback on stock', model.complete ? (model.paybackMonths === null ? 'Not reached' : `${formatNumber(model.paybackMonths, 1)} months`) : 'Incomplete', `${formatWhole(model.investment)} landed stock${model.complete && model.roi !== null ? ` · ${formatPercent(model.roi)} annual return` : ''}`),
     );
     setStats(dom.vatSummary, [
       ['Output VAT / yr', formatWhole(model.outputVat)],
@@ -3254,6 +3348,33 @@
     renderDashboardCharts(model);
     renderGroupTable(model);
     renderDashboardItems(model);
+    renderScenarioComparison(model);
+  }
+
+  function calculateScenario(model) {
+    return Core.projectScenario(model, state.consolidated, state.scenario);
+  }
+
+  function renderScenarioComparison(model) {
+    const scenario = calculateScenario(model);
+    const table = document.createElement('table');
+    table.className = 'scenario-table';
+    const head = table.createTHead().insertRow();
+    ['', 'Current', 'Scenario'].forEach((label) => { const cell = document.createElement('th'); cell.textContent = label; head.append(cell); });
+    const body = table.createTBody();
+    [
+      ['Revenue / yr', formatWhole(model.revenue), formatWhole(scenario.revenue)],
+      ['Net profit / yr', model.complete ? formatWhole(model.net) : 'Incomplete', model.complete ? formatWhole(scenario.net) : 'Incomplete'],
+      ['Net margin', model.complete && model.revenue > 0 ? formatPercent(model.net / model.revenue) : '—', model.complete && scenario.margin !== null ? formatPercent(scenario.margin) : '—'],
+      ['Stock investment', formatWhole(model.investment), formatWhole(scenario.investment)],
+      ['Payback', model.complete && model.paybackMonths !== null ? `${formatNumber(model.paybackMonths, 1)} mo` : '—', model.complete && scenario.paybackMonths !== null ? `${formatNumber(scenario.paybackMonths, 1)} mo` : '—'],
+    ].forEach(([label, current, changed]) => {
+      const row = body.insertRow();
+      row.insertCell().textContent = label;
+      row.insertCell().textContent = current;
+      row.insertCell().textContent = changed;
+    });
+    dom.scenarioSummary.replaceChildren(table);
   }
 
   function renderDashboardCharts(model = state.lastProfitability) {
@@ -5318,7 +5439,7 @@
     const col = (letter) => `${letter}$${itemStart}:${letter}$${itemEnd}`;
     const rows = [
       ['Profitability estimate'],
-      [`Expected annual sales, landed cost and logistics in ${o}, excluding VAT. Change the blue inputs in Consolidated or the per-unit values below and Excel recalculates.`],
+      [`Expected annual sales, landed cost and logistics in ${o}, excluding VAT. Change the blue inputs in Consolidated or the per-unit values below and Excel recalculates.${model.complete ? '' : ` ESTIMATE INCOMPLETE: missing ${model.missingReasons.join(' and ')}; totals show only calculable values.`}`],
       [],
       ['Per-unit logistics', 'Value', 'Source'],
       [`Storage per stock unit / month (${o})`, model.perUnit.storagePerUnitMonth ?? 0, model.manual.storagePerUnitMonth ? 'Manual' : 'Warehouse monthly storage ÷ stock units'],
@@ -5641,6 +5762,7 @@
     dom.statusMessage.textContent = message;
     dom.statusBar.classList.toggle('busy', type === 'busy');
     dom.statusBar.classList.toggle('error', type === 'error');
+    dom.statusBar.classList.toggle('warning', type === 'warning');
   }
 
   let toastTimer;
