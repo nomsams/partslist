@@ -1,0 +1,5683 @@
+/* global XLSX, HyperFormula */
+
+(() => {
+  'use strict';
+
+  const FormulaEngine = window.HyperFormula?.HyperFormula || window.HyperFormula;
+  const MAX_IMPORT_ROWS = 5000;
+  const MAX_IMPORT_COLS = 100;
+  const MAX_GRID_ROWS = 250;
+  const MAX_GRID_COLS = 30;
+  const MAX_FILL_CELLS = 10000;
+  const RATE_CACHE_MS = 6 * 60 * 60 * 1000;
+  const RATE_SOURCE = 'https://api.frankfurter.dev/v2';
+  const WAREHOUSE_RATE_STORAGE_KEY = 'partslist.warehouse-rates.caesar14.v1';
+  const WAREHOUSE_RATE_PRIVATE_FILE = 'warehouse-rates.private.json';
+  const CAESAR_SHIFT = 14;
+  const PRINTABLE_ASCII_START = 32;
+  const PRINTABLE_ASCII_RANGE = 95;
+  const CURRENCIES = ['SEK', 'EUR', 'USD', 'GBP', 'NOK', 'DKK', 'CHF', 'CAD', 'AUD', 'JPY', 'CNY', 'PLN'];
+  const WAREHOUSE_DEFAULTS = Object.freeze({
+    shelfShare: 55,
+    drawerShare: 25,
+    binsPerShelf: 4,
+    shelvesPerRack: 4,
+    unitsPerBin: 5,
+    unitsPerShelf: 20,
+    unitsPerDrawer: 8,
+    unitsPerPallet: 60,
+    palletType: 'eu',
+    palletHeight: '120',
+    receipts: 2,
+    receiptLines: 8,
+    orders: 10,
+    orderLines: 5,
+    ediLabels: 10,
+    businessParcels: 8,
+    privateParcels: 2,
+    packaging: 0,
+    includeWms: false,
+    site: 'Norwegian 3PL',
+  });
+  const FREIGHT_DEFAULTS = Object.freeze({
+    consolidatedShipment: 0,
+    consolidatedCurrency: 'USD',
+    allocation: 'value',
+    dutyRate: 0,
+    insuranceRate: 0,
+    clearanceFee: 0,
+    clearanceCurrency: 'NOK',
+  });
+  const SALES_DEFAULTS = Object.freeze({
+    defaultMode: 'turns',
+    defaultValue: 1,
+    horizonMonths: 24,
+    customerPaysOutbound: false,
+  });
+  const KIT_DEFAULTS = Object.freeze({ shippingMode: 'sheet', shippingAmount: 1, shippingCurrency: 'SEK' });
+  const KIT_SHIPPING_MODES = { sheet: 'Sheet values', perLine: 'Per line', kitTotal: 'Whole kit' };
+  const SUPPLIER_DEFAULTS = Object.freeze({ name: 'TEI Rock Drills', location: 'Montrose, Colorado', country: '840', countryName: 'United States', lat: 38.478, lon: -107.876 });
+  // ISO 3166-1 numeric codes, matching the world-atlas country ids.
+  const EU_MEMBERS = new Set(['040', '056', '100', '191', '196', '203', '208', '233', '246', '250', '276', '300', '348', '372', '380', '428', '440', '442', '470', '528', '616', '620', '642', '703', '705', '724', '752']);
+  const EFTA_MEMBERS = new Set(['352', '438', '756']);
+  const ORIGIN_PRESETS = Object.freeze({
+    840: { name: 'United States', place: 'Montrose, Colorado', lat: 38.478, lon: -107.876 },
+    756: { name: 'Switzerland', place: 'Zürich', lat: 47.377, lon: 8.54 },
+    100: { name: 'Bulgaria', place: 'Sofia', lat: 42.698, lon: 23.322 },
+    276: { name: 'Germany', place: 'Frankfurt', lat: 50.11, lon: 8.682 },
+    752: { name: 'Sweden', place: 'Stockholm', lat: 59.329, lon: 18.069 },
+    380: { name: 'Italy', place: 'Milan', lat: 45.464, lon: 9.19 },
+    826: { name: 'United Kingdom', place: 'London', lat: 51.507, lon: -0.128 },
+    124: { name: 'Canada', place: 'Toronto', lat: 43.653, lon: -79.383 },
+    156: { name: 'China', place: 'Shanghai', lat: 31.23, lon: 121.474 },
+    392: { name: 'Japan', place: 'Tokyo', lat: 35.676, lon: 139.65 },
+  });
+  const MAP_DATA_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-50m.json';
+  const NORWAY_ARRIVAL = [11.1, 60.2];
+  const NORWAY_WAREHOUSE = [10.95, 59.7];
+  const NORWAY_CUSTOMERS = [['Bergen', 60.391, 5.322], ['Ålesund', 62.472, 6.155], ['Stavanger', 58.97, 5.733], ['Kristiansand', 58.146, 7.996], ['Trondheim', 63.431, 10.395], ['Bodø', 67.28, 14.405], ['Tromsø', 69.649, 18.955]];
+  const FLOW_OVERRIDE_KEYS = ['outboundPerUnit', 'outtakePerUnit', 'storagePerUnitMonth'];
+  // Validated categorical order (dataviz reference palette); groups take slots in creation order.
+  const GROUP_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
+  const MAX_GROUPS = GROUP_COLORS.length;
+  const SETTINGS_STORAGE_PREFIX = 'partslist.settings.caesar14.v1:';
+  const SETTINGS_SHEET_MARKER = 'partslist settings';
+  const VIEW = Object.freeze({ consolidated: ':consolidated', dashboard: ':dashboard', warehouse: ':warehouse', wire: ':wire' });
+  const SPECIAL_VIEWS = new Set(Object.values(VIEW));
+  const WAREHOUSE_RATE_DEFAULTS = Object.freeze({
+    eu120: 0,
+    eu220: 0,
+    sea120: 0,
+    sea220: 0,
+    shelf: 0,
+    drawer: 0,
+    edi: 0,
+    receiptBase: 0,
+    receiptLine: 0,
+    orderBase: 0,
+    orderLine: 0,
+    parcel: 0,
+    privateSurcharge: 0,
+    wms: 0,
+  });
+
+  const FIELD_LABELS = {
+    part: 'Part / SKU',
+    description: 'Description',
+    quantity: 'Quantity',
+    price: 'Unit price',
+    discountedTotal: 'Discounted total',
+    sellingTotal: 'Price after multiplier',
+    shipping: 'Shipping',
+    shippingWithMargin: 'Shipping incl. margin',
+    currency: 'Currency',
+  };
+
+  const HEADER_TERMS = {
+    part: ['part number', 'part no', 'part #', 'part', 'sku', 'item code', 'item number', 'item no', 'article number', 'article', 'component', 'product code', 'product'],
+    description: ['part description', 'item description', 'description', 'details', 'name'],
+    quantity: ['maximum quantity', 'max quantity', 'quantity', 'qty', 'amount', 'count', 'pcs', 'pieces', 'units'],
+    price: ['unit price', 'unit cost', 'purchase price', 'price each', 'price', 'cost each', 'cost'],
+    discountedTotal: ['rabatt 30', 'rabatt', 'discounted total', 'after discount', 'discount'],
+    sellingTotal: ['dubblering', 'price after multiplier', 'selling total', 'sales total'],
+    shipping: ['frakt', 'shipping cost', 'shipment cost', 'freight cost', 'delivery cost', 'transport cost', 'shipping', 'shipment', 'freight', 'delivery', 'transport'],
+    shippingWithMargin: ['inkl fraktmarginal', 'fraktmarginal', 'shipping incl margin', 'freight incl margin', 'shipping with margin'],
+    currency: ['currency code', 'currency', 'curr', 'ccy'],
+  };
+
+  const state = {
+    workbook: null,
+    fileName: '',
+    matrices: {},
+    hf: null,
+    sheetIds: {},
+    mappings: {},
+    variables: [],
+    consolidated: [],
+    rates: {},
+    rateDates: {},
+    pairRates: {},
+    liveRateCells: [],
+    dependencyIndex: new Map(),
+    activeView: VIEW.consolidated,
+    selectedCell: null,
+    config: {
+      discount: 0.30,
+      multiplier: 2,
+      shippingMargin: 0.15,
+      vatRate: 0.25,
+      sourceCurrency: 'USD',
+      outputCurrency: 'SEK',
+    },
+    warehouse: {
+      ...WAREHOUSE_DEFAULTS,
+      rates: { ...WAREHOUSE_RATE_DEFAULTS },
+    },
+    freight: { ...FREIGHT_DEFAULTS },
+    kits: {},
+    groups: [],
+    items: {},
+    sales: { ...SALES_DEFAULTS },
+    supplier: { ...SUPPLIER_DEFAULTS },
+    flowOverrides: { outboundPerUnit: null, outtakePerUnit: null, storagePerUnitMonth: null },
+    flowUnlocked: false,
+    flowMode: 'route',
+    map: { features: null, names: null, loading: false, error: null, compare: null, hover: null, pinned: null },
+    customsPinned: false,
+    excludedItems: [],
+    kitSummaries: [],
+    selectedKeys: new Set(),
+    selectionAnchor: null,
+    selectionAction: 'group',
+    sheetSelection: { sheetName: null, rows: new Set(), anchor: null },
+    consolidatedSearch: '',
+    consolidatedFilter: 'all',
+    pendingDisabledKits: null,
+    settingsSaveTimer: null,
+    wireRelations: [],
+    selectedWireNode: 'consolidated.quantity',
+    wireMode: 'overview',
+    wireExpanded: false,
+    warehousePreviewTransform: { scale: 1, x: 0, y: 0 },
+    warehousePreviewDrag: null,
+    secureDownloadUrl: null,
+  };
+
+  const el = (id) => document.getElementById(id);
+  const dom = {
+    file: el('workbook-file'),
+    exportButton: el('export-button'),
+    statusBar: el('status-bar'),
+    statusMessage: el('status-message'),
+    emptyPanel: el('empty-panel'),
+    controls: el('workbook-controls'),
+    workbookName: el('workbook-name'),
+    sheetCount: el('sheet-count'),
+    sourceCurrency: el('source-currency'),
+    outputCurrency: el('output-currency'),
+    refreshRates: el('refresh-rates'),
+    rateStatus: el('rate-status'),
+    mappingList: el('mapping-list'),
+    variablesList: el('variables-list'),
+    variableForm: el('variable-form'),
+    variableName: el('variable-name'),
+    variableExpression: el('variable-expression'),
+    securePassword: el('secure-password'),
+    securePasswordConfirm: el('secure-password-confirm'),
+    secureExport: el('secure-export'),
+    secureFile: el('secure-project-file'),
+    secureDownload: el('secure-download'),
+    tabs: el('view-tabs'),
+    welcome: el('welcome-view'),
+    consolidatedView: el('consolidated-view'),
+    consolidatedSummary: el('consolidated-summary'),
+    summaryCards: el('summary-cards'),
+    consolidatedTable: el('consolidated-table'),
+    warehouseView: el('warehouse-view'),
+    warehouseDataNote: el('warehouse-data-note'),
+    warehouseSummaryCards: el('warehouse-summary-cards'),
+    warehousePalletShare: el('warehouse-pallet-share'),
+    warehouseShareWarning: el('warehouse-share-warning'),
+    warehouseCapacityLabel: el('warehouse-capacity-label'),
+    warehousePreview: el('warehouse-preview'),
+    warehouseStorageLegend: el('warehouse-storage-legend'),
+    warehouseCostBody: el('warehouse-cost-body'),
+    warehouseMonthlyTotal: el('warehouse-monthly-total'),
+    warehouseOutputHeader: el('warehouse-output-header'),
+    warehouseCurrencyReference: el('warehouse-currency-reference'),
+    warehouseRateInputs: el('warehouse-rate-inputs'),
+    warehouseRatesExport: el('warehouse-rates-export'),
+    warehouseRatesFile: el('warehouse-rates-file'),
+    warehouseRatesStatus: el('warehouse-rates-status'),
+    whShelfShare: el('wh-shelf-share'),
+    whDrawerShare: el('wh-drawer-share'),
+    whBinsPerShelf: el('wh-bins-per-shelf'),
+    whShelvesPerRack: el('wh-shelves-per-rack'),
+    whUnitsPerBin: el('wh-units-per-bin'),
+    whUnitsShelf: el('wh-units-shelf'),
+    whUnitsDrawer: el('wh-units-drawer'),
+    whUnitsPallet: el('wh-units-pallet'),
+    whPalletType: el('wh-pallet-type'),
+    whPalletHeight: el('wh-pallet-height'),
+    whReceipts: el('wh-receipts'),
+    whReceiptLines: el('wh-receipt-lines'),
+    whOrders: el('wh-orders'),
+    whOrderLines: el('wh-order-lines'),
+    whEdiLabels: el('wh-edi-labels'),
+    whBusinessParcels: el('wh-business-parcels'),
+    whPrivateParcels: el('wh-private-parcels'),
+    whPackaging: el('wh-packaging'),
+    whWms: el('wh-wms'),
+    wireView: el('wire-view'),
+    wireCanvas: el('wire-canvas'),
+    wireSelectedTitle: el('wire-selected-title'),
+    wireSelectedDetail: el('wire-selected-detail'),
+    wireSelectedLinks: el('wire-selected-links'),
+    wireRelationForm: el('wire-relation-form'),
+    wireFrom: el('wire-from'),
+    wireTo: el('wire-to'),
+    wireLabel: el('wire-label'),
+    wireCustomList: el('wire-custom-list'),
+    wireDetailMode: el('wire-detail-mode'),
+    wireExpand: el('wire-expand'),
+    sheetView: el('sheet-view'),
+    grid: el('sheet-grid'),
+    selectedAddress: el('selected-address'),
+    formulaInput: el('formula-input'),
+    saveCell: el('save-cell'),
+    targetRange: el('target-range'),
+    rangeFormula: el('range-formula'),
+    applyRange: el('apply-range'),
+    clearRange: el('clear-range'),
+    dependencyPanel: el('dependency-panel'),
+    dropZone: el('drop-zone'),
+    toast: el('toast'),
+    resetSettings: el('reset-settings'),
+    freightSummary: el('freight-summary'),
+    kitBar: el('kit-bar'),
+    kitBreakdownTable: el('kit-breakdown-table'),
+    consolidatedSearch: el('consolidated-search'),
+    consolidatedFilter: el('consolidated-filter'),
+    consolidatedCount: el('consolidated-count'),
+    consolidatedActions: el('consolidated-actions'),
+    dashboardView: el('dashboard-view'),
+    dashboardSubtitle: el('dashboard-subtitle'),
+    dashboardBadge: el('dashboard-badge'),
+    dashboardKitBar: el('dashboard-kit-bar'),
+    dashboardKpis: el('dashboard-kpis'),
+    vatSummary: el('vat-summary'),
+    groupList: el('group-list'),
+    groupForm: el('group-form'),
+    groupName: el('group-name'),
+    chartWaterfall: el('chart-waterfall'),
+    waterfallTable: el('waterfall-table'),
+    chartCumulative: el('chart-cumulative'),
+    cumulativeTable: el('cumulative-table'),
+    chartGroups: el('chart-groups'),
+    groupTable: el('group-table'),
+    dashboardItems: el('dashboard-items'),
+    chartTooltip: el('chart-tooltip'),
+    flowOverview: el('flow-overview'),
+    flowFactoryStats: el('flow-factory-stats'),
+    flowKitRows: el('flow-kit-rows'),
+    flowImportVat: el('flow-import-vat'),
+    flowInboundTotal: el('flow-inbound-total'),
+    flowNorwayStats: el('flow-norway-stats'),
+    flowPalletLabel: el('flow-pallet-label'),
+    flowPalletRate: el('flow-pallet-rate'),
+    flowWarehouseTotal: el('flow-warehouse-total'),
+    flowWarehouseStats: el('flow-warehouse-stats'),
+    flowPerItem: el('flow-per-item'),
+    flowLock: el('flow-lock'),
+    flowResetOverrides: el('flow-reset-overrides'),
+    flowCustomerStats: el('flow-customer-stats'),
+    sheetActions: el('sheet-actions'),
+    customsPopover: el('customs-popover'),
+    flowMap: el('flow-map'),
+    mapWorld: el('map-world'),
+    mapNorway: el('map-norway'),
+    mapInfo: el('map-info'),
+  };
+
+  initialize();
+
+  async function initialize() {
+    populateCurrencySelect(dom.sourceCurrency, state.config.sourceCurrency);
+    populateCurrencySelect(dom.outputCurrency, state.config.outputCurrency);
+    document.querySelectorAll('[data-currency-select]').forEach((select) => populateCurrencySelect(select, getPath(select.dataset.bind)));
+    populateOriginSelects();
+    syncBoundInputs();
+    const restoredRates = loadPersistedWarehouseRates();
+    if (!restoredRates) await loadPrivateWarehouseRateFile();
+    syncWarehouseRateInputs();
+    bindEvents();
+    if (!window.XLSX || !FormulaEngine) {
+      setStatus('The spreadsheet libraries could not be loaded. Check the internet connection and reload.', 'error');
+    }
+  }
+
+  function bindEvents() {
+    dom.file.addEventListener('change', (event) => {
+      const [file] = event.target.files;
+      if (file) importWorkbook(file);
+      event.target.value = '';
+    });
+
+    ['dragenter', 'dragover'].forEach((name) => dom.dropZone.addEventListener(name, (event) => {
+      event.preventDefault();
+      dom.dropZone.classList.add('dragging');
+    }));
+    ['dragleave', 'drop'].forEach((name) => dom.dropZone.addEventListener(name, (event) => {
+      event.preventDefault();
+      dom.dropZone.classList.remove('dragging');
+    }));
+    dom.dropZone.addEventListener('drop', (event) => {
+      const [file] = event.dataTransfer.files;
+      if (file) importWorkbook(file);
+    });
+
+    // One delegated handler keeps every copy of a value (sidebar, flow, dashboard) in sync.
+    document.addEventListener('input', handleBoundEvent);
+    document.addEventListener('change', handleBoundEvent);
+    document.addEventListener('focusout', (event) => {
+      if (event.target?.matches?.('[data-bind], [data-kit-bind], [data-group-field], [data-override]')) setTimeout(syncBoundInputs, 0);
+    });
+
+    dom.sourceCurrency.addEventListener('change', () => {
+      state.config.sourceCurrency = dom.sourceCurrency.value;
+      saveSettingsSoon();
+      rebuildConsolidation();
+      refreshRates(false);
+    });
+    dom.outputCurrency.addEventListener('change', () => {
+      state.config.outputCurrency = dom.outputCurrency.value;
+      state.rates = {};
+      saveSettingsSoon();
+      rebuildConsolidation();
+      refreshRates(false);
+    });
+    dom.resetSettings.addEventListener('click', resetProjectSettings);
+    dom.consolidatedSearch.addEventListener('input', () => {
+      state.consolidatedSearch = dom.consolidatedSearch.value;
+      renderConsolidated();
+    });
+    dom.consolidatedFilter.addEventListener('change', () => {
+      state.consolidatedFilter = dom.consolidatedFilter.value;
+      renderConsolidated();
+    });
+    dom.consolidatedTable.addEventListener('click', handleConsolidatedTableClick);
+    dom.groupForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const group = addGroup(dom.groupName.value);
+      if (group) dom.groupName.value = '';
+    });
+    dom.groupList.addEventListener('click', (event) => {
+      const remove = event.target.closest('[data-remove-group]');
+      if (remove) deleteGroup(remove.dataset.removeGroup);
+    });
+    dom.flowLock.addEventListener('click', () => {
+      state.flowUnlocked = !state.flowUnlocked;
+      renderFlowLock();
+      if (state.flowUnlocked) dom.flowPerItem.querySelector('[data-override]')?.focus();
+    });
+    dom.flowResetOverrides.addEventListener('click', () => {
+      FLOW_OVERRIDE_KEYS.forEach((key) => { state.flowOverrides[key] = null; });
+      saveSettingsSoon();
+      refreshViews();
+      showToast('Per-item values reset to the calculated amounts.');
+    });
+    [dom.kitBar, dom.dashboardKitBar].forEach((bar) => bar.addEventListener('click', (event) => {
+      const chip = event.target.closest('[data-kit-toggle]');
+      if (chip) setKitEnabled(chip.dataset.kitToggle, chip.dataset.kitEnable === 'true');
+    }));
+    [dom.consolidatedActions, dom.sheetActions].forEach((bar) => {
+      bar.addEventListener('change', handleSelectionBarChange);
+      bar.addEventListener('click', handleSelectionBarClick);
+      bar.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && event.target.matches('input')) {
+          event.preventDefault();
+          applySelectionAction(bar);
+        }
+      });
+    });
+    bindChartTooltip();
+    bindCustomsPopover();
+    bindMapEvents();
+    if ('ResizeObserver' in window) {
+      let resizeFrame = 0;
+      let lastWidths = '';
+      const observer = new ResizeObserver(() => {
+        cancelAnimationFrame(resizeFrame);
+        resizeFrame = requestAnimationFrame(() => {
+          const widths = [dom.chartWaterfall, dom.chartCumulative, dom.chartGroups, dom.mapWorld, dom.mapNorway].map((node) => node.clientWidth).join(',');
+          if (widths === lastWidths) return;
+          lastWidths = widths;
+          if (state.activeView === VIEW.dashboard) renderDashboardCharts();
+          if (state.activeView === VIEW.wire && state.flowMode === 'map') renderMaps();
+        });
+      });
+      [dom.chartWaterfall, dom.chartCumulative, dom.chartGroups, dom.mapWorld, dom.mapNorway].forEach((node) => observer.observe(node));
+    }
+    dom.refreshRates.addEventListener('click', () => refreshRates(true));
+    dom.exportButton.addEventListener('click', exportWorkbook);
+
+    dom.saveCell.addEventListener('click', saveSelectedCell);
+    dom.formulaInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') saveSelectedCell();
+    });
+    dom.applyRange.addEventListener('click', () => applyToRange(false));
+    dom.clearRange.addEventListener('click', () => applyToRange(true));
+    dom.variableForm.addEventListener('submit', addVariable);
+    dom.secureExport.addEventListener('click', exportSecureProject);
+    dom.secureFile.addEventListener('change', (event) => {
+      const [file] = event.target.files;
+      if (file) importSecureProject(file);
+      event.target.value = '';
+    });
+    dom.wireRelationForm.addEventListener('submit', addWireRelation);
+    dom.wireDetailMode.addEventListener('change', () => {
+      state.wireMode = dom.wireDetailMode.value === 'underhood' ? 'underhood' : 'overview';
+      state.selectedWireNode = state.wireMode === 'underhood' ? 'column.quantity' : 'consolidated.quantity';
+      renderWireView();
+    });
+    dom.wireExpand.addEventListener('click', toggleWireExpanded);
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && state.wireExpanded) toggleWireExpanded(false);
+    });
+    bindWarehouseEvents();
+  }
+
+  function toggleWireExpanded(force) {
+    state.wireExpanded = typeof force === 'boolean' ? force : !state.wireExpanded;
+    dom.wireView.classList.toggle('wire-expanded', state.wireExpanded);
+    dom.wireExpand.textContent = state.wireExpanded ? 'Close expanded view' : 'Expand view';
+    dom.wireExpand.setAttribute('aria-pressed', String(state.wireExpanded));
+  }
+
+  function bindWarehouseEvents() {
+    const numericFields = [
+      [dom.whShelfShare, 'shelfShare', 0],
+      [dom.whDrawerShare, 'drawerShare', 0],
+      [dom.whBinsPerShelf, 'binsPerShelf', 1],
+      [dom.whShelvesPerRack, 'shelvesPerRack', 1],
+      [dom.whUnitsPerBin, 'unitsPerBin', 1],
+      [dom.whUnitsDrawer, 'unitsPerDrawer', 1],
+      [dom.whUnitsPallet, 'unitsPerPallet', 1],
+      [dom.whReceipts, 'receipts', 0],
+      [dom.whReceiptLines, 'receiptLines', 0],
+      [dom.whOrders, 'orders', 0],
+      [dom.whOrderLines, 'orderLines', 0],
+      [dom.whEdiLabels, 'ediLabels', 0],
+      [dom.whBusinessParcels, 'businessParcels', 0],
+      [dom.whPrivateParcels, 'privateParcels', 0],
+      [dom.whPackaging, 'packaging', 0],
+    ];
+
+    numericFields.forEach(([input, key, minimum]) => {
+      input.addEventListener('input', () => {
+        let value = Math.max(minimum, toNumber(input.value) ?? minimum);
+        if (key === 'shelfShare' || key === 'drawerShare') value = clamp(value, 0, 100);
+        if (key === 'binsPerShelf') value = clamp(Math.round(value), 1, 12);
+        if (key === 'shelvesPerRack') value = clamp(Math.round(value), 1, 8);
+        state.warehouse[key] = value;
+        state.warehouse.unitsPerShelf = state.warehouse.binsPerShelf * state.warehouse.unitsPerBin;
+        dom.whUnitsShelf.value = String(state.warehouse.unitsPerShelf);
+        if (key === 'shelfShare' || key === 'drawerShare') constrainStorageShares(key);
+        saveSettingsSoon();
+        refreshViews();
+      });
+    });
+
+    dom.whPalletType.addEventListener('change', () => {
+      state.warehouse.palletType = dom.whPalletType.value === 'sea' ? 'sea' : 'eu';
+      saveSettingsSoon();
+      refreshViews();
+    });
+    dom.whPalletHeight.addEventListener('change', () => {
+      state.warehouse.palletHeight = dom.whPalletHeight.value === '220' ? '220' : '120';
+      saveSettingsSoon();
+      refreshViews();
+    });
+    // The WMS checkbox and quoted-rate inputs use data-bind, shared with the wire-view flow.
+
+    dom.warehouseRatesExport.addEventListener('click', exportWarehouseRates);
+    dom.warehouseRatesFile.addEventListener('change', (event) => {
+      const [file] = event.target.files;
+      if (file) importWarehouseRates(file);
+      event.target.value = '';
+    });
+
+    dom.warehousePreview.addEventListener('wheel', (event) => {
+      event.preventDefault();
+      const direction = event.deltaY < 0 ? 1 : -1;
+      zoomWarehousePreview(direction * 0.12);
+    }, { passive: false });
+    dom.warehousePreview.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-preview-action]');
+      if (!button) return;
+      const action = button.dataset.previewAction;
+      if (action === 'in') zoomWarehousePreview(0.18);
+      if (action === 'out') zoomWarehousePreview(-0.18);
+      if (action === 'reset') resetWarehousePreview();
+    });
+    dom.warehousePreview.addEventListener('pointerdown', (event) => {
+      if (event.target.closest('button')) return;
+      dom.warehousePreview.setPointerCapture(event.pointerId);
+      state.warehousePreviewDrag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+      dom.warehousePreview.classList.add('dragging');
+    });
+    dom.warehousePreview.addEventListener('pointermove', (event) => {
+      const drag = state.warehousePreviewDrag;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const svg = dom.warehousePreview.querySelector('svg');
+      const rect = svg?.getBoundingClientRect();
+      if (!rect?.width || !rect?.height) return;
+      state.warehousePreviewTransform.x += (event.clientX - drag.x) * (760 / rect.width);
+      state.warehousePreviewTransform.y += (event.clientY - drag.y) * (420 / rect.height);
+      drag.x = event.clientX;
+      drag.y = event.clientY;
+      applyWarehousePreviewTransform();
+    });
+    const endPreviewDrag = (event) => {
+      if (!state.warehousePreviewDrag || state.warehousePreviewDrag.pointerId !== event.pointerId) return;
+      state.warehousePreviewDrag = null;
+      dom.warehousePreview.classList.remove('dragging');
+    };
+    dom.warehousePreview.addEventListener('pointerup', endPreviewDrag);
+    dom.warehousePreview.addEventListener('pointercancel', endPreviewDrag);
+  }
+
+  function constrainStorageShares(changedKey) {
+    const warehouse = state.warehouse;
+    const otherKey = changedKey === 'shelfShare' ? 'drawerShare' : 'shelfShare';
+    if (warehouse.shelfShare + warehouse.drawerShare <= 100) {
+      warehouse.shareMessage = '';
+      return;
+    }
+    warehouse[otherKey] = Math.max(0, 100 - warehouse[changedKey]);
+    const otherInput = otherKey === 'shelfShare' ? dom.whShelfShare : dom.whDrawerShare;
+    otherInput.value = String(warehouse[otherKey]);
+    warehouse.shareMessage = 'Storage shares were capped at 100%; the remaining share was adjusted automatically.';
+  }
+
+  /* ---------- Two-way value binding ---------- */
+
+  function getPath(path) {
+    return String(path || '').split('.').reduce((target, key) => (target === null || target === undefined ? undefined : target[key]), state);
+  }
+
+  function setPath(path, value) {
+    const keys = String(path).split('.');
+    const last = keys.pop();
+    const target = keys.reduce((object, key) => object?.[key], state);
+    if (target && typeof target === 'object') target[last] = value;
+  }
+
+  function readNumberInput(input) {
+    const value = toNumber(input.value);
+    if (value === null) return undefined;
+    const min = input.min !== '' ? Number(input.min) : -Infinity;
+    const max = input.max !== '' ? Number(input.max) : Infinity;
+    return clamp(value, min, max) / Number(input.dataset.scale || 1);
+  }
+
+  function writeInputValue(input, value) {
+    if (input.type === 'checkbox') {
+      input.checked = Boolean(value);
+    } else if (input.type === 'number') {
+      const scaled = Number.isFinite(value) ? value * Number(input.dataset.scale || 1) : null;
+      input.value = scaled === null ? '' : String(Number(scaled.toFixed(6)));
+    } else if (input.value !== String(value ?? '')) {
+      input.value = value ?? '';
+    }
+  }
+
+  function handleBoundEvent(event) {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement || input instanceof HTMLSelectElement)) return;
+    const discrete = input.tagName === 'SELECT' || input.type === 'checkbox';
+    if ((event.type === 'input' && discrete) || (event.type === 'change' && !discrete)) return;
+
+    if (input.dataset.bind) {
+      const value = input.type === 'checkbox' ? input.checked : input.type === 'number' ? readNumberInput(input) : input.value;
+      if (value === undefined) return;
+      setPath(input.dataset.bind, value);
+      onBoundChange(input.dataset.bind);
+    } else if (input.dataset.kitBind) {
+      handleKitInput(input);
+    } else if (input.dataset.groupField) {
+      handleGroupInput(input);
+    } else if (input.dataset.override) {
+      if (input.readOnly) return;
+      const value = input.value.trim() === '' ? null : readNumberInput(input);
+      if (value === undefined) return;
+      state.flowOverrides[input.dataset.override] = value;
+      saveSettingsSoon();
+      refreshViews();
+    }
+  }
+
+  function onBoundChange(path) {
+    if (path.startsWith('warehouse.rates.')) persistWarehouseRates();
+    if (path.startsWith('warehouse.')) state.warehouse.unitsPerShelf = state.warehouse.binsPerShelf * state.warehouse.unitsPerBin;
+    saveSettingsSoon();
+    if (/Currency$/.test(path)) {
+      rebuildConsolidation();
+      refreshRates(false);
+      return;
+    }
+    if (path === 'supplier.country') {
+      setSupplierOrigin(state.supplier.country);
+      return;
+    }
+    if (path.startsWith('warehouse.') || path.startsWith('supplier.') || path.startsWith('sales.')) {
+      if (path === 'sales.defaultValue' || path === 'sales.defaultMode') rebuildConsolidation();
+      else refreshViews();
+      return;
+    }
+    rebuildConsolidation();
+  }
+
+  function syncBoundInputs() {
+    const active = document.activeElement;
+    document.querySelectorAll('[data-bind]').forEach((input) => {
+      if (input !== active) writeInputValue(input, getPath(input.dataset.bind));
+    });
+    document.querySelectorAll('[data-kit-bind]').forEach((input) => {
+      const kit = kitSettings(input.dataset.kitBind);
+      if (input !== active) writeInputValue(input, kit[input.dataset.kitField]);
+      if (input.dataset.kitField === 'shippingAmount') {
+        input.disabled = kit.shippingMode === 'sheet';
+        input.placeholder = kit.shippingMode === 'sheet' ? 'sheet' : '0';
+      }
+    });
+    document.querySelectorAll('.output-currency-label').forEach((node) => { node.textContent = state.config.outputCurrency; });
+    syncControlsFromState(active);
+  }
+
+  /* ---------- Kits (source sheets) ---------- */
+
+  function kitSettings(sheetName) {
+    if (!state.kits[sheetName]) state.kits[sheetName] = { ...KIT_DEFAULTS };
+    return state.kits[sheetName];
+  }
+
+  function handleKitInput(input) {
+    const kit = kitSettings(input.dataset.kitBind);
+    const field = input.dataset.kitField;
+    if (field === 'shippingAmount') {
+      const value = readNumberInput(input);
+      if (value === undefined) return;
+      kit.shippingAmount = Math.max(0, value);
+    } else if (field === 'shippingMode') {
+      kit.shippingMode = KIT_SHIPPING_MODES[input.value] ? input.value : 'sheet';
+    } else if (field === 'shippingCurrency') {
+      kit.shippingCurrency = CURRENCIES.includes(input.value) ? input.value : KIT_DEFAULTS.shippingCurrency;
+    } else {
+      return;
+    }
+    saveSettingsSoon();
+    rebuildConsolidation();
+    if (field === 'shippingCurrency') refreshRates(false);
+  }
+
+  function isSourceKit(sheetName) {
+    const mapping = state.mappings[sheetName];
+    return Boolean(mapping && mapping.part !== null && mapping.quantity !== null && !isGeneratedSheet(state.workbook?.Sheets[sheetName]));
+  }
+
+  function setKitEnabled(sheetName, enabled) {
+    const mapping = state.mappings[sheetName];
+    if (!mapping) return;
+    mapping.enabled = enabled;
+    renderMappings();
+    saveSettingsSoon();
+    rebuildConsolidation();
+    refreshRates(false);
+    showToast(`${sheetName} ${enabled ? 'added to' : 'removed from'} the consolidation. Everything was recalculated.`);
+  }
+
+  function createKitFreightControl(sheetName) {
+    const kit = kitSettings(sheetName);
+    const wrapper = document.createElement('div');
+    wrapper.className = 'kit-freight-control';
+    const caption = document.createElement('span');
+    caption.className = 'kit-freight-caption';
+    caption.textContent = 'Kit freight';
+    const mode = document.createElement('select');
+    mode.dataset.kitBind = sheetName;
+    mode.dataset.kitField = 'shippingMode';
+    mode.setAttribute('aria-label', `${sheetName} freight mode`);
+    Object.entries(KIT_SHIPPING_MODES).forEach(([value, label]) => mode.append(new Option(label, value, false, kit.shippingMode === value)));
+    const amount = document.createElement('input');
+    amount.type = 'number';
+    amount.min = '0';
+    amount.step = '0.01';
+    amount.dataset.kitBind = sheetName;
+    amount.dataset.kitField = 'shippingAmount';
+    amount.setAttribute('aria-label', `${sheetName} freight amount`);
+    writeInputValue(amount, kit.shippingAmount);
+    amount.disabled = kit.shippingMode === 'sheet';
+    const currency = document.createElement('select');
+    currency.dataset.kitBind = sheetName;
+    currency.dataset.kitField = 'shippingCurrency';
+    currency.setAttribute('aria-label', `${sheetName} freight currency`);
+    populateCurrencySelect(currency, kit.shippingCurrency);
+    const help = document.createElement('small');
+    help.textContent = 'Sheet values use the Frakt column per line. Per line applies one amount to every line; Whole kit splits one amount across the kit’s stocked lines.';
+    wrapper.append(caption, mode, amount, currency, help);
+    return wrapper;
+  }
+
+  /* ---------- Settings persistence (local + workbook + secure project) ---------- */
+
+  function collectSettings() {
+    const warehouse = { ...state.warehouse };
+    delete warehouse.rates;
+    delete warehouse.shareMessage;
+    return {
+      format: 'partslist-settings',
+      version: 1,
+      config: {
+        discount: state.config.discount,
+        multiplier: state.config.multiplier,
+        shippingMargin: state.config.shippingMargin,
+        vatRate: state.config.vatRate,
+        sourceCurrency: state.config.sourceCurrency,
+        outputCurrency: state.config.outputCurrency,
+      },
+      freight: { ...state.freight },
+      kits: JSON.parse(JSON.stringify(state.kits)),
+      groups: state.groups.map((group) => ({ ...group })),
+      items: JSON.parse(JSON.stringify(state.items)),
+      sales: { ...state.sales },
+      supplier: { ...state.supplier },
+      flowOverrides: { ...state.flowOverrides },
+      warehouse,
+      disabledKits: state.workbook ? state.workbook.SheetNames.filter((name) => isSourceKit(name) && !state.mappings[name].enabled) : [],
+    };
+  }
+
+  function finiteOr(value, fallback, min = -Infinity, max = Infinity) {
+    const number = typeof value === 'number' ? value : toNumber(value);
+    return Number.isFinite(number) ? clamp(number, min, max) : fallback;
+  }
+
+  function nullableNumber(value, min = 0) {
+    if (value === null || value === undefined || value === '') return null;
+    const number = typeof value === 'number' ? value : toNumber(value);
+    return Number.isFinite(number) ? Math.max(min, number) : null;
+  }
+
+  function applySettings(settings) {
+    if (!settings || typeof settings !== 'object' || settings.format !== 'partslist-settings') return false;
+    const config = settings.config || {};
+    state.config.discount = finiteOr(config.discount, state.config.discount, 0, 1);
+    state.config.multiplier = finiteOr(config.multiplier, state.config.multiplier, 0);
+    state.config.shippingMargin = finiteOr(config.shippingMargin, state.config.shippingMargin, 0, 0.999);
+    state.config.vatRate = finiteOr(config.vatRate, state.config.vatRate, 0, 1);
+    if (CURRENCIES.includes(config.sourceCurrency)) state.config.sourceCurrency = config.sourceCurrency;
+    if (CURRENCIES.includes(config.outputCurrency)) state.config.outputCurrency = config.outputCurrency;
+
+    const freight = settings.freight || {};
+    state.freight = {
+      consolidatedShipment: finiteOr(freight.consolidatedShipment, 0, 0),
+      consolidatedCurrency: CURRENCIES.includes(freight.consolidatedCurrency) ? freight.consolidatedCurrency : FREIGHT_DEFAULTS.consolidatedCurrency,
+      allocation: ['value', 'quantity', 'lines'].includes(freight.allocation) ? freight.allocation : 'value',
+      dutyRate: finiteOr(freight.dutyRate, 0, 0, 1),
+      insuranceRate: finiteOr(freight.insuranceRate, 0, 0, 1),
+      clearanceFee: finiteOr(freight.clearanceFee, 0, 0),
+      clearanceCurrency: CURRENCIES.includes(freight.clearanceCurrency) ? freight.clearanceCurrency : FREIGHT_DEFAULTS.clearanceCurrency,
+    };
+
+    state.kits = {};
+    Object.entries(settings.kits || {}).forEach(([name, kit]) => {
+      if (!kit || typeof kit !== 'object') return;
+      state.kits[name] = {
+        shippingMode: KIT_SHIPPING_MODES[kit.shippingMode] ? kit.shippingMode : 'sheet',
+        shippingAmount: finiteOr(kit.shippingAmount, KIT_DEFAULTS.shippingAmount, 0),
+        shippingCurrency: CURRENCIES.includes(kit.shippingCurrency) ? kit.shippingCurrency : KIT_DEFAULTS.shippingCurrency,
+      };
+    });
+
+    state.groups = (Array.isArray(settings.groups) ? settings.groups : []).slice(0, MAX_GROUPS)
+      .filter((group) => group && typeof group.id === 'string' && typeof group.name === 'string')
+      .map((group, index) => ({
+        id: group.id.slice(0, 40),
+        name: group.name.trim().slice(0, 40) || `Group ${index + 1}`,
+        color: GROUP_COLORS.includes(group.color) ? group.color : GROUP_COLORS[index],
+        salesMode: group.salesMode === 'units' ? 'units' : 'turns',
+        salesValue: nullableNumber(group.salesValue),
+        multiplier: nullableNumber(group.multiplier),
+      }));
+    const groupIds = new Set(state.groups.map((group) => group.id));
+
+    state.items = {};
+    Object.entries(settings.items || {}).forEach(([key, item]) => {
+      if (!item || typeof item !== 'object') return;
+      const clean = {
+        group: groupIds.has(item.group) ? item.group : null,
+        salesPerYear: nullableNumber(item.salesPerYear),
+        quantity: nullableNumber(item.quantity),
+        multiplier: nullableNumber(item.multiplier),
+        excluded: item.excluded === true,
+      };
+      if (clean.group || clean.salesPerYear !== null || clean.quantity !== null || clean.multiplier !== null || clean.excluded) state.items[key] = clean;
+    });
+
+    const sales = settings.sales || {};
+    state.sales = {
+      defaultMode: sales.defaultMode === 'units' ? 'units' : 'turns',
+      defaultValue: finiteOr(sales.defaultValue, SALES_DEFAULTS.defaultValue, 0),
+      horizonMonths: Math.round(finiteOr(sales.horizonMonths, SALES_DEFAULTS.horizonMonths, 6, 120)),
+      customerPaysOutbound: sales.customerPaysOutbound === true,
+    };
+    const supplier = settings.supplier || {};
+    const country = /^d{3}$/.test(supplier.country) ? supplier.country : SUPPLIER_DEFAULTS.country;
+    state.supplier = {
+      name: typeof supplier.name === 'string' ? supplier.name.slice(0, 80) : SUPPLIER_DEFAULTS.name,
+      location: typeof supplier.location === 'string' ? supplier.location.slice(0, 80) : SUPPLIER_DEFAULTS.location,
+      country,
+      countryName: typeof supplier.countryName === 'string' ? supplier.countryName.slice(0, 80) : ORIGIN_PRESETS[country]?.name || '',
+      lat: finiteOr(supplier.lat, ORIGIN_PRESETS[country]?.lat ?? SUPPLIER_DEFAULTS.lat, -90, 90),
+      lon: finiteOr(supplier.lon, ORIGIN_PRESETS[country]?.lon ?? SUPPLIER_DEFAULTS.lon, -180, 180),
+    };
+    FLOW_OVERRIDE_KEYS.forEach((key) => { state.flowOverrides[key] = nullableNumber(settings.flowOverrides?.[key]); });
+
+    const warehouse = settings.warehouse || {};
+    Object.keys(WAREHOUSE_DEFAULTS).forEach((key) => {
+      const fallback = WAREHOUSE_DEFAULTS[key];
+      if (!(key in warehouse)) return;
+      if (typeof fallback === 'number') state.warehouse[key] = finiteOr(warehouse[key], state.warehouse[key], 0);
+      else if (typeof fallback === 'boolean') state.warehouse[key] = warehouse[key] === true;
+      else if (typeof warehouse[key] === 'string') state.warehouse[key] = warehouse[key].slice(0, 80);
+    });
+    state.warehouse.palletType = state.warehouse.palletType === 'sea' ? 'sea' : 'eu';
+    state.warehouse.palletHeight = state.warehouse.palletHeight === '220' ? '220' : '120';
+    state.warehouse.binsPerShelf = clamp(Math.round(state.warehouse.binsPerShelf) || 1, 1, 12);
+    state.warehouse.shelvesPerRack = clamp(Math.round(state.warehouse.shelvesPerRack) || 1, 1, 8);
+    state.warehouse.unitsPerShelf = state.warehouse.binsPerShelf * state.warehouse.unitsPerBin;
+
+    state.pendingDisabledKits = Array.isArray(settings.disabledKits) ? settings.disabledKits.filter((name) => typeof name === 'string') : null;
+    return true;
+  }
+
+  function applyPendingDisabledKits() {
+    if (!state.pendingDisabledKits || !state.workbook) return;
+    state.pendingDisabledKits.forEach((name) => { if (state.mappings[name]) state.mappings[name].enabled = false; });
+    state.pendingDisabledKits = null;
+  }
+
+  function settingsStorageKey(fileName = state.fileName) {
+    const base = String(fileName || '').replace(/\.[^.]+$/, '').replace(/-consolidated$/i, '').trim();
+    return base ? `${SETTINGS_STORAGE_PREFIX}${base}` : '';
+  }
+
+  function encodeCaesarEnvelope(format, payload) {
+    const shifted = rotatePrintableAscii(JSON.stringify(payload), CAESAR_SHIFT);
+    return { format, version: 1, cipher: { name: 'CAESAR-PRINTABLE-ASCII', shift: CAESAR_SHIFT }, payload: bytesToBase64(new TextEncoder().encode(shifted)) };
+  }
+
+  function decodeCaesarEnvelope(envelope, format) {
+    if (envelope?.format !== format || envelope.cipher?.shift !== CAESAR_SHIFT) throw new Error('Unsupported settings envelope.');
+    return JSON.parse(rotatePrintableAscii(new TextDecoder().decode(base64ToBytes(envelope.payload)), -CAESAR_SHIFT));
+  }
+
+  function saveSettingsSoon() {
+    if (!state.workbook) return;
+    clearTimeout(state.settingsSaveTimer);
+    state.settingsSaveTimer = setTimeout(() => {
+      const key = settingsStorageKey();
+      if (!key) return;
+      try {
+        localStorage.setItem(key, JSON.stringify(encodeCaesarEnvelope('partslist-settings-local', collectSettings())));
+      } catch (error) {
+        console.warn('Project settings could not be saved locally.', error);
+      }
+    }, 350);
+  }
+
+  function loadLocalSettings(fileName) {
+    const key = settingsStorageKey(fileName);
+    if (!key) return false;
+    try {
+      const stored = localStorage.getItem(key);
+      if (!stored) return false;
+      return applySettings(decodeCaesarEnvelope(JSON.parse(stored), 'partslist-settings-local'));
+    } catch (error) {
+      console.warn('Saved project settings were ignored.', error);
+      return false;
+    }
+  }
+
+  function resetProjectSettings() {
+    if (!state.workbook) return;
+    if (!window.confirm('Reset kit freight, freight & import, VAT, sales groups, item overrides and sales assumptions to their defaults? Warehouse quote rates are kept.')) return;
+    state.config.vatRate = 0.25;
+    state.freight = { ...FREIGHT_DEFAULTS };
+    state.kits = {};
+    state.groups = [];
+    state.items = {};
+    state.sales = { ...SALES_DEFAULTS };
+    state.supplier = { ...SUPPLIER_DEFAULTS };
+    FLOW_OVERRIDE_KEYS.forEach((key) => { state.flowOverrides[key] = null; });
+    state.selectedKeys.clear();
+    try { localStorage.removeItem(settingsStorageKey()); } catch { /* Local storage is optional. */ }
+    renderMappings();
+    renderGroups();
+    renderAllSelectionBars();
+    rebuildConsolidation();
+    refreshRates(false);
+    showToast('Kit, freight, group and sales settings were reset.');
+  }
+
+  function rotatePrintableAscii(value, shift) {
+    return Array.from(String(value), (character) => {
+      const code = character.charCodeAt(0);
+      if (code < PRINTABLE_ASCII_START || code >= PRINTABLE_ASCII_START + PRINTABLE_ASCII_RANGE) return character;
+      const offset = ((code - PRINTABLE_ASCII_START + shift) % PRINTABLE_ASCII_RANGE + PRINTABLE_ASCII_RANGE) % PRINTABLE_ASCII_RANGE;
+      return String.fromCharCode(PRINTABLE_ASCII_START + offset);
+    }).join('');
+  }
+
+  function createWarehouseRateEnvelope(rates = state.warehouse.rates) {
+    const normalizedRates = {};
+    Object.keys(WAREHOUSE_RATE_DEFAULTS).forEach((key) => {
+      normalizedRates[key] = Math.max(0, toNumber(rates[key]) ?? 0);
+    });
+    const payload = {
+      format: 'partslist-warehouse-rate-data',
+      version: 1,
+      currency: 'NOK',
+      savedAt: new Date().toISOString(),
+      rates: normalizedRates,
+    };
+    const shifted = rotatePrintableAscii(JSON.stringify(payload), CAESAR_SHIFT);
+    return {
+      format: 'partslist-warehouse-rates',
+      version: 1,
+      cipher: { name: 'CAESAR-PRINTABLE-ASCII', shift: CAESAR_SHIFT },
+      payload: bytesToBase64(new TextEncoder().encode(shifted)),
+    };
+  }
+
+  function decodeWarehouseRateEnvelope(envelope) {
+    if (envelope?.format !== 'partslist-warehouse-rates' || envelope.version !== 1) {
+      throw new Error('This is not a supported warehouse-rate JSON file.');
+    }
+    if (envelope.cipher?.name !== 'CAESAR-PRINTABLE-ASCII' || envelope.cipher?.shift !== CAESAR_SHIFT) {
+      throw new Error('The rate file must use Caesar-14 encoding.');
+    }
+    const shifted = new TextDecoder().decode(base64ToBytes(envelope.payload));
+    const payload = JSON.parse(rotatePrintableAscii(shifted, -CAESAR_SHIFT));
+    if (payload?.format !== 'partslist-warehouse-rate-data' || payload.version !== 1 || payload.currency !== 'NOK') {
+      throw new Error('The decoded warehouse-rate payload is invalid.');
+    }
+    const rates = {};
+    Object.keys(WAREHOUSE_RATE_DEFAULTS).forEach((key) => {
+      const value = toNumber(payload.rates?.[key]);
+      if (!Number.isFinite(value) || value < 0) throw new Error(`The rate “${key}” is missing or invalid.`);
+      rates[key] = value;
+    });
+    return rates;
+  }
+
+  function applyWarehouseRates(rates, statusText = 'Caesar-14 encoded · saved locally') {
+    state.warehouse.rates = { ...WAREHOUSE_RATE_DEFAULTS, ...rates };
+    syncWarehouseRateInputs();
+    if (dom.warehouseRatesStatus) dom.warehouseRatesStatus.textContent = statusText;
+  }
+
+  function syncWarehouseRateInputs() {
+    dom.warehouseRateInputs.querySelectorAll('[data-warehouse-rate]').forEach((input) => {
+      input.value = String(state.warehouse.rates[input.dataset.warehouseRate] ?? 0);
+    });
+  }
+
+  function persistWarehouseRates() {
+    try {
+      localStorage.setItem(WAREHOUSE_RATE_STORAGE_KEY, JSON.stringify(createWarehouseRateEnvelope()));
+      if (dom.warehouseRatesStatus) dom.warehouseRatesStatus.textContent = 'Caesar-14 encoded · saved locally';
+    } catch (error) {
+      console.warn('Warehouse rates could not be stored locally.', error);
+      if (dom.warehouseRatesStatus) dom.warehouseRatesStatus.textContent = 'Local save unavailable';
+    }
+  }
+
+  function loadPersistedWarehouseRates() {
+    try {
+      const stored = localStorage.getItem(WAREHOUSE_RATE_STORAGE_KEY);
+      if (!stored) return false;
+      applyWarehouseRates(decodeWarehouseRateEnvelope(JSON.parse(stored)), 'Restored from local Caesar-14 JSON');
+      return true;
+    } catch (error) {
+      console.warn('Stored warehouse rates were ignored.', error);
+      return false;
+    }
+  }
+
+  async function loadPrivateWarehouseRateFile() {
+    try {
+      const response = await fetch(WAREHOUSE_RATE_PRIVATE_FILE, { cache: 'no-store' });
+      if (!response.ok) return false;
+      const envelope = await response.json();
+      applyWarehouseRates(decodeWarehouseRateEnvelope(envelope), 'Loaded private Caesar-14 quote · saved locally');
+      persistWarehouseRates();
+      return true;
+    } catch (error) {
+      console.info('No local private warehouse-rate file was loaded.', error);
+      return false;
+    }
+  }
+
+  function exportWarehouseRates() {
+    try {
+      const envelope = createWarehouseRateEnvelope();
+      const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'warehouse-rates.caesar14.json';
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      persistWarehouseRates();
+      showToast('Caesar-14 warehouse-rate JSON exported.');
+    } catch (error) {
+      console.error(error);
+      showToast('The warehouse rates could not be exported.', true);
+    }
+  }
+
+  async function importWarehouseRates(file) {
+    try {
+      if (file.size > 1024 * 1024) throw new Error('The warehouse-rate JSON file is unexpectedly large.');
+      const envelope = JSON.parse(await file.text());
+      const rates = decodeWarehouseRateEnvelope(envelope);
+      applyWarehouseRates(rates, 'Imported Caesar-14 quote · saved locally');
+      persistWarehouseRates();
+      refreshViews();
+      showToast('Warehouse rates imported and saved locally.');
+    } catch (error) {
+      console.error(error);
+      showToast(error.message || 'The warehouse-rate JSON could not be imported.', true);
+    }
+  }
+
+  function zoomWarehousePreview(delta) {
+    state.warehousePreviewTransform.scale = clamp(state.warehousePreviewTransform.scale + delta, 0.55, 3);
+    applyWarehousePreviewTransform();
+  }
+
+  function resetWarehousePreview() {
+    state.warehousePreviewTransform = { scale: 1, x: 0, y: 0 };
+    applyWarehousePreviewTransform();
+  }
+
+  function applyWarehousePreviewTransform() {
+    const scene = dom.warehousePreview.querySelector('.warehouse-scene');
+    if (!scene) return;
+    const { scale, x, y } = state.warehousePreviewTransform;
+    scene.setAttribute('transform', `translate(${x.toFixed(2)} ${y.toFixed(2)}) translate(380 210) scale(${scale.toFixed(3)}) translate(-380 -210)`);
+    const readout = dom.warehousePreview.querySelector('.preview-zoom-readout');
+    if (readout) readout.textContent = `${Math.round(scale * 100)}%`;
+  }
+
+  function calculateWarehouseModel() {
+    const warehouse = state.warehouse;
+    const rates = warehouse.rates;
+    const inventoryUnits = state.consolidated.reduce((sum, item) => sum + Math.max(0, item.maxQuantity || 0), 0);
+    const shelfShare = clamp(warehouse.shelfShare, 0, 100) / 100;
+    const drawerShare = clamp(warehouse.drawerShare, 0, 100) / 100;
+    const palletShare = Math.max(0, 1 - shelfShare - drawerShare);
+    const unitsPerShelf = Math.max(1, warehouse.binsPerShelf * warehouse.unitsPerBin);
+    warehouse.unitsPerShelf = unitsPerShelf;
+    const shelfUnits = inventoryUnits * shelfShare;
+    const drawerUnits = inventoryUnits * drawerShare;
+    const palletUnits = inventoryUnits * palletShare;
+    const shelfLocations = shelfUnits > 0 ? Math.ceil(shelfUnits / unitsPerShelf) : 0;
+    const drawerLocations = drawerUnits > 0 ? Math.ceil(drawerUnits / warehouse.unitsPerDrawer) : 0;
+    const pallets = palletUnits > 0 ? Math.ceil(palletUnits / warehouse.unitsPerPallet) : 0;
+    const racks = shelfLocations > 0 ? Math.ceil(shelfLocations / warehouse.shelvesPerRack) : 0;
+    const totalBins = shelfLocations * warehouse.binsPerShelf;
+    const palletRateKey = `${warehouse.palletType}${warehouse.palletHeight}`;
+    const palletRate = rates[palletRateKey] || 0;
+    const outputCurrency = state.config.outputCurrency;
+    const nokToOutput = outputCurrency === 'NOK' ? 1 : state.rates.NOK ?? null;
+
+    const storageShelf = shelfLocations * rates.shelf;
+    const storageDrawer = drawerLocations * rates.drawer;
+    const storagePallet = pallets * palletRate;
+    const receiving = warehouse.receipts * rates.receiptBase
+      + warehouse.receipts * warehouse.receiptLines * rates.receiptLine;
+    const orderHandling = warehouse.orders * rates.orderBase
+      + warehouse.orders * warehouse.orderLines * rates.orderLine;
+    const edi = warehouse.ediLabels * rates.edi;
+    const freight = (warehouse.businessParcels + warehouse.privateParcels) * rates.parcel
+      + warehouse.privateParcels * rates.privateSurcharge;
+    const wms = warehouse.includeWms ? rates.wms : 0;
+    const costs = [
+      { label: 'Shelf storage', calculation: `${shelfLocations} locations × ${formatNok(rates.shelf)}`, value: storageShelf },
+      { label: 'Drawer storage', calculation: `${drawerLocations} drawers × ${formatNok(rates.drawer)}`, value: storageDrawer },
+      { label: `${warehouse.palletType === 'eu' ? 'EU' : 'Sea'} pallet storage`, calculation: `${pallets} pallets × ${formatNok(palletRate)}`, value: storagePallet },
+      { label: 'Receiving', calculation: `${formatNumber(warehouse.receipts, 0)} receipts × (${formatNok(rates.receiptBase)} + ${formatNumber(warehouse.receiptLines, 0)} lines × ${formatNok(rates.receiptLine)})`, value: receiving },
+      { label: 'Order handling', calculation: `${formatNumber(warehouse.orders, 0)} orders × (${formatNok(rates.orderBase)} + ${formatNumber(warehouse.orderLines, 0)} lines × ${formatNok(rates.orderLine)})`, value: orderHandling },
+      { label: 'EDI labels', calculation: `${formatNumber(warehouse.ediLabels, 0)} labels × ${formatNok(rates.edi)}`, value: edi },
+      { label: 'Outbound freight', calculation: `${formatNumber(warehouse.businessParcels + warehouse.privateParcels, 0)} parcels × ${formatNok(rates.parcel)} + ${formatNumber(warehouse.privateParcels, 0)} private surcharges`, value: freight },
+      { label: 'Packaging', calculation: 'Monthly usage assumption', value: warehouse.packaging },
+      { label: 'WMS license', calculation: warehouse.includeWms ? 'Included' : 'Excluded', value: wms },
+    ];
+    costs.forEach((item) => { item.converted = nokToOutput === null ? null : item.value * nokToOutput; });
+    const monthlyNok = costs.reduce((sum, item) => sum + item.value, 0);
+    const monthlyTotal = nokToOutput === null ? null : monthlyNok * nokToOutput;
+    const capacity = shelfLocations * unitsPerShelf
+      + drawerLocations * warehouse.unitsPerDrawer
+      + pallets * warehouse.unitsPerPallet;
+
+    return {
+      storageNok: storageShelf + storageDrawer + storagePallet,
+      receivingNok: receiving,
+      orderHandlingNok: orderHandling,
+      ediNok: edi,
+      freightNok: freight,
+      packagingNok: warehouse.packaging,
+      wmsNok: wms,
+      inventoryUnits,
+      distinctParts: state.consolidated.length,
+      shelfShare,
+      drawerShare,
+      palletShare,
+      shelfUnits,
+      drawerUnits,
+      palletUnits,
+      shelfLocations,
+      drawerLocations,
+      pallets,
+      racks,
+      totalBins,
+      unitsPerShelf,
+      palletRate,
+      nokToOutput,
+      outputCurrency,
+      capacity,
+      costs,
+      monthlyNok,
+      monthlyTotal,
+      annualNok: monthlyNok * 12,
+      annualTotal: monthlyTotal === null ? null : monthlyTotal * 12,
+    };
+  }
+
+  function renderWarehouse() {
+    if (!dom.warehouseView) return;
+    const model = calculateWarehouseModel();
+    const locationCount = model.shelfLocations + model.drawerLocations + model.pallets;
+    dom.warehouseDataNote.textContent = `${model.distinctParts} consolidated part numbers and ${formatNumber(model.inventoryUnits, 2)} units from the imported maximum quantities.`;
+    dom.warehousePalletShare.textContent = `${formatNumber(model.palletShare * 100, 0)}% pallets`;
+    dom.whUnitsShelf.value = String(model.unitsPerShelf);
+    dom.warehouseShareWarning.textContent = state.warehouse.shareMessage || '';
+    dom.warehouseCapacityLabel.textContent = `${formatNumber(model.capacity, 0)} unit capacity`;
+    dom.warehouseSummaryCards.replaceChildren(
+      summaryCard('Inventory units', formatNumber(model.inventoryUnits, 2)),
+      summaryCard('Storage locations', formatNumber(locationCount, 0)),
+      summaryCard(`Monthly estimate (${model.outputCurrency})`, formatMoney(model.monthlyTotal, model.outputCurrency)),
+      summaryCard(`Annual estimate (${model.outputCurrency})`, formatMoney(model.annualTotal, model.outputCurrency)),
+    );
+    const fxText = model.nokToOutput === null ? 'Rate unavailable' : `1 NOK = ${formatNumber(model.nokToOutput, 6)} ${model.outputCurrency}`;
+    dom.warehouseCurrencyReference.innerHTML = `<span>Quoted currency<strong>NOK</strong></span><span>Live reference<strong>${fxText}</strong></span><span>Displayed totals<strong>${model.outputCurrency}</strong></span>`;
+    dom.warehouseOutputHeader.textContent = `${model.outputCurrency} / month`;
+    dom.warehouseRateInputs.querySelectorAll('[data-warehouse-rate]').forEach((input) => {
+      let reference = input.closest('label').querySelector('.rate-conversion');
+      if (!reference) {
+        reference = document.createElement('small');
+        reference.className = 'rate-conversion';
+        input.closest('label').append(reference);
+      }
+      const valueNok = Math.max(0, toNumber(input.value) ?? 0);
+      reference.textContent = model.nokToOutput === null ? 'SEK rate unavailable' : `≈ ${formatMoney(valueNok * model.nokToOutput, model.outputCurrency)}`;
+    });
+    dom.warehousePreview.innerHTML = buildWarehouseIsoSvg(model);
+    dom.warehouseStorageLegend.innerHTML = [
+      `<span><i class="shelf"></i>${model.shelfLocations} shelf locations</span>`,
+      `<span><i class="shelf"></i>${model.totalBins} bins across ${model.racks} racks</span>`,
+      `<span><i class="drawer"></i>${model.drawerLocations} drawers</span>`,
+      `<span><i class="pallet"></i>${model.pallets} ${state.warehouse.palletType === 'eu' ? 'EU' : 'sea'} pallets ≤${state.warehouse.palletHeight} cm</span>`,
+    ].join('');
+    dom.warehouseMonthlyTotal.textContent = formatMoney(model.monthlyTotal, model.outputCurrency);
+
+    const rows = document.createDocumentFragment();
+    model.costs.forEach((item) => {
+      const row = document.createElement('tr');
+      [item.label, item.calculation, formatNok(item.value), formatMoney(item.converted, model.outputCurrency)].forEach((value) => {
+        const cell = document.createElement('td');
+        cell.textContent = value;
+        row.append(cell);
+      });
+      rows.append(row);
+    });
+    const totalRow = document.createElement('tr');
+    totalRow.className = 'total-row';
+    ['Monthly total', 'Sum of quoted and entered costs', formatNok(model.monthlyNok), formatMoney(model.monthlyTotal, model.outputCurrency)].forEach((value) => {
+      const cell = document.createElement('td');
+      cell.textContent = value;
+      totalRow.append(cell);
+    });
+    rows.append(totalRow);
+    dom.warehouseCostBody.replaceChildren(rows);
+  }
+
+  function buildWarehouseIsoSvg(model) {
+    const elements = [];
+    const project = (x, y, z) => [80 + (x + y) * 0.866, 205 + (x - y) * 0.31 - z];
+    const points = (corners) => corners.map(([x, y, z]) => project(x, y, z).map((n) => n.toFixed(1)).join(',')).join(' ');
+    const polygon = (corners, fill, stroke = '#365443', opacity = 1) => {
+      elements.push(`<polygon points="${points(corners)}" fill="${fill}" fill-opacity="${opacity}" stroke="${stroke}" stroke-width="1" vector-effect="non-scaling-stroke"/>`);
+    };
+    const line = (a, b, color, width = 2) => {
+      const [x1, y1] = project(...a);
+      const [x2, y2] = project(...b);
+      elements.push(`<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="${color}" stroke-width="${width}" vector-effect="non-scaling-stroke"/>`);
+    };
+    const box = (x, y, z, width, depth, height, front, side, top, opacity = 1) => {
+      polygon([[x, y, z], [x + width, y, z], [x + width, y, z + height], [x, y, z + height]], front, '#375246', opacity);
+      polygon([[x + width, y, z], [x + width, y + depth, z], [x + width, y + depth, z + height], [x + width, y, z + height]], side, '#375246', opacity);
+      polygon([[x, y, z + height], [x + width, y, z + height], [x + width, y + depth, z + height], [x, y + depth, z + height]], top, '#375246', opacity);
+    };
+    const label = (x, y, text, anchor = 'middle') => {
+      elements.push(`<text x="${x}" y="${y}" text-anchor="${anchor}" fill="#294437" font-family="Inter,system-ui,sans-serif" font-size="12" font-weight="700">${text}</text>`);
+    };
+
+    polygon([[0, 0, 0], [600, 0, 0], [600, 245, 0], [0, 245, 0]], '#e5ece7', '#bccbc1', 0.72);
+    for (let grid = 60; grid < 600; grid += 60) line([grid, 0, 0.2], [grid, 245, 0.2], '#c9d5cd', 0.7);
+    for (let grid = 60; grid < 245; grid += 60) line([0, grid, 0.2], [600, grid, 0.2], '#c9d5cd', 0.7);
+
+    const rackX = 25;
+    const rackY = 35;
+    const visibleRacks = Math.min(3, model.racks);
+    const rackBays = visibleRacks;
+    const rackLevels = Math.min(6, Math.max(1, state.warehouse.shelvesPerRack));
+    const visibleBinsPerShelf = Math.min(8, Math.max(1, state.warehouse.binsPerShelf));
+    const visibleShelfLocations = Math.min(model.shelfLocations, rackBays * rackLevels);
+    const bayWidth = 70;
+    const levelHeight = 34;
+    const rackWidth = rackBays * bayWidth;
+    const rackHeight = 9 + (rackLevels - 1) * levelHeight;
+    let shelfCell = 0;
+    if (rackBays > 0) {
+      for (let post = 0; post <= rackBays; post += 1) {
+        line([rackX + post * bayWidth, rackY, 0], [rackX + post * bayWidth, rackY, rackHeight], '#3b5f8a', 3);
+        line([rackX + post * bayWidth, rackY + 40, 0], [rackX + post * bayWidth, rackY + 40, rackHeight], '#3b5f8a', 2);
+      }
+      for (let level = 0; level < rackLevels; level += 1) {
+        const z = 5 + level * levelHeight;
+        box(rackX, rackY, z, rackWidth, 40, 4, '#d9581f', '#af4319', '#ec7440');
+        for (let bay = 0; bay < rackBays; bay += 1) {
+          if (shelfCell >= visibleShelfLocations) continue;
+          const binGap = 2;
+          const innerWidth = bayWidth - 10;
+          const binWidth = (innerWidth - binGap * (visibleBinsPerShelf - 1)) / visibleBinsPerShelf;
+          for (let bin = 0; bin < visibleBinsPerShelf; bin += 1) {
+            box(rackX + bay * bayWidth + 5 + bin * (binWidth + binGap), rackY + 5, z + 5, binWidth, 30, Math.min(24, levelHeight - 8), '#7b9b84', '#5d7e68', '#9bb6a2', 0.96);
+          }
+          shelfCell += 1;
+        }
+      }
+      line([rackX, rackY, rackHeight], [rackX + rackWidth, rackY, rackHeight], '#3b5f8a', 3);
+      line([rackX, rackY + 40, rackHeight], [rackX + rackWidth, rackY + 40, rackHeight], '#3b5f8a', 2);
+    }
+    label(190, 38, `RACKS ${model.racks} · SHELVES ${model.shelfLocations} · BINS ${model.totalBins}`);
+
+    const drawerX = 245;
+    const drawerY = 58;
+    const visibleDrawers = Math.min(7, model.drawerLocations);
+    if (visibleDrawers > 0) {
+      box(drawerX, drawerY, 0, 76, 46, visibleDrawers * 18 + 10, '#8fa99a', '#6c8f79', '#b9c9bf');
+      for (let drawer = 0; drawer < visibleDrawers; drawer += 1) {
+        const z = 6 + drawer * 18;
+        polygon([[drawerX + 5, drawerY - 0.3, z], [drawerX + 71, drawerY - 0.3, z], [drawerX + 71, drawerY - 0.3, z + 14], [drawerX + 5, drawerY - 0.3, z + 14]], '#dfe7e1', '#587263');
+        line([drawerX + 31, drawerY - 0.6, z + 7], [drawerX + 45, drawerY - 0.6, z + 7], '#587263', 1.6);
+      }
+    }
+    label(385, 76, `DRAWERS · ${model.drawerLocations}`);
+
+    const visiblePallets = Math.min(6, model.pallets);
+    for (let pallet = 0; pallet < visiblePallets; pallet += 1) {
+      const col = pallet % 3;
+      const row = Math.floor(pallet / 3);
+      const x = 375 + col * 66;
+      const y = 75 + row * 82;
+      box(x, y, 0, 52, 42, 6, '#a56f22', '#80551a', '#cf9b36');
+      for (let slat = 5; slat < 50; slat += 11) box(x + slat, y + 3, 6, 6, 36, 3, '#c58c32', '#8c6022', '#e1ad55');
+      const height = state.warehouse.palletHeight === '220' ? 62 : 38;
+      box(x + 5, y + 5, 9, 42, 32, height, '#b9a176', '#8e7a57', '#d8c59f', 0.96);
+      line([x + 26, y + 4.5, 10], [x + 26, y + 4.5, 9 + height], '#8e7a57', 1);
+    }
+    label(570, 126, `PALLETS · ${model.pallets}`);
+
+    if (model.shelfLocations > visibleShelfLocations) label(235, 232, `+${model.shelfLocations - visibleShelfLocations} shelf locations`, 'start');
+    if (model.drawerLocations > visibleDrawers) label(390, 238, `+${model.drawerLocations - visibleDrawers} drawers`, 'start');
+    if (model.pallets > visiblePallets) label(545, 267, `+${model.pallets - visiblePallets} pallets`, 'start');
+
+    const aria = `${model.shelfLocations} shelf locations, ${model.drawerLocations} drawers, and ${model.pallets} pallets, with capacity for ${formatNumber(model.capacity, 0)} units.`;
+    const { scale, x, y } = state.warehousePreviewTransform;
+    const transform = `translate(${x.toFixed(2)} ${y.toFixed(2)}) translate(380 210) scale(${scale.toFixed(3)}) translate(-380 -210)`;
+    return `<div class="warehouse-preview-controls" aria-label="Warehouse preview controls"><button type="button" data-preview-action="out" aria-label="Zoom out">−</button><span class="preview-zoom-readout">${Math.round(scale * 100)}%</span><button type="button" data-preview-action="in" aria-label="Zoom in">+</button><button type="button" class="preview-reset" data-preview-action="reset">Reset</button></div><span class="warehouse-preview-hint">Drag to move · wheel to zoom</span><svg viewBox="0 0 760 420" role="img" aria-label="${aria}"><title>Estimated warehouse storage footprint</title><desc>${aria}</desc><g class="warehouse-scene" transform="${transform}">${elements.join('')}</g></svg>`;
+  }
+
+  function formatNok(value) {
+    return `${formatNumber(value, 2)} NOK`;
+  }
+
+  function formatMoney(value, currency) {
+    return Number.isFinite(value) ? `${formatNumber(value, 2)} ${currency}` : '—';
+  }
+
+  function buildWireModel() {
+    return state.wireMode === 'underhood' ? buildUnderhoodWireModel() : buildOverviewWireModel();
+  }
+
+  function buildOverviewWireModel() {
+    const warehouse = calculateWarehouseModel();
+    const enabledSheets = state.workbook
+      ? state.workbook.SheetNames.filter((name) => state.mappings[name]?.enabled)
+      : [];
+    const nodes = [];
+    enabledSheets.forEach((name, index) => {
+      nodes.push({ id: `sheet.${name}`, label: name, meta: 'Source sheet', detail: `${state.matrices[name]?.length || 0} imported rows`, category: 'source', x: 30, y: 35 + index * 68 });
+    });
+    nodes.push(
+      { id: 'consolidated.parts', label: 'Part matching', meta: 'Normalize + group', detail: `${state.consolidated.length} part numbers`, category: 'calculation', x: 265, y: 35 },
+      { id: 'consolidated.quantity', label: 'Maximum quantity', meta: 'Across source sheets', detail: `${formatNumber(warehouse.inventoryUnits, 2)} total units`, category: 'calculation', x: 265, y: 108 },
+      { id: 'consolidated.price', label: 'Unit price', meta: 'Pricing source row', detail: 'Representative source price', category: 'calculation', x: 265, y: 181 },
+      { id: 'consolidated.fx', label: 'Currency rate', meta: `Live to ${state.config.outputCurrency}`, detail: 'Daily reference rate', category: 'calculation', x: 265, y: 254 },
+      { id: 'consolidated.discount', label: 'Discount + multiplier', meta: `${formatPercent(state.config.discount)} · ${formatNumber(state.config.multiplier, 2)}×`, detail: 'Sales price calculation', category: 'calculation', x: 265, y: 327 },
+      { id: 'consolidated.shipping', label: 'Freight margin', meta: `${formatPercent(state.config.shippingMargin)} margin`, detail: 'Freight and import costs plus margin', category: 'calculation', x: 265, y: 400 },
+      { id: 'consolidated.total', label: 'Line total', meta: `${state.config.outputCurrency} excl. VAT`, detail: 'Sales price + freight incl. margin', category: 'calculation', x: 265, y: 473 },
+      { id: 'consolidated.freight', label: 'Freight & tolls', meta: `Kit + ${formatMoney(toOutput(state.freight.consolidatedShipment, state.freight.consolidatedCurrency), state.config.outputCurrency)} shipment`, detail: `Duty ${formatPercent(state.freight.dutyRate)}, insurance ${formatPercent(state.freight.insuranceRate)}, clearance fees`, category: 'assumption', x: 265, y: 546 },
+      { id: 'consolidated.vat', label: 'VAT (MVA)', meta: formatPercent(state.config.vatRate), detail: 'Added to customer prices; import VAT is deductible', category: 'assumption', x: 265, y: 619 },
+      { id: 'sales.groups', label: 'Sales groups', meta: `${state.groups.length} group${state.groups.length === 1 ? '' : 's'}`, detail: 'Expected sales and multiplier per group', category: 'assumption', x: 515, y: 473 },
+      { id: 'sales.expected', label: 'Expected sales', meta: `${formatNumber(state.consolidated.reduce((sum, item) => sum + (item.salesPerYear || 0), 0), 0)} units / yr`, detail: 'Group, item or default sales assumption', category: 'calculation', x: 515, y: 546 },
+      { id: 'output.dashboard', label: 'Profitability dashboard', meta: 'Net profit + payback', detail: 'Revenue, landed cost and warehouse costs', category: 'output', x: 765, y: 495 },
+      { id: 'warehouse.inventory', label: 'Warehouse units', meta: 'From maximum quantities', detail: `${formatNumber(warehouse.inventoryUnits, 2)} units`, category: 'warehouse', x: 515, y: 35 },
+      { id: 'warehouse.mix', label: 'Storage mix', meta: `${formatNumber(warehouse.shelfShare * 100, 0)}% shelf · ${formatNumber(warehouse.drawerShare * 100, 0)}% drawer`, detail: `${formatNumber(warehouse.palletShare * 100, 0)}% pallet`, category: 'warehouse', x: 515, y: 108 },
+      { id: 'warehouse.bins', label: 'Bin capacity', meta: `${state.warehouse.binsPerShelf} bins × ${formatNumber(state.warehouse.unitsPerBin, 0)} units`, detail: `${state.warehouse.shelvesPerRack} shelf levels per rack`, category: 'warehouse', x: 515, y: 181 },
+      { id: 'warehouse.locations', label: 'Storage locations', meta: `${warehouse.shelfLocations} shelf · ${warehouse.drawerLocations} drawer`, detail: `${warehouse.pallets} pallets · ${warehouse.racks} racks`, category: 'warehouse', x: 515, y: 254 },
+      { id: 'warehouse.operations', label: 'Handling + freight', meta: `${formatNumber(state.warehouse.orders, 0)} orders / month`, detail: 'Receipts, lines, EDI and parcels', category: 'warehouse', x: 515, y: 327 },
+      { id: 'warehouse.total', label: 'Warehouse total', meta: `${formatMoney(warehouse.monthlyTotal, warehouse.outputCurrency)} / month`, detail: `${formatMoney(warehouse.annualTotal, warehouse.outputCurrency)} / year`, category: 'warehouse', x: 515, y: 400 },
+      { id: 'output.consolidated', label: 'Consolidated XLSX', meta: 'Readable workbook', detail: 'Parts, formulas and warehouse sheet', category: 'output', x: 765, y: 105 },
+      { id: 'output.secure', label: 'Secure project', meta: 'Password-encrypted', detail: 'Workbook + settings + custom wires', category: 'output', x: 765, y: 235 },
+      { id: 'output.preview', label: 'Isometric preview', meta: 'Live visual', detail: 'Racks, bins, drawers and pallets', category: 'output', x: 765, y: 365 },
+    );
+
+    const edges = [];
+    enabledSheets.forEach((name) => edges.push({ from: `sheet.${name}`, to: 'consolidated.parts', label: 'parts + quantities' }));
+    enabledSheets.forEach((name) => edges.push({ from: `sheet.${name}`, to: 'consolidated.freight', label: 'kit freight' }));
+    edges.push(
+      { from: 'consolidated.freight', to: 'consolidated.shipping', label: 'freight & import' },
+      { from: 'consolidated.vat', to: 'consolidated.total', label: 'VAT column' },
+      { from: 'consolidated.quantity', to: 'sales.expected', label: 'stock qty' },
+      { from: 'sales.groups', to: 'sales.expected', label: 'group volumes' },
+      { from: 'sales.expected', to: 'output.dashboard', label: 'units sold' },
+      { from: 'consolidated.total', to: 'output.dashboard', label: 'unit prices' },
+      { from: 'warehouse.total', to: 'output.dashboard', label: 'logistics cost' },
+    );
+    edges.push(
+      { from: 'consolidated.parts', to: 'consolidated.quantity', label: 'group maximum' },
+      { from: 'consolidated.parts', to: 'consolidated.price', label: 'pricing row' },
+      { from: 'consolidated.price', to: 'consolidated.fx', label: 'convert' },
+      { from: 'consolidated.fx', to: 'consolidated.discount', label: 'converted total' },
+      { from: 'consolidated.discount', to: 'consolidated.total', label: 'sales price' },
+      { from: 'consolidated.shipping', to: 'consolidated.total', label: 'freight' },
+      { from: 'consolidated.quantity', to: 'warehouse.inventory', label: 'units' },
+      { from: 'warehouse.inventory', to: 'warehouse.mix', label: 'allocate' },
+      { from: 'warehouse.mix', to: 'warehouse.locations', label: 'shares' },
+      { from: 'warehouse.bins', to: 'warehouse.locations', label: 'capacity' },
+      { from: 'warehouse.locations', to: 'warehouse.total', label: 'storage cost' },
+      { from: 'warehouse.operations', to: 'warehouse.total', label: 'monthly activity' },
+      { from: 'consolidated.total', to: 'output.consolidated', label: 'parts output' },
+      { from: 'warehouse.total', to: 'output.consolidated', label: 'warehouse sheet' },
+      { from: 'consolidated.parts', to: 'output.secure', label: 'workbook data' },
+      { from: 'warehouse.total', to: 'output.secure', label: 'cost assumptions' },
+      { from: 'warehouse.locations', to: 'output.preview', label: 'geometry' },
+    );
+    const nodeIds = new Set(nodes.map((node) => node.id));
+    state.wireRelations.forEach((edge) => {
+      if (nodeIds.has(edge.from) && nodeIds.has(edge.to)) edges.push({ ...edge, custom: true });
+    });
+    return { nodes, edges, width: 980, nodeWidth: 180, nodeHeight: 50, showAllLabels: true };
+  }
+
+  function buildUnderhoodWireModel() {
+    const warehouse = calculateWarehouseModel();
+    const enabledSheets = state.workbook.SheetNames.filter((name) => state.mappings[name]?.enabled);
+    const nodes = [];
+    const edges = [];
+    const sourceFields = [
+      ['part', 'Part / SKU', 'column.part'],
+      ['description', 'Description', 'column.description'],
+      ['quantity', 'Quantity', 'column.quantity'],
+      ['price', 'Unit price', 'column.unitPrice'],
+      ['shipping', 'Shipping', 'column.shipping'],
+    ];
+    let sourceIndex = 0;
+    enabledSheets.forEach((sheetName) => {
+      const mapping = state.mappings[sheetName];
+      sourceFields.forEach(([field, label, target]) => {
+        const column = mapping[field];
+        if (column === null || column === undefined) return;
+        const id = `cell.${sheetName}.${field}`;
+        nodes.push({ id, label: `${sheetName} · ${label}`, meta: `${columnName(column)} · source column`, detail: `${sheetName}!${columnName(column)} feeds the mapped ${label.toLowerCase()} column`, category: 'source', x: 20, y: 24 + sourceIndex * 43 });
+        edges.push({ from: id, to: target, label: `${columnName(column)} → mapped` });
+        if (field === 'part') edges.push({ from: id, to: 'column.sources', label: 'sheet identity' });
+        sourceIndex += 1;
+      });
+    });
+
+    nodes.push(
+      { id: 'column.sources', label: 'Source sheets', meta: 'Consolidated column A', detail: `${enabledSheets.length} enabled source sheets`, category: 'calculation', x: 265, y: 24 },
+      { id: 'column.part', label: 'Part', meta: 'Consolidated column B', detail: `${state.consolidated.length} normalized part numbers`, category: 'calculation', x: 265, y: 102 },
+      { id: 'column.description', label: 'Description', meta: 'Consolidated column C', detail: 'Description from the representative row', category: 'calculation', x: 265, y: 180 },
+      { id: 'column.quantity', label: 'Quantity', meta: 'Consolidated column D', detail: 'Maximum quantity across matching parts', category: 'calculation', x: 265, y: 258 },
+      { id: 'column.unitPrice', label: 'Unit price USD', meta: 'Mapped price cell', detail: 'Source unit price used for calculations', category: 'calculation', x: 265, y: 336 },
+      { id: 'column.shipping', label: 'Shipping', meta: 'Mapped freight cell', detail: 'Source freight amount before margin', category: 'calculation', x: 265, y: 414 },
+      { id: 'formula.usdAmount', label: 'Amount in USD', meta: 'Quantity × unit price', detail: 'Source line amount normalized to USD', category: 'calculation', x: 510, y: 105 },
+      { id: 'formula.usdSek', label: 'USD → SEK', meta: formatMoney(state.rates.USD, 'SEK'), detail: 'Live daily reference rate', category: 'assumption', x: 510, y: 183 },
+      { id: 'formula.sekAmount', label: 'Amount in SEK', meta: 'USD amount × live rate', detail: 'Converted line amount before discount', category: 'calculation', x: 510, y: 261 },
+      { id: 'formula.discount', label: '30% discount', meta: formatPercent(state.config.discount), detail: 'Configurable discount applied to SEK amount', category: 'assumption', x: 510, y: 339 },
+      { id: 'formula.multiplier', label: 'Price multiplier', meta: `${formatNumber(state.config.multiplier, 2)}×`, detail: 'Applied after discount', category: 'assumption', x: 510, y: 417 },
+      { id: 'formula.sales', label: 'Sales amount SEK', meta: 'Discounted × multiplier', detail: 'Calculated sales amount', category: 'calculation', x: 510, y: 495 },
+      { id: 'formula.shippingMargin', label: 'Shipping margin', meta: formatPercent(state.config.shippingMargin), detail: 'Applied to the mapped shipping cost', category: 'assumption', x: 510, y: 573 },
+      { id: 'formula.lineTotal', label: `Line total ${state.config.outputCurrency}`, meta: 'Sales + freight incl. margin', detail: 'Customer amount per consolidated part, excl. VAT', category: 'calculation', x: 510, y: 651 },
+      { id: 'formula.kitFreight', label: 'Kit freight', meta: 'Per kit: sheet / per line / whole kit', detail: 'Kit freight setting applied to the pricing row', category: 'calculation', x: 510, y: 729 },
+      { id: 'formula.consFreight', label: 'Consolidated shipment share', meta: `${formatMoney(toOutput(state.freight.consolidatedShipment, state.freight.consolidatedCurrency), state.config.outputCurrency)} by ${state.freight.allocation}`, detail: 'One shipment for the whole consolidated order, split across lines', category: 'assumption', x: 510, y: 807 },
+      { id: 'formula.importCosts', label: 'Duty, insurance & fees', meta: `${formatPercent(state.freight.dutyRate)} duty · ${formatPercent(state.freight.insuranceRate)} ins.`, detail: 'Duty on purchase + freight + insurance, plus clearance fees', category: 'assumption', x: 510, y: 885 },
+      { id: 'formula.vat', label: 'VAT (MVA)', meta: formatPercent(state.config.vatRate), detail: 'Line total incl. VAT for the customer', category: 'assumption', x: 510, y: 963 },
+      { id: 'formula.landed', label: 'Landed cost', meta: 'Purchase + freight & import', detail: 'Cost of the stock delivered to Norway', category: 'calculation', x: 510, y: 1041 },
+      { id: 'sales.groups', label: 'Sales groups', meta: `${state.groups.length} groups · ${Object.keys(state.items).length} item overrides`, detail: 'Group sales volumes and multipliers', category: 'assumption', x: 755, y: 804 },
+      { id: 'sales.expected', label: 'Expected sales / yr', meta: `${formatNumber(state.consolidated.reduce((sum, item) => sum + (item.salesPerYear || 0), 0), 0)} units`, detail: 'Item override → group → default assumption', category: 'calculation', x: 755, y: 882 },
+      { id: 'dashboard.net', label: 'Net profit / yr', meta: 'Revenue − landed cost − logistics', detail: 'Profitability dashboard result', category: 'calculation', x: 755, y: 960 },
+      { id: 'output.dashboard', label: 'Dashboard', meta: 'Charts + item table', detail: 'Profit bridge, payback and group profit', category: 'output', x: 1000, y: 882 },
+      { id: 'warehouse.inventory', label: 'Inventory units', meta: `${formatNumber(warehouse.inventoryUnits, 0)} units`, detail: 'Sum of consolidated maximum quantities', category: 'warehouse', x: 755, y: 102 },
+      { id: 'warehouse.ratesNok', label: 'Quoted rates NOK', meta: 'Private workbook data', detail: 'Pallet, shelf, handling and freight rates', category: 'warehouse', x: 755, y: 180 },
+      { id: 'warehouse.nokSek', label: 'NOK → SEK', meta: warehouse.nokToOutput === null ? 'Rate unavailable' : formatNumber(warehouse.nokToOutput, 6), detail: 'Live reference conversion for warehouse costs', category: 'assumption', x: 755, y: 258 },
+      { id: 'warehouse.storageMix', label: 'Storage mix', meta: `${formatNumber(warehouse.shelfShare * 100, 0)} / ${formatNumber(warehouse.drawerShare * 100, 0)} / ${formatNumber(warehouse.palletShare * 100, 0)}%`, detail: 'Shelf, drawer and pallet allocation', category: 'warehouse', x: 755, y: 336 },
+      { id: 'warehouse.binCapacity', label: 'Bin + rack capacity', meta: `${state.warehouse.binsPerShelf} bins · ${state.warehouse.shelvesPerRack} levels`, detail: `${formatNumber(state.warehouse.unitsPerBin, 0)} units per bin`, category: 'warehouse', x: 755, y: 414 },
+      { id: 'warehouse.locations', label: 'Storage locations', meta: `${warehouse.shelfLocations} shelf · ${warehouse.drawerLocations} drawer`, detail: `${warehouse.pallets} pallets across ${warehouse.racks} racks`, category: 'warehouse', x: 755, y: 492 },
+      { id: 'warehouse.activity', label: 'Monthly activity', meta: `${formatNumber(state.warehouse.orders, 0)} orders`, detail: 'Receipts, item lines, EDI and parcels', category: 'warehouse', x: 755, y: 570 },
+      { id: 'warehouse.totalNok', label: 'Warehouse total NOK', meta: formatNok(warehouse.monthlyNok), detail: 'Monthly quoted and entered costs', category: 'warehouse', x: 755, y: 648 },
+      { id: 'warehouse.totalSek', label: 'Warehouse total SEK', meta: formatMoney(warehouse.monthlyTotal, warehouse.outputCurrency), detail: 'Monthly total after live NOK conversion', category: 'warehouse', x: 755, y: 726 },
+      { id: 'output.consolidated', label: 'Consolidated XLSX', meta: 'Readable workbook', detail: 'Parts, formulas, NOK rates and SEK references', category: 'output', x: 1000, y: 310 },
+      { id: 'output.secure', label: 'Encrypted project', meta: 'AES-256-GCM', detail: 'Workbook, private rates, settings and custom wires', category: 'output', x: 1000, y: 466 },
+      { id: 'output.preview', label: 'Isometric preview', meta: 'Racks + bins', detail: 'Live geometry driven by capacity assumptions', category: 'output', x: 1000, y: 622 },
+    );
+
+    edges.push(
+      { from: 'column.quantity', to: 'formula.usdAmount', label: 'quantity' },
+      { from: 'column.unitPrice', to: 'formula.usdAmount', label: 'unit price' },
+      { from: 'formula.usdAmount', to: 'formula.sekAmount', label: 'USD amount' },
+      { from: 'formula.usdSek', to: 'formula.sekAmount', label: 'FX rate' },
+      { from: 'formula.sekAmount', to: 'formula.sales', label: 'base amount' },
+      { from: 'formula.discount', to: 'formula.sales', label: 'discount' },
+      { from: 'formula.multiplier', to: 'formula.sales', label: 'multiplier' },
+      { from: 'column.shipping', to: 'formula.kitFreight', label: 'Frakt column' },
+      { from: 'formula.kitFreight', to: 'formula.lineTotal', label: 'kit freight' },
+      { from: 'formula.consFreight', to: 'formula.lineTotal', label: 'shipment share' },
+      { from: 'formula.importCosts', to: 'formula.lineTotal', label: 'import costs' },
+      { from: 'formula.shippingMargin', to: 'formula.lineTotal', label: 'margin' },
+      { from: 'formula.lineTotal', to: 'formula.vat', label: 'excl. VAT' },
+      { from: 'formula.sekAmount', to: 'formula.landed', label: 'purchase' },
+      { from: 'formula.discount', to: 'formula.landed', label: 'discount' },
+      { from: 'formula.kitFreight', to: 'formula.landed', label: 'kit freight' },
+      { from: 'formula.consFreight', to: 'formula.landed', label: 'shipment share' },
+      { from: 'formula.importCosts', to: 'formula.landed', label: 'import costs' },
+      { from: 'column.quantity', to: 'sales.expected', label: 'stock qty' },
+      { from: 'sales.groups', to: 'sales.expected', label: 'group volumes' },
+      { from: 'sales.expected', to: 'dashboard.net', label: 'units sold' },
+      { from: 'formula.lineTotal', to: 'dashboard.net', label: 'revenue' },
+      { from: 'formula.landed', to: 'dashboard.net', label: 'cost of goods' },
+      { from: 'warehouse.totalSek', to: 'dashboard.net', label: 'logistics' },
+      { from: 'dashboard.net', to: 'output.dashboard', label: 'profitability' },
+      { from: 'formula.sales', to: 'formula.lineTotal', label: 'sales amount' },
+      { from: 'column.quantity', to: 'warehouse.inventory', label: 'max quantities' },
+      { from: 'warehouse.inventory', to: 'warehouse.locations', label: 'units' },
+      { from: 'warehouse.storageMix', to: 'warehouse.locations', label: 'allocation' },
+      { from: 'warehouse.binCapacity', to: 'warehouse.locations', label: 'capacity' },
+      { from: 'warehouse.locations', to: 'warehouse.totalNok', label: 'storage count' },
+      { from: 'warehouse.activity', to: 'warehouse.totalNok', label: 'monthly operations' },
+      { from: 'warehouse.ratesNok', to: 'warehouse.totalNok', label: 'NOK rates' },
+      { from: 'warehouse.totalNok', to: 'warehouse.totalSek', label: 'NOK total' },
+      { from: 'warehouse.nokSek', to: 'warehouse.totalSek', label: 'live FX' },
+      { from: 'formula.lineTotal', to: 'output.consolidated', label: 'parts output' },
+      { from: 'warehouse.totalSek', to: 'output.consolidated', label: 'warehouse sheet' },
+      { from: 'column.sources', to: 'output.secure', label: 'source workbook' },
+      { from: 'warehouse.ratesNok', to: 'output.secure', label: 'private rates' },
+      { from: 'warehouse.locations', to: 'output.preview', label: 'geometry' },
+    );
+    const nodeIds = new Set(nodes.map((node) => node.id));
+    state.wireRelations.forEach((edge) => {
+      if (nodeIds.has(edge.from) && nodeIds.has(edge.to)) edges.push({ ...edge, custom: true });
+    });
+    return { nodes, edges, width: 1215, nodeWidth: 190, nodeHeight: 42, showAllLabels: false };
+  }
+
+  function renderWireView() {
+    if (!dom.wireCanvas || !state.workbook) return;
+    const model = buildWireModel();
+    if (!model.nodes.some((node) => node.id === state.selectedWireNode)) state.selectedWireNode = model.nodes[0]?.id || null;
+    const selected = state.selectedWireNode;
+    const nodeById = new Map(model.nodes.map((node) => [node.id, node]));
+    dom.wireView.classList.toggle('underhood-mode', state.wireMode === 'underhood');
+    dom.wireDetailMode.value = state.wireMode;
+    const width = model.width || 980;
+    const nodeW = model.nodeWidth || 180;
+    const nodeH = model.nodeHeight || 50;
+    const height = Math.max(560, 55 + nodeH + Math.max(...model.nodes.map((node) => node.y)));
+    const outgoingPalette = ['#d47b2a', '#c04474', '#725db0', '#218878', '#a77d12', '#ad4b3f', '#4676b5', '#8b5a2b'];
+    const selectedOutgoing = model.edges.filter((edge) => edge.from === selected);
+    const paths = model.edges.map((edge, index) => {
+      const from = nodeById.get(edge.from);
+      const to = nodeById.get(edge.to);
+      if (!from || !to) return '';
+      const x1 = from.x + nodeW;
+      const y1 = from.y + nodeH / 2;
+      const x2 = to.x;
+      const y2 = to.y + nodeH / 2;
+      const directionSign = x2 >= x1 ? 1 : -1;
+      const bend = Math.max(42, Math.abs(x2 - x1) * 0.45);
+      const c1x = x1 + directionSign * bend;
+      const c2x = x2 - directionSign * bend;
+      const direction = edge.to === selected ? 'incoming' : edge.from === selected ? 'outgoing' : '';
+      const outgoingIndex = direction === 'outgoing' ? selectedOutgoing.indexOf(edge) : -1;
+      const outgoingColor = outgoingIndex >= 0 ? outgoingPalette[outgoingIndex % outgoingPalette.length] : '';
+      const colorStyle = outgoingColor ? ` style="--wire-color:${outgoingColor}"` : '';
+      const className = ['wire-path', edge.custom ? 'custom' : '', direction].filter(Boolean).join(' ');
+      const arrowClassName = ['wire-mid-arrow', edge.custom ? 'custom' : '', direction].filter(Boolean).join(' ');
+      const marker = direction === 'incoming' ? 'arrow-in' : direction === 'outgoing' ? `arrow-out-${outgoingIndex % outgoingPalette.length}` : edge.custom ? 'arrow-custom' : 'arrow-default';
+      const labelX = (x1 + x2) / 2;
+      const labelY = (y1 + y2) / 2 - 5 - (index % 2) * 6;
+      const label = model.showAllLabels || direction || edge.custom ? `<text class="wire-label" x="${labelX}" y="${labelY}" text-anchor="middle">${escapeMarkup(edge.label || '')}</text>` : '';
+      const arrowPositions = Math.hypot(x2 - x1, y2 - y1) > 260 ? [0.38, 0.66] : [0.52];
+      const midArrows = arrowPositions.map((t) => {
+        const inverse = 1 - t;
+        const x = inverse ** 3 * x1 + 3 * inverse ** 2 * t * c1x + 3 * inverse * t ** 2 * c2x + t ** 3 * x2;
+        const y = inverse ** 3 * y1 + 3 * inverse ** 2 * t * y1 + 3 * inverse * t ** 2 * y2 + t ** 3 * y2;
+        const dx = 3 * inverse ** 2 * (c1x - x1) + 6 * inverse * t * (c2x - c1x) + 3 * t ** 2 * (x2 - c2x);
+        const dy = 3 * inverse ** 2 * (y1 - y1) + 6 * inverse * t * (y2 - y1) + 3 * t ** 2 * (y2 - y2);
+        const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+        return `<g class="${arrowClassName}"${colorStyle} transform="translate(${x.toFixed(2)} ${y.toFixed(2)}) rotate(${angle.toFixed(2)})"><path d="M -5 -4 L 5 0 L -5 4 Z"/></g>`;
+      }).join('');
+      return `<path class="${className}"${colorStyle} d="M ${x1} ${y1} C ${c1x} ${y1}, ${c2x} ${y2}, ${x2} ${y2}" marker-end="url(#${marker})"/>${midArrows}${label}`;
+    }).join('');
+    const nodes = model.nodes.map((node) => `<g class="wire-node ${node.category}${node.id === selected ? ' selected' : ''}" data-wire-node="${escapeMarkup(node.id)}" transform="translate(${node.x} ${node.y})" role="button" aria-label="${escapeMarkup(`${node.label}. ${node.detail}`)}"><rect width="${nodeW}" height="${nodeH}" rx="8"/><text x="12" y="21">${escapeMarkup(node.label)}</text><text class="wire-node-meta" x="12" y="38">${escapeMarkup(node.meta)}</text></g>`).join('');
+    const outgoingMarkers = outgoingPalette.map((color, index) => `<marker id="arrow-out-${index}" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="${color}"/></marker>`).join('');
+    dom.wireCanvas.innerHTML = `<svg viewBox="0 0 ${width} ${height}" style="min-width:${width}px" role="img" aria-label="Data relationship wire diagram"><defs><marker id="arrow-default" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#a8b5ad"/></marker><marker id="arrow-in" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#3478b7"/></marker>${outgoingMarkers}<marker id="arrow-custom" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#8266a4"/></marker></defs>${paths}${nodes}</svg>`;
+    dom.wireCanvas.querySelectorAll('[data-wire-node]').forEach((node) => {
+      node.addEventListener('click', () => {
+        state.selectedWireNode = node.dataset.wireNode;
+        renderWireView();
+      });
+      node.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          state.selectedWireNode = node.dataset.wireNode;
+          renderWireView();
+        }
+      });
+      node.setAttribute('tabindex', '0');
+    });
+    renderWireInspector(model);
+    populateWireSelectors(model.nodes);
+    renderCustomWires(model.nodes);
+  }
+
+  function renderWireInspector(model) {
+    const node = model.nodes.find((item) => item.id === state.selectedWireNode);
+    if (!node) return;
+    const incoming = model.edges.filter((edge) => edge.to === node.id);
+    const outgoing = model.edges.filter((edge) => edge.from === node.id);
+    const labels = new Map(model.nodes.map((item) => [item.id, item.label]));
+    dom.wireSelectedTitle.textContent = node.label;
+    dom.wireSelectedDetail.textContent = node.detail;
+    const fragments = [];
+    incoming.forEach((edge) => fragments.push(Object.assign(document.createElement('span'), { textContent: `← ${labels.get(edge.from)} · ${edge.label}` })));
+    outgoing.forEach((edge) => fragments.push(Object.assign(document.createElement('span'), { textContent: `→ ${labels.get(edge.to)} · ${edge.label}` })));
+    if (!fragments.length) fragments.push(Object.assign(document.createElement('span'), { textContent: 'No direct wires.' }));
+    dom.wireSelectedLinks.replaceChildren(...fragments);
+  }
+
+  function populateWireSelectors(nodes) {
+    const currentFrom = dom.wireFrom.value;
+    const currentTo = dom.wireTo.value;
+    const optionsFor = (select, selectedValue, fallbackValue) => {
+      select.replaceChildren(...nodes.map((node) => {
+        const option = document.createElement('option');
+        option.value = node.id;
+        option.textContent = node.label;
+        return option;
+      }));
+      const nextValue = nodes.some((node) => node.id === selectedValue) ? selectedValue : fallbackValue;
+      if (nodes.some((node) => node.id === nextValue)) select.value = nextValue;
+    };
+    optionsFor(dom.wireFrom, currentFrom || state.selectedWireNode, state.selectedWireNode || nodes[0]?.id);
+    optionsFor(dom.wireTo, currentTo, state.wireMode === 'underhood' ? 'warehouse.totalSek' : 'warehouse.total');
+  }
+
+  function addWireRelation(event) {
+    event.preventDefault();
+    const from = dom.wireFrom.value;
+    const to = dom.wireTo.value;
+    const label = dom.wireLabel.value.trim() || 'custom relationship';
+    if (!from || !to || from === to) {
+      showToast('Choose two different data points for the wire.', true);
+      return;
+    }
+    if (state.wireRelations.some((edge) => edge.from === from && edge.to === to && edge.label === label)) {
+      showToast('That custom wire already exists.', true);
+      return;
+    }
+    state.wireRelations.push({ id: `wire-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, from, to, label });
+    dom.wireLabel.value = '';
+    state.selectedWireNode = from;
+    renderWireView();
+    showToast('Custom relationship added.');
+  }
+
+  function renderCustomWires(nodes) {
+    const labels = new Map(nodes.map((node) => [node.id, node.label]));
+    if (!state.wireRelations.length) {
+      const empty = document.createElement('p');
+      empty.className = 'muted';
+      empty.textContent = 'No custom relationships yet.';
+      dom.wireCustomList.replaceChildren(empty);
+      return;
+    }
+    const rows = state.wireRelations.map((edge) => {
+      const row = document.createElement('div');
+      row.className = 'wire-custom-row';
+      const text = document.createElement('span');
+      text.textContent = `${labels.get(edge.from) || edge.from} → ${labels.get(edge.to) || edge.to}: ${edge.label}`;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'icon-button';
+      remove.setAttribute('aria-label', `Remove ${edge.label}`);
+      remove.textContent = '×';
+      remove.addEventListener('click', () => {
+        state.wireRelations = state.wireRelations.filter((item) => item.id !== edge.id);
+        renderWireView();
+      });
+      row.append(text, remove);
+      return row;
+    });
+    dom.wireCustomList.replaceChildren(...rows);
+  }
+
+  function escapeMarkup(value) {
+    return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+  }
+
+  async function importWorkbook(file) {
+    if (!window.XLSX || !FormulaEngine) {
+      showToast('Spreadsheet libraries are unavailable.', true);
+      return;
+    }
+
+    setStatus(`Reading ${file.name}…`, 'busy');
+    try {
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data, {
+        type: 'array',
+        cellFormula: true,
+        cellStyles: true,
+        cellNF: true,
+        cellDates: true,
+        bookDeps: true,
+        xlfn: true,
+      });
+
+      if (!workbook.SheetNames.length) throw new Error('The workbook contains no sheets.');
+
+      if (state.secureDownloadUrl) URL.revokeObjectURL(state.secureDownloadUrl);
+      state.secureDownloadUrl = null;
+      dom.secureDownload.removeAttribute('href');
+      dom.secureDownload.classList.add('hidden');
+
+      state.workbook = workbook;
+      state.fileName = file.name;
+      state.matrices = {};
+      state.mappings = {};
+      state.variables = [];
+      state.wireRelations = [];
+      state.selectedWireNode = 'consolidated.quantity';
+      state.rates = {};
+      state.rateDates = {};
+      state.pairRates = {};
+      state.liveRateCells = [];
+      state.selectedCell = null;
+      const persistedRates = { ...state.warehouse.rates };
+      state.warehouse = {
+        ...WAREHOUSE_DEFAULTS,
+        rates: { ...WAREHOUSE_RATE_DEFAULTS, ...persistedRates },
+      };
+      state.config.vatRate = 0.25;
+      state.freight = { ...FREIGHT_DEFAULTS };
+      state.kits = {};
+      state.groups = [];
+      state.items = {};
+      state.sales = { ...SALES_DEFAULTS };
+      state.supplier = { ...SUPPLIER_DEFAULTS };
+      FLOW_OVERRIDE_KEYS.forEach((key) => { state.flowOverrides[key] = null; });
+      state.flowUnlocked = false;
+      state.selectedKeys = new Set();
+      state.selectionAnchor = null;
+      state.sheetSelection = { sheetName: null, rows: new Set(), anchor: null };
+      state.consolidatedSearch = '';
+      state.consolidatedFilter = 'all';
+      state.pendingDisabledKits = null;
+      const restoredLocal = loadLocalSettings(file.name);
+      const restoredWorkbook = hydrateExportedSettings(workbook);
+
+      const engineSheets = {};
+      workbook.SheetNames.forEach((sheetName) => {
+        const matrix = worksheetToFormulaMatrix(workbook.Sheets[sheetName]);
+        state.matrices[sheetName] = matrix;
+        engineSheets[sheetName] = prepareEngineMatrix(sheetName, workbook.Sheets[sheetName], matrix);
+        state.mappings[sheetName] = detectMapping(matrix);
+        if (isGeneratedSheet(workbook.Sheets[sheetName])) state.mappings[sheetName].enabled = false;
+      });
+      applyPendingDisabledKits();
+
+      state.hf = FormulaEngine.buildFromSheets(engineSheets, {
+        licenseKey: 'gpl-v3',
+        precisionRounding: 10,
+        evaluateNullToZero: false,
+        useArrayArithmetic: true,
+        useColumnIndex: true,
+        maxRows: Math.max(MAX_IMPORT_ROWS + 100, 10000),
+        maxColumns: Math.max(MAX_IMPORT_COLS + 20, 200),
+      });
+
+      state.sheetIds = {};
+      workbook.SheetNames.forEach((name) => { state.sheetIds[name] = state.hf.getSheetId(name); });
+      importNamedExpressions(workbook);
+      rebuildDependencyIndex();
+
+      dom.workbookName.textContent = file.name;
+      dom.sheetCount.textContent = `${workbook.SheetNames.length} sheet${workbook.SheetNames.length === 1 ? '' : 's'}`;
+      dom.emptyPanel.classList.add('hidden');
+      dom.controls.classList.remove('hidden');
+      dom.tabs.classList.remove('hidden');
+      dom.welcome.classList.add('hidden');
+      dom.exportButton.disabled = false;
+
+      dom.consolidatedSearch.value = '';
+      syncControlsFromState();
+      persistWarehouseRates();
+      renderMappings();
+      renderVariables();
+      renderGroups();
+      renderTabs();
+      rebuildConsolidation();
+      showView(VIEW.consolidated);
+      renderAllSelectionBars();
+      saveSettingsSoon();
+
+      const enabled = Object.values(state.mappings).filter((mapping) => mapping.enabled).length;
+      const restoredNote = restoredWorkbook ? ' Saved settings were restored from the workbook.' : restoredLocal ? ' Saved kit, freight and group settings for this workbook were restored.' : '';
+      setStatus(`Loaded ${file.name}. ${enabled} of ${workbook.SheetNames.length} sheets are included in consolidation.${restoredNote}`);
+      await refreshRates(false);
+    } catch (error) {
+      console.error(error);
+      setStatus(`Could not import the workbook: ${error.message}`, 'error');
+      showToast(error.message || 'Workbook import failed.', true);
+    }
+  }
+
+  function isGeneratedSheet(sheet) {
+    const marker = String(sheet?.A1?.v ?? '').trim().toLowerCase();
+    return ['consolidated parts', 'warehouse cost estimate', 'assumption', 'profitability estimate', SETTINGS_SHEET_MARKER].includes(marker);
+  }
+
+  function readSettingsSheet(workbook) {
+    const name = workbook.SheetNames.find((sheetName) => String(workbook.Sheets[sheetName]?.A1?.v ?? '').trim().toLowerCase() === SETTINGS_SHEET_MARKER);
+    if (!name) return null;
+    const sheet = workbook.Sheets[name];
+    let json = '';
+    for (let row = 3; row < 400; row += 1) {
+      const value = sheet[`A${row}`]?.v;
+      if (typeof value !== 'string' || !value) break;
+      json += value;
+    }
+    try {
+      return JSON.parse(json);
+    } catch (error) {
+      console.warn('The PartsList settings sheet could not be read.', error);
+      return null;
+    }
+  }
+
+  function hydrateExportedSettings(workbook) {
+    hydrateWarehouseAndAssumptionSheets(workbook);
+    const settings = readSettingsSheet(workbook);
+    return settings ? applySettings(settings) : false;
+  }
+
+  function hydrateWarehouseAndAssumptionSheets(workbook) {
+    const warehouseName = workbook.SheetNames.find((name) => String(workbook.Sheets[name]?.A1?.v ?? '').trim().toLowerCase() === 'warehouse cost estimate');
+    if (warehouseName) {
+      const sheet = workbook.Sheets[warehouseName];
+      const assignNumber = (target, key, address, minimum = 0) => {
+        const value = toNumber(sheet[address]?.v);
+        if (Number.isFinite(value) && value >= minimum) target[key] = value;
+      };
+      const shelfShare = toNumber(sheet.B7?.v);
+      const drawerShare = toNumber(sheet.B8?.v);
+      if (Number.isFinite(shelfShare) && shelfShare >= 0 && shelfShare <= 1) state.warehouse.shelfShare = Math.round(shelfShare * 10000) / 100;
+      if (Number.isFinite(drawerShare) && drawerShare >= 0 && drawerShare <= 1) state.warehouse.drawerShare = Math.round(drawerShare * 10000) / 100;
+      assignNumber(state.warehouse, 'binsPerShelf', 'B10', 1);
+      assignNumber(state.warehouse, 'shelvesPerRack', 'B11', 1);
+      assignNumber(state.warehouse, 'unitsPerBin', 'B12', 1);
+      assignNumber(state.warehouse, 'unitsPerDrawer', 'B14', 1);
+      assignNumber(state.warehouse, 'unitsPerPallet', 'B15', 1);
+      state.warehouse.unitsPerShelf = state.warehouse.binsPerShelf * state.warehouse.unitsPerBin;
+      state.warehouse.palletType = String(sheet.B16?.v ?? '').toUpperCase() === 'SEA' ? 'sea' : 'eu';
+      state.warehouse.palletHeight = String(sheet.B17?.v ?? '') === '220' ? '220' : '120';
+      const rateCells = {
+        eu120: 'E5', eu220: 'E6', sea120: 'E7', sea220: 'E8', shelf: 'E9', drawer: 'E10', edi: 'E11',
+        receiptBase: 'E12', receiptLine: 'E13', orderBase: 'E14', orderLine: 'E15', parcel: 'E16', privateSurcharge: 'E17', wms: 'E18',
+      };
+      Object.entries(rateCells).forEach(([key, address]) => assignNumber(state.warehouse.rates, key, address));
+      const activityCells = {
+        receipts: 'B29', receiptLines: 'B30', orders: 'B31', orderLines: 'B32', ediLabels: 'B33',
+        businessParcels: 'B34', privateParcels: 'B35', packaging: 'B36',
+      };
+      Object.entries(activityCells).forEach(([key, address]) => assignNumber(state.warehouse, key, address));
+      state.warehouse.includeWms = sheet.B37?.v === true || String(sheet.B37?.v ?? '').toUpperCase() === 'TRUE';
+    }
+
+    const assumptionsName = workbook.SheetNames.find((name) => String(workbook.Sheets[name]?.A1?.v ?? '').trim().toLowerCase() === 'assumption');
+    if (!assumptionsName) return;
+    const sheet = workbook.Sheets[assumptionsName];
+    const discount = toNumber(sheet.B2?.v);
+    const multiplier = toNumber(sheet.B3?.v);
+    const shippingMargin = toNumber(sheet.B4?.v);
+    const outputCurrency = String(sheet.B5?.v ?? '').toUpperCase();
+    if (Number.isFinite(discount) && discount >= 0 && discount <= 1) state.config.discount = discount;
+    if (Number.isFinite(multiplier) && multiplier >= 0) state.config.multiplier = multiplier;
+    if (Number.isFinite(shippingMargin) && shippingMargin >= 0 && shippingMargin < 1) state.config.shippingMargin = shippingMargin;
+    if (CURRENCIES.includes(outputCurrency)) state.config.outputCurrency = outputCurrency;
+  }
+
+  function worksheetToFormulaMatrix(worksheet) {
+    if (!worksheet || !worksheet['!ref']) return [[]];
+    const range = XLSX.utils.decode_range(worksheet['!ref']);
+    const lastRow = Math.min(range.e.r, MAX_IMPORT_ROWS - 1);
+    const lastCol = Math.min(range.e.c, MAX_IMPORT_COLS - 1);
+    const matrix = [];
+
+    for (let row = 0; row <= lastRow; row += 1) {
+      const values = [];
+      for (let col = 0; col <= lastCol; col += 1) {
+        const address = XLSX.utils.encode_cell({ r: row, c: col });
+        const cell = worksheet[address];
+        if (!cell) {
+          values.push(null);
+        } else if (cell.f) {
+          values.push(`=${cell.f}`);
+        } else if (cell.v instanceof Date) {
+          values.push(cell.v);
+        } else if (typeof cell.v === 'string' && cell.v.startsWith('=')) {
+          values.push(`'${cell.v}`);
+        } else {
+          values.push(cell.v ?? null);
+        }
+      }
+      while (values.length && values[values.length - 1] === null) values.pop();
+      matrix.push(values);
+    }
+    while (matrix.length > 1 && matrix[matrix.length - 1].length === 0) matrix.pop();
+    return matrix.length ? matrix : [[]];
+  }
+
+  function prepareEngineMatrix(sheetName, worksheet, sourceMatrix) {
+    return sourceMatrix.map((row, rowIndex) => row.map((value, colIndex) => {
+      if (typeof value !== 'string' || !value.startsWith('=')) return value;
+      const address = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
+      const currencyPair = extractCurrencyPair(value);
+      if (currencyPair) {
+        const fallback = extractFormulaFallback(value);
+        state.liveRateCells.push({ sheetName, row: rowIndex, col: colIndex, ...currencyPair });
+        return fallback ?? (typeof worksheet[address]?.v === 'number' ? worksheet[address].v : 1);
+      }
+
+      const arrayArithmetic = value.match(/^=(\$?[A-Z]{1,3}\$?\d+):\$?[A-Z]{1,3}\$?\d+([*\/+\-].+)$/i);
+      if (arrayArithmetic) return `=${arrayArithmetic[1]}${arrayArithmetic[2]}`;
+      return value;
+    }));
+  }
+
+  function extractCurrencyPair(formula) {
+    const compact = String(formula).replace(/\s+/g, '').toUpperCase();
+    const match = compact.match(/CURRENCY:([A-Z]{3})([A-Z]{3})/);
+    return match ? { from: match[1], to: match[2] } : null;
+  }
+
+  function extractFormulaFallback(formula) {
+    const match = String(formula).match(/,\s*(-?\d+(?:\.\d+)?)\s*\)+$/);
+    return match ? Number(match[1]) : null;
+  }
+
+  function detectMapping(matrix) {
+    let best = { row: 0, score: -1, fields: {} };
+    const candidates = Math.min(matrix.length, 25);
+
+    for (let row = 0; row < candidates; row += 1) {
+      const fields = {};
+      let score = 0;
+      (matrix[row] || []).forEach((value, col) => {
+        const header = normalizeHeader(value);
+        if (!header) return;
+        Object.entries(HEADER_TERMS).forEach(([field, terms]) => {
+          if (fields[field] !== undefined) return;
+          const matchScore = headerMatchScore(header, terms);
+          if (matchScore > 0) {
+            fields[field] = col;
+            score += matchScore + (field === 'part' || field === 'quantity' ? 3 : 0);
+          }
+        });
+      });
+      const completeness = Object.keys(fields).length;
+      score += completeness * 2;
+      if (fields.part !== undefined && fields.quantity !== undefined) score += 12;
+      if (score > best.score) best = { row, score, fields };
+    }
+
+    let dataStartRow = best.row + 1;
+    if (best.fields.part !== undefined && best.fields.quantity !== undefined) {
+      const detected = matrix.findIndex((row, rowIndex) => rowIndex > best.row
+        && String(row?.[best.fields.part] ?? '').trim() !== ''
+        && toNumber(row?.[best.fields.quantity]) !== null);
+      if (detected >= 0) dataStartRow = detected;
+    }
+
+    const maxColumns = Math.max(0, ...matrix.slice(best.row, dataStartRow).map((row) => row?.length || 0));
+    const combinedHeaders = Array.from({ length: maxColumns }, (_, col) => matrix
+      .slice(best.row, dataStartRow)
+      .map((row) => normalizeHeader(row?.[col]))
+      .filter(Boolean)
+      .join(' '));
+
+    ['discountedTotal', 'sellingTotal', 'shipping', 'shippingWithMargin', 'currency'].forEach((field) => {
+      let bestColumn = null;
+      let bestScore = 0;
+      combinedHeaders.forEach((header, col) => {
+        const matchScore = headerMatchScore(header, HEADER_TERMS[field]);
+        if (matchScore > bestScore) {
+          bestScore = matchScore;
+          bestColumn = col;
+        }
+      });
+      if (bestColumn !== null) best.fields[field] = bestColumn;
+    });
+
+    return {
+      enabled: best.fields.part !== undefined && best.fields.quantity !== undefined,
+      headerRow: best.row,
+      dataStartRow,
+      ...Object.fromEntries(Object.keys(FIELD_LABELS).map((field) => [field, best.fields[field] ?? null])),
+    };
+  }
+
+  function normalizeHeader(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+      .toLowerCase()
+      .replace(/[_\-–—/\\()\[\].:%]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function headerMatchScore(header, terms) {
+    let score = 0;
+    terms.forEach((term) => {
+      if (header === term) score = Math.max(score, 7);
+      else if (header.startsWith(`${term} `) || header.endsWith(` ${term}`)) score = Math.max(score, 5);
+      else if (term.length >= 5 && (` ${header} `).includes(` ${term} `)) score = Math.max(score, 3);
+    });
+    return score;
+  }
+
+  function renderMappings() {
+    dom.mappingList.replaceChildren();
+    state.workbook.SheetNames.forEach((sheetName) => {
+      const mapping = state.mappings[sheetName];
+      const card = document.createElement('article');
+      card.className = `mapping-card${mapping.enabled ? '' : ' disabled'}`;
+
+      const head = document.createElement('div');
+      head.className = 'mapping-card-head';
+      const enabled = document.createElement('input');
+      enabled.type = 'checkbox';
+      enabled.checked = mapping.enabled;
+      enabled.setAttribute('aria-label', `Include ${sheetName}`);
+      const title = document.createElement('strong');
+      title.textContent = sheetName;
+      const hint = document.createElement('span');
+      hint.className = 'mapping-hint';
+      hint.textContent = `${state.matrices[sheetName].length} rows`;
+      head.append(enabled, title, hint);
+
+      const fields = document.createElement('div');
+      fields.className = 'mapping-fields';
+      fields.append(createHeaderRowControl(sheetName, mapping, card));
+      fields.append(createDataStartRowControl(sheetName, mapping));
+      Object.keys(FIELD_LABELS).forEach((field) => fields.append(createColumnControl(sheetName, field, mapping)));
+
+      enabled.addEventListener('change', () => {
+        mapping.enabled = enabled.checked;
+        card.classList.toggle('disabled', !mapping.enabled);
+        saveSettingsSoon();
+        rebuildConsolidation();
+        refreshRates(false);
+      });
+
+      card.append(head);
+      if (!isGeneratedSheet(state.workbook.Sheets[sheetName])) card.append(createKitFreightControl(sheetName));
+      card.append(fields);
+      dom.mappingList.append(card);
+    });
+  }
+
+  function createHeaderRowControl(sheetName, mapping, card) {
+    const label = document.createElement('label');
+    label.textContent = 'Header row';
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '1';
+    input.max = String(Math.max(state.matrices[sheetName].length, 1));
+    input.value = String(mapping.headerRow + 1);
+    input.addEventListener('change', () => {
+      mapping.headerRow = clamp((toNumber(input.value) ?? 1) - 1, 0, Math.max(0, state.matrices[sheetName].length - 1));
+      const replacement = document.createElement('div');
+      replacement.className = 'mapping-fields';
+      replacement.append(createHeaderRowControl(sheetName, mapping, card));
+      replacement.append(createDataStartRowControl(sheetName, mapping));
+      Object.keys(FIELD_LABELS).forEach((field) => replacement.append(createColumnControl(sheetName, field, mapping)));
+      card.querySelector('.mapping-fields').replaceWith(replacement);
+      rebuildConsolidation();
+    });
+    label.append(input);
+    return label;
+  }
+
+  function createDataStartRowControl(sheetName, mapping) {
+    const label = document.createElement('label');
+    label.textContent = 'First data row';
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = String(mapping.headerRow + 2);
+    input.max = String(Math.max(state.matrices[sheetName].length, mapping.headerRow + 2));
+    input.value = String(mapping.dataStartRow + 1);
+    input.addEventListener('change', () => {
+      mapping.dataStartRow = clamp((toNumber(input.value) ?? mapping.headerRow + 2) - 1, mapping.headerRow + 1, Math.max(mapping.headerRow + 1, state.matrices[sheetName].length - 1));
+      rebuildConsolidation();
+    });
+    label.append(input);
+    return label;
+  }
+
+  function createColumnControl(sheetName, field, mapping) {
+    const label = document.createElement('label');
+    label.textContent = FIELD_LABELS[field];
+    const select = document.createElement('select');
+    const none = document.createElement('option');
+    none.value = '';
+    none.textContent = 'Not mapped';
+    select.append(none);
+    const matrix = state.matrices[sheetName];
+    const maxColumns = Math.max(0, ...matrix.slice(mapping.headerRow, mapping.dataStartRow).map((row) => row?.length || 0));
+    Array.from({ length: maxColumns }).forEach((_, index) => {
+      const header = matrix
+        .slice(mapping.headerRow, mapping.dataStartRow)
+        .map((row) => {
+          const value = row?.[index];
+          return typeof value === 'string' && value.startsWith('=') ? '' : displayValue(value);
+        })
+        .filter(Boolean)
+        .join(' / ');
+      const option = document.createElement('option');
+      option.value = String(index);
+      option.textContent = `${columnName(index)} — ${displayValue(header) || '(blank)'}`;
+      option.selected = mapping[field] === index;
+      select.append(option);
+    });
+    select.value = mapping[field] === null ? '' : String(mapping[field]);
+    select.addEventListener('change', () => {
+      mapping[field] = select.value === '' ? null : Number(select.value);
+      rebuildConsolidation();
+      if (field === 'currency') refreshRates(false);
+    });
+    label.append(select);
+    return label;
+  }
+
+  function rebuildConsolidation() {
+    if (!state.workbook || !state.hf) return;
+    const grouped = new Map();
+    const kitOccurrences = new Map();
+
+    state.workbook.SheetNames.forEach((sheetName) => {
+      const mapping = state.mappings[sheetName];
+      if (!mapping.enabled || mapping.part === null || mapping.quantity === null) return;
+      const matrix = state.matrices[sheetName];
+      const priceHeader = matrix
+        .slice(mapping.headerRow, mapping.dataStartRow)
+        .map((row) => displayValue(row?.[mapping.price]))
+        .filter(Boolean)
+        .join(' ');
+      const occurrences = [];
+
+      for (let row = mapping.dataStartRow; row < matrix.length; row += 1) {
+        const partValue = readCalculatedValue(sheetName, row, mapping.part);
+        const part = partValue === null || partValue === undefined ? '' : String(partValue).trim();
+        if (!part || /^(?:total(?:s)?|effective\b|confidential\b)/i.test(part)) continue;
+
+        const quantity = toNumber(readCalculatedValue(sheetName, row, mapping.quantity));
+        if (quantity === null) continue;
+        const key = normalizePart(part);
+        if (!key) continue;
+
+        const currencyValue = mapping.currency === null ? null : readCalculatedValue(sheetName, row, mapping.currency);
+        const currency = normalizeCurrency(currencyValue)
+          || currencyFromText(priceHeader)
+          || state.config.sourceCurrency;
+
+        const occurrence = {
+          key,
+          part,
+          description: mapping.description === null ? '' : displayValue(readCalculatedValue(sheetName, row, mapping.description)),
+          quantity,
+          price: mapping.price === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.price)),
+          sourceDiscountedTotal: mapping.discountedTotal === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.discountedTotal)),
+          sourceSellingTotal: mapping.sellingTotal === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.sellingTotal)),
+          shipping: mapping.shipping === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.shipping)),
+          sourceShippingWithMargin: mapping.shippingWithMargin === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.shippingWithMargin)),
+          currency,
+          sheetName,
+          row,
+        };
+
+        occurrences.push(occurrence);
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key).push(occurrence);
+      }
+      kitOccurrences.set(sheetName, occurrences);
+    });
+
+    kitOccurrences.forEach((occurrences, sheetName) => {
+      const kit = kitSettings(sheetName);
+      const stockedLines = occurrences.filter((occurrence) => occurrence.quantity > 0).length;
+      occurrences.forEach((occurrence) => {
+        occurrence.kitFreight = toOutput(occurrenceFreight(occurrence, kit, stockedLines), kit.shippingCurrency);
+      });
+    });
+
+    const items = [];
+    grouped.forEach((occurrences) => items.push(buildConsolidatedItem(occurrences)));
+    items.sort((a, b) => Number(b.common) - Number(a.common) || a.part.localeCompare(b.part, undefined, { numeric: true }));
+    state.consolidated = items.filter((item) => !item.excluded);
+    state.excludedItems = items.filter((item) => item.excluded);
+    applyLandedCosts(state.consolidated, true);
+    applyLandedCosts(state.excludedItems, false);
+    state.kitSummaries = buildKitSummaries(kitOccurrences);
+
+    const known = new Set(items.map((item) => item.key));
+    [...state.selectedKeys].forEach((key) => { if (!known.has(key)) state.selectedKeys.delete(key); });
+    refreshViews();
+    renderSelectionBarCount();
+  }
+
+  // Freight for one source line, in the kit's freight currency.
+  function occurrenceFreight(occurrence, kit, stockedLines) {
+    if (kit.shippingMode === 'perLine') return kit.shippingAmount;
+    if (kit.shippingMode === 'kitTotal') return occurrence.quantity > 0 && stockedLines > 0 ? kit.shippingAmount / stockedLines : 0;
+    if (occurrence.shipping !== null) return occurrence.shipping;
+    if (occurrence.sourceShippingWithMargin !== null) return occurrence.sourceShippingWithMargin * (1 - state.config.shippingMargin);
+    return null;
+  }
+
+  function fxToOutput(currency) {
+    if (!currency || currency === state.config.outputCurrency) return 1;
+    return state.rates[currency] ?? null;
+  }
+
+  function toOutput(amount, currency) {
+    if (amount === null || amount === undefined || !Number.isFinite(amount)) return null;
+    if (amount === 0) return 0;
+    const rate = fxToOutput(currency);
+    return rate === null ? null : amount * rate;
+  }
+
+  function groupById(id) {
+    return id ? state.groups.find((group) => group.id === id) || null : null;
+  }
+
+  function effectiveMultiplier(key) {
+    const override = state.items[key] || {};
+    if (Number.isFinite(override.multiplier)) return override.multiplier;
+    const group = groupById(override.group);
+    if (Number.isFinite(group?.multiplier)) return group.multiplier;
+    return state.config.multiplier;
+  }
+
+  function expectedSales(group, quantity) {
+    if (!(quantity > 0)) return 0;
+    const useGroup = group && Number.isFinite(group.salesValue);
+    const mode = useGroup ? group.salesMode : state.sales.defaultMode;
+    const value = useGroup ? group.salesValue : state.sales.defaultValue;
+    return mode === 'units' ? value : value * quantity;
+  }
+
+  function buildConsolidatedItem(occurrences) {
+    const sources = [...new Set(occurrences.map((item) => item.sheetName))];
+    const ordered = [...occurrences].sort((a, b) => {
+      const qtyDiff = (b.quantity ?? -Infinity) - (a.quantity ?? -Infinity);
+      if (qtyDiff !== 0) return qtyDiff;
+      if (a.price === null && b.price !== null) return 1;
+      if (a.price !== null && b.price === null) return -1;
+      return a.sheetName.localeCompare(b.sheetName);
+    });
+    const representative = ordered[0];
+    const key = representative.key;
+    const override = state.items[key] || {};
+    const group = groupById(override.group);
+    const sourceMaxQuantity = Math.max(...occurrences.map((item) => item.quantity));
+    const quantityOverridden = Number.isFinite(override.quantity);
+    const maxQuantity = quantityOverridden ? override.quantity : sourceMaxQuantity;
+    const multiplier = effectiveMultiplier(key);
+    const fx = fxToOutput(representative.currency);
+    const convertedUnit = representative.price !== null && fx !== null ? representative.price * fx : null;
+    const convertedTotal = convertedUnit !== null ? convertedUnit * maxQuantity : null;
+    const usdToOutput = state.config.outputCurrency === 'USD' ? 1 : state.rates.USD ?? null;
+    const amountUsd = convertedTotal !== null && usdToOutput !== null ? convertedTotal / usdToOutput : null;
+    const discountedTotal = convertedTotal !== null ? convertedTotal * (1 - state.config.discount) : null;
+    const sellingTotal = discountedTotal !== null ? discountedTotal * multiplier : null;
+    const salesOverridden = Number.isFinite(override.salesPerYear);
+
+    return {
+      key,
+      part: representative.part,
+      description: representative.description,
+      common: sources.length > 1,
+      sourceMaxQuantity,
+      maxQuantity,
+      quantityOverridden,
+      sources,
+      currency: representative.currency,
+      unitPrice: representative.price,
+      fx,
+      convertedUnit,
+      convertedTotal,
+      amountUsd,
+      discount: state.config.discount,
+      discountedTotal,
+      multiplier,
+      multiplierOverridden: multiplier !== state.config.multiplier,
+      sellingTotal,
+      kitFreight: representative.kitFreight ?? null,
+      groupId: group?.id || null,
+      groupName: group?.name || '',
+      groupColor: group?.color || '',
+      salesPerYear: salesOverridden ? override.salesPerYear : expectedSales(group, maxQuantity),
+      salesOverridden,
+      excluded: override.excluded === true,
+      pricingSource: representative.sheetName,
+      pricingRow: representative.row + 1,
+      occurrenceCount: occurrences.length,
+    };
+  }
+
+  function allocationWeight(item) {
+    if (state.freight.allocation === 'quantity') return Math.max(0, item.maxQuantity || 0);
+    if (state.freight.allocation === 'lines') return item.maxQuantity > 0 ? 1 : 0;
+    return Math.max(0, item.discountedTotal ?? 0);
+  }
+
+  // Adds consolidated freight, duty, insurance, clearance, VAT and landed cost to each line.
+  function applyLandedCosts(items, allocateShipment) {
+    const freight = state.freight;
+    const margin = state.config.shippingMargin;
+    const vatRate = state.config.vatRate;
+    const shipment = allocateShipment ? toOutput(freight.consolidatedShipment, freight.consolidatedCurrency) : 0;
+    const clearance = allocateShipment ? toOutput(freight.clearanceFee, freight.clearanceCurrency) : 0;
+    const totalWeight = items.reduce((sum, item) => sum + allocationWeight(item), 0);
+
+    items.forEach((item) => {
+      const share = allocateShipment && totalWeight > 0 ? allocationWeight(item) / totalWeight : 0;
+      const purchase = item.discountedTotal;
+      item.allocationShare = share;
+      item.consolidatedFreight = shipment === null ? null : shipment * share;
+      item.clearance = clearance === null ? null : clearance * share;
+      item.insurance = purchase === null ? null : purchase * freight.insuranceRate;
+      const customsValue = (purchase ?? 0) + (item.kitFreight ?? 0) + (item.consolidatedFreight ?? 0) + (item.insurance ?? 0);
+      item.duty = purchase === null ? null : customsValue * freight.dutyRate;
+      item.importCosts = (item.insurance ?? 0) + (item.duty ?? 0) + (item.clearance ?? 0);
+      item.freightAndImport = (item.kitFreight ?? 0) + (item.consolidatedFreight ?? 0) + item.importCosts;
+      item.shippingMargin = margin;
+      item.freightWithMargin = item.freightAndImport / (1 - margin);
+      item.lineTotal = item.sellingTotal === null ? null : item.sellingTotal + item.freightWithMargin;
+      item.vat = item.lineTotal === null ? null : item.lineTotal * vatRate;
+      item.lineTotalInclVat = item.lineTotal === null ? null : item.lineTotal + item.vat;
+      item.landedCost = purchase === null ? null : purchase + item.freightAndImport;
+      item.importVat = purchase === null ? null : (customsValue + (item.duty ?? 0)) * vatRate;
+      item.unitSalesPrice = item.lineTotal !== null && item.maxQuantity > 0 ? item.lineTotal / item.maxQuantity : null;
+      item.unitLandedCost = item.landedCost !== null && item.maxQuantity > 0 ? item.landedCost / item.maxQuantity : null;
+      item.missingFreight = item.kitFreight === null || (allocateShipment && (shipment === null || clearance === null));
+      // Legacy names used by the warehouse sheet and older exports.
+      item.shipping = item.kitFreight;
+      item.shippingWithMargin = item.freightWithMargin;
+    });
+  }
+
+  // Each kit on its own, as if it were ordered and shipped separately.
+  function buildKitSummaries(kitOccurrences) {
+    const summaries = [];
+    kitOccurrences.forEach((occurrences, sheetName) => {
+      let list = 0;
+      let purchase = 0;
+      let sales = 0;
+      let freight = 0;
+      let missing = 0;
+      occurrences.forEach((occurrence) => {
+        const fx = fxToOutput(occurrence.currency);
+        if (occurrence.price === null || fx === null) {
+          missing += 1;
+        } else {
+          const lineList = occurrence.price * fx * occurrence.quantity;
+          const linePurchase = lineList * (1 - state.config.discount);
+          list += lineList;
+          purchase += linePurchase;
+          sales += linePurchase * effectiveMultiplier(occurrence.key);
+        }
+        freight += occurrence.kitFreight ?? 0;
+      });
+      summaries.push({
+        sheetName,
+        lines: occurrences.length,
+        stockedLines: occurrences.filter((occurrence) => occurrence.quantity > 0).length,
+        units: occurrences.reduce((sum, occurrence) => sum + Math.max(0, occurrence.quantity), 0),
+        list,
+        purchase,
+        freight,
+        salesInclFreight: sales + freight / (1 - state.config.shippingMargin),
+        missing,
+        mode: kitSettings(sheetName).shippingMode,
+      });
+    });
+    return summaries;
+  }
+
+  function readCalculatedValue(sheetName, row, col) {
+    if (col === null || col === undefined) return null;
+    try {
+      const value = state.hf.getCellValue({ sheet: state.sheetIds[sheetName], row, col });
+      if (isFormulaError(value)) return null;
+      return value;
+    } catch {
+      return state.matrices[sheetName]?.[row]?.[col] ?? null;
+    }
+  }
+
+  /* ---------- View refresh ---------- */
+
+  function refreshViews() {
+    if (!state.workbook) return;
+    renderKitBars();
+    renderFreightSummary();
+    updateGroupCounts();
+    populateOriginSelects();
+    renderCustomsGuides();
+    if (state.activeView === VIEW.consolidated) renderConsolidated();
+    else if (state.activeView === VIEW.dashboard) renderDashboard();
+    else if (state.activeView === VIEW.warehouse) renderWarehouse();
+    else if (state.activeView === VIEW.wire) {
+      renderFlow();
+      renderWireView();
+    }
+    syncBoundInputs();
+  }
+
+  function renderFreightSummary() {
+    const output = state.config.outputCurrency;
+    const kitFreight = state.consolidated.reduce((sum, item) => sum + (item.kitFreight ?? 0), 0);
+    const shipment = state.consolidated.reduce((sum, item) => sum + (item.consolidatedFreight ?? 0), 0);
+    const importCosts = state.consolidated.reduce((sum, item) => sum + (item.importCosts ?? 0), 0);
+    const missingRate = state.consolidated.some((item) => item.missingFreight);
+    dom.freightSummary.textContent = `Consolidated order: kit freight ${formatMoney(kitFreight, output)} + shipment ${formatMoney(shipment, output)} + duty, insurance & fees ${formatMoney(importCosts, output)}.${missingRate ? ' Some currency rates are still missing.' : ''}`;
+  }
+
+  function renderKitBars() {
+    [dom.kitBar, dom.dashboardKitBar].forEach((bar) => {
+      const label = document.createElement('span');
+      label.className = 'kit-bar-label';
+      label.textContent = 'Kits';
+      const chips = state.workbook.SheetNames.filter(isSourceKit).map((sheetName) => {
+        const enabled = state.mappings[sheetName].enabled;
+        const summary = state.kitSummaries.find((item) => item.sheetName === sheetName);
+        const chip = document.createElement(enabled ? 'span' : 'button');
+        chip.className = `kit-chip${enabled ? '' : ' removed'}`;
+        if (enabled) {
+          const name = document.createElement('strong');
+          name.textContent = sheetName;
+          const meta = document.createElement('small');
+          meta.textContent = summary ? `${summary.lines} lines` : '';
+          const remove = document.createElement('button');
+          remove.type = 'button';
+          remove.className = 'kit-chip-remove';
+          remove.dataset.kitToggle = sheetName;
+          remove.dataset.kitEnable = 'false';
+          remove.setAttribute('aria-label', `Remove ${sheetName} from the consolidation`);
+          remove.title = `Remove ${sheetName} and recalculate`;
+          remove.textContent = '×';
+          chip.append(name, meta, remove);
+        } else {
+          chip.type = 'button';
+          chip.dataset.kitToggle = sheetName;
+          chip.dataset.kitEnable = 'true';
+          chip.title = `Add ${sheetName} back and recalculate`;
+          chip.textContent = `+ ${sheetName}`;
+        }
+        return chip;
+      });
+      if (!chips.length) {
+        const empty = document.createElement('span');
+        empty.className = 'muted';
+        empty.textContent = 'No kit sheets detected.';
+        chips.push(empty);
+      }
+      bar.replaceChildren(label, ...chips);
+    });
+    renderKitBreakdown();
+  }
+
+  function renderKitBreakdown() {
+    const output = state.config.outputCurrency;
+    const table = document.createElement('table');
+    table.className = 'mini-table';
+    const head = table.createTHead().insertRow();
+    ['Kit', 'Lines', 'Units', 'Purchase after discount', 'Kit freight', 'Freight mode', `Sales incl. freight (${output})`].forEach((text) => {
+      const th = document.createElement('th');
+      th.textContent = text;
+      head.append(th);
+    });
+    const body = table.createTBody();
+    state.kitSummaries.forEach((summary) => {
+      const row = body.insertRow();
+      [summary.sheetName, `${summary.lines} (${summary.stockedLines} stocked)`, formatNumber(summary.units, 0), formatMoney(summary.purchase, output), formatMoney(summary.freight, output), KIT_SHIPPING_MODES[summary.mode], formatMoney(summary.salesInclFreight, output)]
+        .forEach((value, index) => {
+          const cell = row.insertCell();
+          cell.textContent = value;
+          if (index > 0 && index !== 5) cell.className = 'number';
+        });
+    });
+    const separateFreight = state.kitSummaries.reduce((sum, summary) => sum + summary.freight, 0);
+    const consolidatedFreight = state.consolidated.reduce((sum, item) => sum + (item.kitFreight ?? 0) + (item.consolidatedFreight ?? 0), 0);
+    const note = document.createElement('p');
+    note.className = 'fine-print';
+    note.textContent = `Kits shipped separately: ${formatMoney(separateFreight, output)} kit freight. Consolidated order: ${formatMoney(consolidatedFreight, output)} (kit freight on the consolidated lines plus the consolidated shipment).`;
+    dom.kitBreakdownTable.replaceChildren(table, note);
+  }
+
+  /* ---------- Consolidated table ---------- */
+
+  function consolidatedColumns() {
+    const o = state.config.outputCurrency;
+    const money = (field) => (item) => formatNullableNumber(item[field], 2);
+    return [
+      { label: 'Source sheets', value: (item) => item.sources.join(', ') },
+      { label: 'Part', value: (item) => item.part, className: 'part-cell' },
+      { label: 'Description', value: (item) => item.description },
+      { label: 'Quantity', number: true, value: (item) => formatNumber(item.maxQuantity, 2), overridden: (item) => item.quantityOverridden, note: (item) => (item.quantityOverridden ? `Stock quantity override. Source maximum: ${formatNumber(item.sourceMaxQuantity, 2)}` : '') },
+      { label: `Amount in ${o}`, number: true, value: money('convertedTotal'), required: true },
+      { label: 'Amount in USD', number: true, value: money('amountUsd'), required: true },
+      { label: 'Match', value: (item) => (item.common ? 'Common' : 'Unique') },
+      { label: 'Sales group', group: true },
+      { label: 'Expected sales / yr', number: true, value: (item) => formatNumber(item.salesPerYear, 2), overridden: (item) => item.salesOverridden, note: (item) => (item.salesOverridden ? 'Item sales override' : item.groupName ? `From group ${item.groupName}` : 'Default sales assumption') },
+      { label: 'Currency', value: (item) => item.currency },
+      { label: 'Unit price', number: true, value: money('unitPrice'), required: true },
+      { label: `FX to ${o}`, number: true, value: (item) => formatNullableNumber(item.fx, 6), required: true },
+      { label: `Unit in ${o}`, number: true, value: money('convertedUnit'), required: true },
+      { label: 'Discount', number: true, value: (item) => formatPercent(item.discount) },
+      { label: `Purchase after discount in ${o}`, number: true, value: money('discountedTotal'), required: true },
+      { label: 'Price multiplier', number: true, value: (item) => formatNumber(item.multiplier, 2), overridden: (item) => item.multiplierOverridden },
+      { label: `Sales price in ${o}`, number: true, value: money('sellingTotal'), required: true },
+      { label: `Kit freight in ${o}`, number: true, value: money('kitFreight'), required: true },
+      { label: `Consolidated shipment in ${o}`, number: true, value: money('consolidatedFreight') },
+      { label: `Duty, insurance & fees in ${o}`, number: true, value: (item) => formatNumber(item.importCosts, 2) },
+      { label: 'Freight margin', number: true, value: (item) => formatPercent(item.shippingMargin) },
+      { label: `Freight & import incl. margin in ${o}`, number: true, value: (item) => formatNumber(item.freightWithMargin, 2) },
+      { label: `Line total excl. VAT in ${o}`, number: true, value: money('lineTotal'), required: true, strong: true },
+      { label: `VAT in ${o}`, number: true, value: money('vat') },
+      { label: `Line total incl. VAT in ${o}`, number: true, value: money('lineTotalInclVat'), required: true },
+      { label: `Landed cost in ${o}`, number: true, value: money('landedCost'), required: true },
+      { label: 'Pricing source', value: (item) => `${item.pricingSource} row ${item.pricingRow}` },
+    ];
+  }
+
+  function itemMatchesFilter(item, filter, term) {
+    if (term) {
+      const haystack = `${item.part} ${item.description} ${item.sources.join(' ')} ${item.groupName}`.toLowerCase();
+      if (!haystack.includes(term)) return false;
+    }
+    if (filter === 'common') return item.common;
+    if (filter === 'unique') return !item.common;
+    if (filter === 'ungrouped') return !item.groupId;
+    if (filter === 'selected') return state.selectedKeys.has(item.key);
+    if (filter === 'overridden') return item.quantityOverridden || item.salesOverridden || item.multiplierOverridden;
+    if (filter.startsWith('group:')) return item.groupId === filter.slice(6);
+    return true;
+  }
+
+  function renderConsolidatedFilter() {
+    const options = [
+      ['all', 'All parts'], ['common', 'Common parts'], ['unique', 'Unique parts'], ['selected', 'Selected'],
+      ['overridden', 'With overrides'], ['ungrouped', 'No sales group'],
+      ...state.groups.map((group) => [`group:${group.id}`, `Group: ${group.name}`]),
+      ['excluded', 'Excluded parts'],
+    ];
+    if (!options.some(([value]) => value === state.consolidatedFilter)) state.consolidatedFilter = 'all';
+    dom.consolidatedFilter.replaceChildren(...options.map(([value, label]) => new Option(label, value, false, value === state.consolidatedFilter)));
+    dom.consolidatedFilter.value = state.consolidatedFilter;
+  }
+
+  function renderConsolidated() {
+    renderConsolidatedFilter();
+    const output = state.config.outputCurrency;
+    const items = state.consolidated;
+    const common = items.filter((item) => item.common);
+    const unique = items.filter((item) => !item.common);
+    const missingPrices = items.filter((item) => item.unitPrice === null || item.fx === null).length;
+    const missingFreight = items.filter((item) => item.missingFreight).length;
+    const sum = (field) => items.reduce((total, item) => total + (item[field] ?? 0), 0);
+
+    dom.consolidatedSummary.textContent = `${common.length} common and ${unique.length} unique parts from ${enabledSheetCount()} kits${state.excludedItems.length ? `, ${state.excludedItems.length} excluded` : ''}. Prices mirror the source sheets: currency conversion, discount, multiplier, freight and freight margin, plus consolidated shipment, import costs and VAT.`;
+    dom.summaryCards.replaceChildren(
+      summaryCard('Common parts', common.length),
+      summaryCard('Unique parts', unique.length),
+      summaryCard(`Total excl. VAT (${output})`, formatNumber(sum('lineTotal'), 2)),
+      summaryCard(`Total incl. VAT (${output})`, formatNumber(sum('lineTotalInclVat'), 2)),
+      summaryCard(`Landed cost (${output})`, formatNumber(sum('landedCost'), 2)),
+      summaryCard('Missing inputs', missingPrices + missingFreight),
+    );
+
+    const term = state.consolidatedSearch.trim().toLowerCase();
+    const filter = state.consolidatedFilter;
+    const showExcluded = filter === 'excluded';
+    const visibleCommon = showExcluded ? [] : common.filter((item) => itemMatchesFilter(item, filter, term));
+    const visibleUnique = showExcluded ? [] : unique.filter((item) => itemMatchesFilter(item, filter, term));
+    const visibleExcluded = state.excludedItems.filter((item) => itemMatchesFilter(item, showExcluded ? 'all' : filter, term) && (showExcluded || filter === 'all' || filter === 'selected'));
+    state.visibleKeys = [...visibleCommon, ...visibleUnique, ...visibleExcluded].map((item) => item.key);
+    const visibleCount = visibleCommon.length + visibleUnique.length;
+    dom.consolidatedCount.textContent = showExcluded
+      ? `${visibleExcluded.length} excluded`
+      : `${visibleCount} of ${items.length} shown${state.selectedKeys.size ? ` · ${state.selectedKeys.size} selected` : ''}`;
+
+    const columns = consolidatedColumns();
+    const table = document.createElement('table');
+    table.className = 'parts-table';
+    const headRow = table.createTHead().insertRow();
+    const selectHead = document.createElement('th');
+    selectHead.className = 'select-cell';
+    const selectAll = document.createElement('input');
+    selectAll.type = 'checkbox';
+    selectAll.dataset.selectAll = 'true';
+    selectAll.setAttribute('aria-label', 'Select all visible parts');
+    const visibleSelected = state.visibleKeys.filter((key) => state.selectedKeys.has(key)).length;
+    selectAll.checked = state.visibleKeys.length > 0 && visibleSelected === state.visibleKeys.length;
+    selectAll.indeterminate = visibleSelected > 0 && visibleSelected < state.visibleKeys.length;
+    selectHead.append(selectAll);
+    headRow.append(selectHead);
+    columns.forEach((column) => {
+      const th = document.createElement('th');
+      th.textContent = column.label;
+      if (column.number) th.className = 'number';
+      headRow.append(th);
+    });
+
+    const tbody = table.createTBody();
+    const columnCount = columns.length + 1;
+    if (!items.length && !state.excludedItems.length) {
+      const row = tbody.insertRow();
+      row.className = 'empty-row';
+      const cell = row.insertCell();
+      cell.colSpan = columnCount;
+      cell.textContent = 'No parts are available yet. Enable kit sheets and map the Part / SKU and Quantity columns.';
+    } else if (!state.visibleKeys.length) {
+      const row = tbody.insertRow();
+      row.className = 'empty-row';
+      const cell = row.insertCell();
+      cell.colSpan = columnCount;
+      cell.textContent = 'No parts match the current search or filter.';
+    } else {
+      appendPartGroup(tbody, 'Common parts', visibleCommon, columns);
+      appendPartGroup(tbody, 'Unique parts', visibleUnique, columns);
+      appendPartGroup(tbody, 'Excluded parts · not in totals', visibleExcluded, columns, true);
+    }
+    dom.consolidatedTable.replaceChildren(table);
+  }
+
+  function appendPartGroup(tbody, label, items, columns, excluded = false) {
+    if (!items.length) return;
+    const groupRow = tbody.insertRow();
+    groupRow.className = 'group-row';
+    const groupCell = groupRow.insertCell();
+    groupCell.colSpan = columns.length + 1;
+    groupCell.textContent = `${label} — ${items.length}`;
+
+    items.forEach((item) => {
+      const row = tbody.insertRow();
+      row.className = [item.common ? 'common' : '', excluded ? 'excluded' : '', state.selectedKeys.has(item.key) ? 'selected' : ''].filter(Boolean).join(' ');
+      const selectCell = row.insertCell();
+      selectCell.className = 'select-cell';
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.dataset.selectKey = item.key;
+      checkbox.checked = state.selectedKeys.has(item.key);
+      checkbox.setAttribute('aria-label', `Select ${item.part}`);
+      selectCell.append(checkbox);
+
+      columns.forEach((column) => {
+        const cell = row.insertCell();
+        if (column.group) {
+          if (item.groupId) {
+            const chip = document.createElement('span');
+            chip.className = 'group-chip';
+            chip.style.setProperty('--group-color', item.groupColor);
+            chip.textContent = item.groupName;
+            cell.append(chip);
+          } else {
+            cell.textContent = '—';
+            cell.classList.add('muted-cell');
+          }
+          return;
+        }
+        const value = column.value(item);
+        cell.textContent = value;
+        if (column.className) cell.classList.add(column.className);
+        if (column.number) cell.classList.add('number');
+        if (column.strong) cell.classList.add('strong-cell');
+        if (column.overridden?.(item)) cell.classList.add('overridden');
+        const note = column.note?.(item);
+        if (note) cell.title = note;
+        if (column.required && value === '—') cell.classList.add('warning-text');
+      });
+    });
+  }
+
+  function handleConsolidatedTableClick(event) {
+    const checkbox = event.target.closest('input[type="checkbox"]');
+    if (!checkbox) return;
+    if (checkbox.dataset.selectAll) {
+      const keys = state.visibleKeys || [];
+      if (checkbox.checked) keys.forEach((key) => state.selectedKeys.add(key));
+      else keys.forEach((key) => state.selectedKeys.delete(key));
+      state.selectionAnchor = null;
+    } else if (checkbox.dataset.selectKey) {
+      const key = checkbox.dataset.selectKey;
+      const keys = state.visibleKeys || [];
+      if (event.shiftKey && state.selectionAnchor && keys.includes(state.selectionAnchor)) {
+        const [from, to] = [keys.indexOf(state.selectionAnchor), keys.indexOf(key)].sort((a, b) => a - b);
+        keys.slice(from, to + 1).forEach((rangeKey) => (checkbox.checked ? state.selectedKeys.add(rangeKey) : state.selectedKeys.delete(rangeKey)));
+      } else if (checkbox.checked) {
+        state.selectedKeys.add(key);
+      } else {
+        state.selectedKeys.delete(key);
+      }
+      state.selectionAnchor = key;
+    } else {
+      return;
+    }
+    renderConsolidated();
+    renderSelectionBar(dom.consolidatedActions, [...state.selectedKeys], 'consolidated');
+  }
+
+  /* ---------- Item selection & bulk actions ---------- */
+
+  const SELECTION_ACTIONS = [
+    ['group', 'Assign to sales group'],
+    ['sales', 'Set expected sales / yr'],
+    ['quantity', 'Set stock quantity'],
+    ['multiplier', 'Set price multiplier'],
+    ['exclude', 'Exclude from consolidation'],
+    ['include', 'Include in consolidation'],
+    ['clear', 'Clear quantity, sales & multiplier overrides'],
+  ];
+
+  function renderAllSelectionBars() {
+    renderSelectionBar(dom.consolidatedActions, [...state.selectedKeys], 'consolidated');
+    renderSelectionBar(dom.sheetActions, sheetSelectionKeys(), 'sheet');
+  }
+
+  function renderSelectionBarCount() {
+    const count = dom.consolidatedActions.querySelector('.selection-count');
+    if (count) count.textContent = `${state.selectedKeys.size} part${state.selectedKeys.size === 1 ? '' : 's'} selected`;
+  }
+
+  function renderSelectionBar(container, keys, context) {
+    container.dataset.context = context;
+    const rowCount = context === 'sheet' ? state.sheetSelection.rows.size : keys.length;
+    if (!rowCount) {
+      container.classList.add('hidden');
+      container.replaceChildren();
+      return;
+    }
+    container.classList.remove('hidden');
+    const count = document.createElement('strong');
+    count.className = 'selection-count';
+    count.textContent = context === 'sheet'
+      ? `${rowCount} row${rowCount === 1 ? '' : 's'} · ${keys.length} part${keys.length === 1 ? '' : 's'}`
+      : `${keys.length} part${keys.length === 1 ? '' : 's'} selected`;
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'button small ghost';
+    clear.dataset.selectionClear = 'true';
+    clear.textContent = 'Clear selection';
+    if (!keys.length) {
+      const note = document.createElement('span');
+      note.className = 'selection-note';
+      note.textContent = 'The selected rows contain no mapped part numbers.';
+      container.replaceChildren(count, note, clear);
+      return;
+    }
+    const action = document.createElement('select');
+    action.className = 'action-select';
+    action.setAttribute('aria-label', 'Action for the selected parts');
+    SELECTION_ACTIONS.forEach(([value, label]) => action.append(new Option(label, value, false, value === state.selectionAction)));
+    action.value = state.selectionAction;
+    const valueWrap = document.createElement('span');
+    valueWrap.className = 'action-value';
+    valueWrap.append(...buildActionValue(state.selectionAction));
+    const apply = document.createElement('button');
+    apply.type = 'button';
+    apply.className = 'button small primary';
+    apply.dataset.selectionApply = 'true';
+    apply.textContent = 'Apply';
+    container.replaceChildren(count, action, valueWrap, apply, clear);
+  }
+
+  function buildActionValue(action) {
+    const numberInput = (placeholder, label, step = '1') => {
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.min = '0';
+      input.step = step;
+      input.placeholder = placeholder;
+      input.className = 'action-input';
+      input.setAttribute('aria-label', label);
+      return input;
+    };
+    if (action === 'group') {
+      const select = document.createElement('select');
+      select.className = 'action-group';
+      select.setAttribute('aria-label', 'Sales group');
+      select.append(new Option('— No group —', ''));
+      state.groups.forEach((group) => select.append(new Option(group.name, group.id)));
+      if (state.groups.length < MAX_GROUPS) select.append(new Option('+ New group…', '__new'));
+      if (state.groups.length) select.value = state.groups[0].id;
+      else if (state.groups.length < MAX_GROUPS) select.value = '__new';
+      const name = document.createElement('input');
+      name.className = 'action-new-group';
+      name.maxLength = 40;
+      name.placeholder = 'New group name';
+      name.setAttribute('aria-label', 'New group name');
+      name.hidden = select.value !== '__new';
+      return [select, name];
+    }
+    if (action === 'sales') return [numberInput('Units / yr per item', 'Expected sales per item per year', '0.1')];
+    if (action === 'quantity') return [numberInput('Units in stock', 'Stock quantity per item')];
+    if (action === 'multiplier') return [numberInput(`× (global ${formatNumber(state.config.multiplier, 2)})`, 'Price multiplier', '0.01')];
+    const hint = document.createElement('span');
+    hint.className = 'selection-note';
+    hint.textContent = {
+      exclude: 'Removes the parts from totals, warehouse and dashboard.',
+      include: 'Returns excluded parts to the consolidation.',
+      clear: 'Groups and exclusions are kept.',
+    }[action] || '';
+    return [hint];
+  }
+
+  function handleSelectionBarChange(event) {
+    const bar = event.currentTarget;
+    if (event.target.matches('.action-select')) {
+      state.selectionAction = event.target.value;
+      const valueWrap = bar.querySelector('.action-value');
+      valueWrap.replaceChildren(...buildActionValue(state.selectionAction));
+      valueWrap.querySelector('input:not([hidden]), select')?.focus();
+    } else if (event.target.matches('.action-group')) {
+      const name = bar.querySelector('.action-new-group');
+      name.hidden = event.target.value !== '__new';
+      if (!name.hidden) name.focus();
+    }
+  }
+
+  function handleSelectionBarClick(event) {
+    const bar = event.currentTarget;
+    if (event.target.closest('[data-selection-apply]')) applySelectionAction(bar);
+    if (event.target.closest('[data-selection-clear]')) {
+      if (bar.dataset.context === 'sheet') {
+        state.sheetSelection.rows.clear();
+        dom.grid.querySelectorAll('tr.row-selected').forEach((row) => row.classList.remove('row-selected'));
+        renderSelectionBar(dom.sheetActions, [], 'sheet');
+      } else {
+        state.selectedKeys.clear();
+        renderConsolidated();
+        renderSelectionBar(dom.consolidatedActions, [], 'consolidated');
+      }
+    }
+  }
+
+  function applySelectionAction(bar) {
+    const keys = bar.dataset.context === 'sheet' ? sheetSelectionKeys() : [...state.selectedKeys];
+    if (!keys.length) return;
+    const action = state.selectionAction;
+    let value = null;
+    if (action === 'group') {
+      const select = bar.querySelector('.action-group');
+      value = select.value;
+      if (value === '__new') {
+        const group = addGroup(bar.querySelector('.action-new-group').value);
+        if (!group) return;
+        value = group.id;
+      }
+    } else if (['sales', 'quantity', 'multiplier'].includes(action)) {
+      const input = bar.querySelector('.action-input');
+      value = toNumber(input.value);
+      if (value === null || value < 0) {
+        showToast('Enter a value of zero or more first.', true);
+        input.focus();
+        return;
+      }
+    }
+    applyItemAction(keys, action, value);
+    renderAllSelectionBars();
+    const group = action === 'group' ? groupById(value) : null;
+    const messages = {
+      group: group ? `${keys.length} part${keys.length === 1 ? '' : 's'} assigned to ${group.name}.` : `Sales group removed from ${keys.length} part${keys.length === 1 ? '' : 's'}.`,
+      sales: `Expected sales set to ${formatNumber(value, 2)} per year for ${keys.length} part${keys.length === 1 ? '' : 's'}.`,
+      quantity: `Stock quantity set to ${formatNumber(value, 2)} for ${keys.length} part${keys.length === 1 ? '' : 's'}.`,
+      multiplier: `Price multiplier set to ${formatNumber(value, 2)}× for ${keys.length} part${keys.length === 1 ? '' : 's'}.`,
+      exclude: `${keys.length} part${keys.length === 1 ? '' : 's'} excluded. Find them under Show → Excluded parts.`,
+      include: `${keys.length} part${keys.length === 1 ? '' : 's'} included again.`,
+      clear: `Overrides cleared for ${keys.length} part${keys.length === 1 ? '' : 's'}.`,
+    };
+    showToast(messages[action]);
+  }
+
+  function applyItemAction(keys, action, value) {
+    keys.forEach((key) => {
+      const item = { group: null, salesPerYear: null, quantity: null, multiplier: null, excluded: false, ...(state.items[key] || {}) };
+      if (action === 'group') item.group = value || null;
+      if (action === 'sales') item.salesPerYear = value;
+      if (action === 'quantity') item.quantity = value;
+      if (action === 'multiplier') item.multiplier = value;
+      if (action === 'exclude') item.excluded = true;
+      if (action === 'include') item.excluded = false;
+      if (action === 'clear') {
+        item.salesPerYear = null;
+        item.quantity = null;
+        item.multiplier = null;
+      }
+      const empty = !item.group && item.salesPerYear === null && item.quantity === null && item.multiplier === null && !item.excluded;
+      if (empty) delete state.items[key];
+      else state.items[key] = item;
+    });
+    saveSettingsSoon();
+    rebuildConsolidation();
+    updateGroupCounts();
+  }
+
+  /* ---------- Sales groups ---------- */
+
+  function addGroup(rawName) {
+    const name = String(rawName || '').trim().slice(0, 40);
+    if (!name) {
+      showToast('Enter a name for the new group.', true);
+      return null;
+    }
+    const existing = state.groups.find((group) => group.name.toLowerCase() === name.toLowerCase());
+    if (existing) return existing;
+    if (state.groups.length >= MAX_GROUPS) {
+      showToast(`Up to ${MAX_GROUPS} sales groups are supported so each keeps a distinct color.`, true);
+      return null;
+    }
+    const used = new Set(state.groups.map((group) => group.color));
+    const group = {
+      id: `g-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      name,
+      color: GROUP_COLORS.find((color) => !used.has(color)),
+      salesMode: 'turns',
+      salesValue: null,
+      multiplier: null,
+    };
+    state.groups.push(group);
+    saveSettingsSoon();
+    renderGroups();
+    renderAllSelectionBars();
+    refreshViews();
+    return group;
+  }
+
+  function deleteGroup(id) {
+    const group = groupById(id);
+    if (!group) return;
+    state.groups = state.groups.filter((item) => item.id !== id);
+    Object.entries(state.items).forEach(([key, item]) => {
+      if (item.group !== id) return;
+      item.group = null;
+      if (item.salesPerYear === null && item.quantity === null && item.multiplier === null && !item.excluded) delete state.items[key];
+    });
+    if (state.consolidatedFilter === `group:${id}`) state.consolidatedFilter = 'all';
+    saveSettingsSoon();
+    renderGroups();
+    renderAllSelectionBars();
+    rebuildConsolidation();
+    showToast(`Group ${group.name} deleted. Its parts are now ungrouped.`);
+  }
+
+  function handleGroupInput(input) {
+    const group = groupById(input.dataset.groupId);
+    if (!group) return;
+    const field = input.dataset.groupField;
+    if (field === 'name') {
+      const name = input.value.trim().slice(0, 40);
+      if (!name) return;
+      group.name = name;
+      saveSettingsSoon();
+      refreshViews();
+      return;
+    }
+    if (field === 'salesMode') group.salesMode = input.value === 'units' ? 'units' : 'turns';
+    if (field === 'salesValue' || field === 'multiplier') {
+      if (input.value.trim() === '') group[field] = null;
+      else {
+        const value = readNumberInput(input);
+        if (value === undefined) return;
+        group[field] = value;
+      }
+    }
+    saveSettingsSoon();
+    rebuildConsolidation();
+  }
+
+  function renderGroups() {
+    if (!state.groups.length) {
+      const empty = document.createElement('p');
+      empty.className = 'muted';
+      empty.textContent = 'No groups yet. Every item uses the default expected sales.';
+      dom.groupList.replaceChildren(empty);
+      return;
+    }
+    const rows = state.groups.map((group) => {
+      const row = document.createElement('div');
+      row.className = 'group-editor';
+      row.style.setProperty('--group-color', group.color);
+      const head = document.createElement('div');
+      head.className = 'group-editor-head';
+      const swatch = document.createElement('span');
+      swatch.className = 'group-swatch';
+      swatch.setAttribute('aria-hidden', 'true');
+      const name = document.createElement('input');
+      name.value = group.name;
+      name.maxLength = 40;
+      name.dataset.groupId = group.id;
+      name.dataset.groupField = 'name';
+      name.setAttribute('aria-label', 'Group name');
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'icon-button';
+      remove.dataset.removeGroup = group.id;
+      remove.setAttribute('aria-label', `Delete group ${group.name}`);
+      remove.textContent = '×';
+      head.append(swatch, name, remove);
+
+      const fields = document.createElement('div');
+      fields.className = 'group-editor-fields';
+      const salesLabel = document.createElement('label');
+      salesLabel.textContent = 'Expected sales';
+      const salesWrap = document.createElement('span');
+      salesWrap.className = 'amount-currency wide-select';
+      const salesValue = document.createElement('input');
+      salesValue.type = 'number';
+      salesValue.min = '0';
+      salesValue.step = '0.1';
+      salesValue.placeholder = 'default';
+      salesValue.dataset.groupId = group.id;
+      salesValue.dataset.groupField = 'salesValue';
+      salesValue.setAttribute('aria-label', `${group.name} expected sales`);
+      writeInputValue(salesValue, group.salesValue);
+      const salesMode = document.createElement('select');
+      salesMode.dataset.groupId = group.id;
+      salesMode.dataset.groupField = 'salesMode';
+      salesMode.setAttribute('aria-label', `${group.name} expected sales unit`);
+      salesMode.append(new Option('× stock qty / yr', 'turns', false, group.salesMode === 'turns'), new Option('units / item / yr', 'units', false, group.salesMode === 'units'));
+      salesWrap.append(salesValue, salesMode);
+      salesLabel.append(salesWrap);
+      const multiplierLabel = document.createElement('label');
+      multiplierLabel.textContent = 'Price multiplier';
+      const multiplier = document.createElement('input');
+      multiplier.type = 'number';
+      multiplier.min = '0';
+      multiplier.step = '0.01';
+      multiplier.placeholder = `global ${formatNumber(state.config.multiplier, 2)}×`;
+      multiplier.dataset.groupId = group.id;
+      multiplier.dataset.groupField = 'multiplier';
+      multiplier.setAttribute('aria-label', `${group.name} price multiplier`);
+      writeInputValue(multiplier, group.multiplier);
+      multiplierLabel.append(multiplier);
+      const count = document.createElement('small');
+      count.className = 'group-count';
+      count.dataset.groupCount = group.id;
+      fields.append(salesLabel, multiplierLabel, count);
+      row.append(head, fields);
+      return row;
+    });
+    dom.groupList.replaceChildren(...rows);
+    updateGroupCounts();
+  }
+
+  function updateGroupCounts() {
+    dom.groupList.querySelectorAll('[data-group-count]').forEach((node) => {
+      const id = node.dataset.groupCount;
+      const items = state.consolidated.filter((item) => item.groupId === id);
+      const units = items.reduce((sum, item) => sum + item.salesPerYear, 0);
+      node.textContent = `${items.length} item${items.length === 1 ? '' : 's'} · ${formatNumber(units, 1)} units / yr`;
+    });
+  }
+
+  /* ---------- Profitability model ---------- */
+
+  function calculateProfitability() {
+    const warehouse = calculateWarehouseModel();
+    const nok = warehouse.nokToOutput;
+    const vatRate = state.config.vatRate;
+    const items = state.consolidated;
+    const inventoryUnits = warehouse.inventoryUnits;
+    const salesUnits = items.reduce((sum, item) => sum + (item.salesPerYear || 0), 0);
+    const unitsPerMonth = salesUnits / 12;
+    const convert = (value) => (nok === null ? null : value * nok);
+    const storageMonthly = convert(warehouse.storageNok);
+    const outtakeMonthly = convert(warehouse.orderHandlingNok + warehouse.ediNok + warehouse.packagingNok);
+    const outboundMonthly = convert(warehouse.freightNok);
+    const fixedMonthly = convert(warehouse.receivingNok + warehouse.wmsNok);
+    const derived = {
+      storagePerUnitMonth: storageMonthly === null ? null : inventoryUnits > 0 ? storageMonthly / inventoryUnits : 0,
+      outtakePerUnit: outtakeMonthly === null ? null : unitsPerMonth > 0 ? outtakeMonthly / unitsPerMonth : 0,
+      outboundPerUnit: outboundMonthly === null ? null : unitsPerMonth > 0 ? outboundMonthly / unitsPerMonth : 0,
+    };
+    const perUnit = {};
+    const manual = {};
+    FLOW_OVERRIDE_KEYS.forEach((key) => {
+      manual[key] = Number.isFinite(state.flowOverrides[key]);
+      perUnit[key] = manual[key] ? state.flowOverrides[key] : derived[key];
+    });
+    const outboundPerUnit = state.sales.customerPaysOutbound ? 0 : perUnit.outboundPerUnit ?? 0;
+
+    const rows = items.map((item) => {
+      const sales = item.salesPerYear || 0;
+      const unitPrice = item.unitSalesPrice;
+      const unitCost = item.unitLandedCost;
+      const revenue = unitPrice === null ? 0 : sales * unitPrice;
+      const cogs = unitCost === null ? 0 : sales * unitCost;
+      const storage = (perUnit.storagePerUnitMonth ?? 0) * Math.max(0, item.maxQuantity) * 12;
+      const handling = sales * ((perUnit.outtakePerUnit ?? 0) + outboundPerUnit);
+      const gross = revenue - cogs;
+      return {
+        item,
+        sales,
+        unitPrice,
+        unitCost,
+        unitMargin: unitPrice === null || unitCost === null ? null : unitPrice - unitCost,
+        revenue,
+        cogs,
+        gross,
+        storage,
+        handling,
+        net: gross - storage - handling,
+      };
+    });
+    const total = (field) => rows.reduce((sum, row) => sum + row[field], 0);
+    const revenue = total('revenue');
+    const cogs = total('cogs');
+    const gross = revenue - cogs;
+    const storage = total('storage');
+    const outtake = salesUnits * (perUnit.outtakePerUnit ?? 0);
+    const outbound = salesUnits * outboundPerUnit;
+    const fixed = (fixedMonthly ?? 0) * 12;
+    const net = gross - storage - outtake - outbound - fixed;
+    const investment = items.reduce((sum, item) => sum + (item.landedCost ?? 0), 0);
+    const monthlyNet = net / 12;
+    const paybackMonths = investment > 0 && monthlyNet > 0 ? investment / monthlyNet : null;
+
+    const groupMap = new Map();
+    rows.forEach((row) => {
+      const id = row.item.groupId || '';
+      if (!groupMap.has(id)) {
+        const group = groupById(id);
+        groupMap.set(id, { id, name: group?.name || 'Ungrouped', color: group?.color || '#898781', items: 0, units: 0, sales: 0, revenue: 0, gross: 0, net: 0 });
+      }
+      const summary = groupMap.get(id);
+      summary.items += 1;
+      summary.units += Math.max(0, row.item.maxQuantity);
+      summary.sales += row.sales;
+      summary.revenue += row.revenue;
+      summary.gross += row.gross;
+      summary.net += row.net;
+    });
+    const groupOrder = new Map(state.groups.map((group, index) => [group.id, index]));
+    const groups = [...groupMap.values()].sort((a, b) => (groupOrder.get(a.id) ?? 99) - (groupOrder.get(b.id) ?? 99));
+
+    return {
+      warehouse,
+      rows: rows.sort((a, b) => b.net - a.net),
+      groups,
+      salesUnits,
+      inventoryUnits,
+      derived,
+      perUnit,
+      manual,
+      revenue,
+      cogs,
+      gross,
+      storage,
+      outtake,
+      outbound,
+      fixed,
+      net,
+      investment,
+      monthlyNet,
+      paybackMonths,
+      roi: investment > 0 ? net / investment : null,
+      grossMargin: revenue > 0 ? gross / revenue : null,
+      outputVat: revenue * vatRate,
+      importVat: items.reduce((sum, item) => sum + (item.importVat ?? 0), 0),
+      warehouseRateMissing: nok === null,
+      averageUnitPrice: salesUnits > 0 ? revenue / salesUnits : null,
+    };
+  }
+
+  /* ---------- Dashboard ---------- */
+
+  function formatWhole(value) {
+    return Number.isFinite(value) ? `${formatNumber(Math.round(value), 0)} ${state.config.outputCurrency}` : '—';
+  }
+
+  function formatCompact(value) {
+    if (!Number.isFinite(value)) return '—';
+    return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: Math.abs(value) >= 1e6 ? 2 : 1 }).format(value);
+  }
+
+  function kpiTile(label, value, detail, options = {}) {
+    const tile = document.createElement('article');
+    tile.className = `kpi-tile${options.hero ? ' hero' : ''}`;
+    const title = document.createElement('span');
+    title.className = 'kpi-label';
+    title.textContent = label;
+    const number = document.createElement('strong');
+    number.className = 'kpi-value';
+    number.textContent = value;
+    tile.append(title, number);
+    if (options.status) {
+      const status = document.createElement('span');
+      status.className = `kpi-status ${options.status}`;
+      status.textContent = options.status === 'good' ? '▲ Profitable' : '▼ Loss-making';
+      tile.append(status);
+    }
+    if (detail) {
+      const small = document.createElement('span');
+      small.className = 'kpi-detail';
+      small.textContent = detail;
+      tile.append(small);
+    }
+    return tile;
+  }
+
+  function setStats(list, pairs) {
+    list.replaceChildren(...pairs.flatMap(([term, value]) => {
+      const dt = document.createElement('dt');
+      dt.textContent = term;
+      const dd = document.createElement('dd');
+      dd.textContent = value;
+      return [dt, dd];
+    }));
+  }
+
+  function renderDashboard() {
+    const model = calculateProfitability();
+    state.lastProfitability = model;
+    const output = state.config.outputCurrency;
+    dom.dashboardSubtitle.textContent = `${model.rows.length} parts from ${enabledSheetCount()} kits · ${formatNumber(model.salesUnits, 1)} expected units sold per year · ${formatNumber(model.inventoryUnits, 0)} units in stock.${model.warehouseRateMissing ? ' The NOK rate is unavailable, so warehouse costs are counted as zero.' : ''}`;
+    dom.dashboardBadge.textContent = `${output} · excl. VAT`;
+    const logistics = model.storage + model.outtake + model.outbound + model.fixed;
+    dom.dashboardKpis.replaceChildren(
+      kpiTile('Annual net profit', formatWhole(model.net), `${formatWhole(model.monthlyNet)} per month${model.revenue > 0 ? ` · ${formatPercent(model.net / model.revenue)} of revenue` : ''}`, { hero: true, status: model.net >= 0 ? 'good' : 'critical' }),
+      kpiTile('Revenue / yr', formatWhole(model.revenue), `${formatWhole(model.revenue * (1 + state.config.vatRate))} incl. VAT`),
+      kpiTile('Gross profit / yr', formatWhole(model.gross), model.grossMargin === null ? 'No expected revenue' : `${formatPercent(model.grossMargin)} gross margin`),
+      kpiTile('Warehouse & logistics / yr', formatWhole(logistics), `Storage ${formatWhole(model.storage)} · handling ${formatWhole(model.outtake + model.outbound + model.fixed)}`),
+      kpiTile('Payback on stock', model.paybackMonths === null ? 'Not reached' : `${formatNumber(model.paybackMonths, 1)} months`, `${formatWhole(model.investment)} landed stock${model.roi === null ? '' : ` · ${formatPercent(model.roi)} annual return`}`),
+    );
+    setStats(dom.vatSummary, [
+      ['Output VAT / yr', formatWhole(model.outputVat)],
+      ['Import VAT on stock', formatWhole(model.importVat)],
+      ['Customer price incl. VAT / yr', formatWhole(model.revenue + model.outputVat)],
+    ]);
+    updateGroupCounts();
+    renderDashboardCharts(model);
+    renderGroupTable(model);
+    renderDashboardItems(model);
+  }
+
+  function renderDashboardCharts(model = state.lastProfitability) {
+    if (!model) return;
+    renderWaterfallChart(dom.chartWaterfall, model);
+    renderCumulativeChart(dom.chartCumulative, model);
+    renderGroupChart(dom.chartGroups, model);
+  }
+
+  function chartWidth(container, minimum = 300) {
+    return Math.max(minimum, Math.floor(container.clientWidth || container.parentElement?.clientWidth || 560));
+  }
+
+  function niceTicks(min, max, count = 5) {
+    if (min === max) {
+      const pad = Math.abs(min) || 1;
+      min -= pad;
+      max += pad;
+    }
+    const rawStep = (max - min) / count;
+    const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+    const step = [1, 2, 2.5, 5, 10].map((factor) => factor * magnitude).find((candidate) => candidate >= rawStep) || rawStep;
+    const start = Math.floor(min / step) * step;
+    const end = Math.ceil(max / step) * step;
+    const ticks = [];
+    for (let value = start; value <= end + step / 2; value += step) ticks.push(Math.abs(value) < step / 1e6 ? 0 : value);
+    return { ticks, min: start, max: end };
+  }
+
+  // Bar path with a 4px rounded data end and a square end at the baseline.
+  function horizontalBarPath(x0, x1, y, height) {
+    const left = Math.min(x0, x1);
+    const right = Math.max(x0, x1);
+    const radius = Math.min(4, (right - left) / 2, height / 2);
+    if (right - left < 0.5) return `M${left},${y} v${height} h0.5 v${-height} Z`;
+    return x1 >= x0
+      ? `M${left},${y} H${right - radius} Q${right},${y} ${right},${y + radius} V${y + height - radius} Q${right},${y + height} ${right - radius},${y + height} H${left} Z`
+      : `M${right},${y} H${left + radius} Q${left},${y} ${left},${y + radius} V${y + height - radius} Q${left},${y + height} ${left + radius},${y + height} H${right} Z`;
+  }
+
+  function tipAttributes(value, label) {
+    return `data-tip-value="${escapeMarkup(value)}" data-tip-label="${escapeMarkup(label)}" tabindex="0"`;
+  }
+
+  // Horizontal profit bridge: step names left, floating bars in the middle, values in their own column.
+  function renderWaterfallChart(container, model) {
+    const output = state.config.outputCurrency;
+    const steps = [
+      { label: 'Revenue', value: model.revenue, total: true },
+      { label: 'Landed cost of goods', value: -model.cogs },
+      { label: 'Storage', value: -model.storage },
+      { label: 'Outtake & orders', value: -model.outtake },
+      ...(state.sales.customerPaysOutbound ? [] : [{ label: 'Outbound freight', value: -model.outbound }]),
+      { label: 'Receiving & WMS', value: -model.fixed },
+      { label: 'Net profit', value: model.net, total: true },
+    ];
+    let level = 0;
+    steps.forEach((step) => {
+      step.from = step.total ? 0 : level;
+      step.to = step.total ? step.value : level + step.value;
+      level = step.to;
+    });
+    const width = chartWidth(container);
+    const rowHeight = 32;
+    const barHeight = 18;
+    const longestLabel = Math.max(...steps.map((step) => step.label.length));
+    const margin = { top: 6, right: 78, bottom: 22, left: Math.min(width * 0.42, Math.max(90, longestLabel * 6.4 + 14)) };
+    const height = margin.top + margin.bottom + steps.length * rowHeight;
+    const plotWidth = width - margin.left - margin.right;
+    const values = steps.flatMap((step) => [step.from, step.to]);
+    const scale = niceTicks(Math.min(0, ...values), Math.max(0, ...values), 4);
+    const x = (value) => margin.left + ((value - scale.min) / (scale.max - scale.min)) * plotWidth;
+    const parts = [];
+    scale.ticks.forEach((tick) => {
+      parts.push(`<line class="viz-grid" x1="${x(tick).toFixed(1)}" x2="${x(tick).toFixed(1)}" y1="${margin.top}" y2="${(height - margin.bottom).toFixed(1)}"/>`);
+      parts.push(`<text class="viz-tick" x="${x(tick).toFixed(1)}" y="${height - 6}" text-anchor="middle">${escapeMarkup(formatCompact(tick))}</text>`);
+    });
+    parts.push(`<line class="viz-axis" x1="${x(0).toFixed(1)}" x2="${x(0).toFixed(1)}" y1="${margin.top}" y2="${(height - margin.bottom).toFixed(1)}"/>`);
+    steps.forEach((step, index) => {
+      const top = margin.top + index * rowHeight;
+      const barY = top + (rowHeight - barHeight) / 2;
+      const positive = step.value >= 0;
+      if (index < steps.length - 1) {
+        parts.push(`<line class="viz-connector" x1="${x(step.to).toFixed(1)}" x2="${x(step.to).toFixed(1)}" y1="${(barY + barHeight).toFixed(1)}" y2="${(barY + rowHeight).toFixed(1)}"/>`);
+      }
+      parts.push(`<path class="${positive ? 'viz-positive' : 'viz-negative'}" d="${horizontalBarPath(x(step.from), x(step.to), barY, barHeight)}"/>`);
+      parts.push(`<text class="viz-category${step.total ? ' viz-total-label' : ''}" x="${margin.left - 10}" y="${(barY + barHeight / 2 + 4).toFixed(1)}" text-anchor="end">${escapeMarkup(step.label)}</text>`);
+      parts.push(`<text class="viz-value" x="${width - 4}" y="${(barY + barHeight / 2 + 4).toFixed(1)}" text-anchor="end">${escapeMarkup(formatCompact(step.value))}</text>`);
+      parts.push(`<rect class="viz-hit" x="0" y="${top}" width="${width}" height="${rowHeight}" ${tipAttributes(formatWhole(step.value), `${step.label} per year`)}/>`);
+    });
+    const legend = `<div class="viz-legend"><span><i class="viz-swatch viz-positive"></i>Revenue &amp; profit</span><span><i class="viz-swatch viz-negative"></i>Costs &amp; loss</span></div>`;
+    container.innerHTML = `${legend}<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Annual profit bridge from revenue ${escapeMarkup(formatWhole(model.revenue))} to net profit ${escapeMarkup(formatWhole(model.net))}">${parts.join('')}</svg>`;
+
+    const table = document.createElement('table');
+    table.className = 'mini-table';
+    const head = table.createTHead().insertRow();
+    ['Step', `Amount / yr (${output})`].forEach((text) => { const th = document.createElement('th'); th.textContent = text; head.append(th); });
+    const body = table.createTBody();
+    steps.forEach((step) => {
+      const row = body.insertRow();
+      row.insertCell().textContent = step.label;
+      const cell = row.insertCell();
+      cell.textContent = formatWhole(step.value);
+      cell.className = 'number';
+    });
+    dom.waterfallTable.replaceChildren(table);
+  }
+
+  function renderCumulativeChart(container, model) {
+    const horizon = Math.round(clamp(state.sales.horizonMonths || 24, 6, 120));
+    const series = Array.from({ length: horizon + 1 }, (_, month) => ({ month, value: -model.investment + month * model.monthlyNet }));
+    const width = chartWidth(container);
+    const height = 270;
+    const margin = { top: 22, right: 64, bottom: 34, left: 58 };
+    const plotWidth = width - margin.left - margin.right;
+    const plotHeight = height - margin.top - margin.bottom;
+    const values = series.map((point) => point.value);
+    const scale = niceTicks(Math.min(0, ...values), Math.max(0, ...values));
+    const x = (month) => margin.left + (month / horizon) * plotWidth;
+    const y = (value) => margin.top + plotHeight - ((value - scale.min) / (scale.max - scale.min)) * plotHeight;
+    const parts = [];
+    scale.ticks.forEach((tick) => {
+      parts.push(`<line class="viz-grid" x1="${margin.left}" x2="${width - margin.right}" y1="${y(tick).toFixed(1)}" y2="${y(tick).toFixed(1)}"/>`);
+      parts.push(`<text class="viz-tick" x="${margin.left - 8}" y="${(y(tick) + 4).toFixed(1)}" text-anchor="end">${escapeMarkup(formatCompact(tick))}</text>`);
+    });
+    const tickStep = horizon <= 12 ? 3 : horizon <= 36 ? 6 : 12;
+    for (let month = 0; month <= horizon; month += tickStep) {
+      parts.push(`<text class="viz-tick" x="${x(month).toFixed(1)}" y="${height - margin.bottom + 18}" text-anchor="middle">${month}</text>`);
+    }
+    parts.push(`<text class="viz-tick" x="${(width - margin.right).toFixed(1)}" y="${height - 4}" text-anchor="end">months</text>`);
+    parts.push(`<line class="viz-axis" x1="${margin.left}" x2="${width - margin.right}" y1="${y(0).toFixed(1)}" y2="${y(0).toFixed(1)}"/>`);
+    const line = series.map((point, index) => `${index ? 'L' : 'M'}${x(point.month).toFixed(1)},${y(point.value).toFixed(1)}`).join(' ');
+    parts.push(`<path class="viz-area" d="${line} L${x(horizon).toFixed(1)},${y(0).toFixed(1)} L${x(0).toFixed(1)},${y(0).toFixed(1)} Z"/>`);
+    parts.push(`<path class="viz-line" d="${line}"/>`);
+    if (model.paybackMonths !== null && model.paybackMonths <= horizon) {
+      const bx = x(model.paybackMonths);
+      parts.push(`<line class="viz-marker-line" x1="${bx.toFixed(1)}" x2="${bx.toFixed(1)}" y1="${margin.top}" y2="${(height - margin.bottom).toFixed(1)}"/>`);
+      parts.push(`<circle class="viz-dot" cx="${bx.toFixed(1)}" cy="${y(0).toFixed(1)}" r="4.5"/>`);
+      const anchor = bx > width - margin.right - 110 ? 'end' : 'start';
+      parts.push(`<text class="viz-value" x="${(bx + (anchor === 'start' ? 7 : -7)).toFixed(1)}" y="${(margin.top + 10).toFixed(1)}" text-anchor="${anchor}">Break-even · month ${escapeMarkup(formatNumber(model.paybackMonths, 1))}</text>`);
+    }
+    const last = series[series.length - 1];
+    parts.push(`<circle class="viz-dot" cx="${x(last.month).toFixed(1)}" cy="${y(last.value).toFixed(1)}" r="4.5"/>`);
+    parts.push(`<text class="viz-value" x="${(x(last.month) + 8).toFixed(1)}" y="${(y(last.value) + 4).toFixed(1)}">${escapeMarkup(formatCompact(last.value))}</text>`);
+    parts.push(`<line class="viz-crosshair" x1="0" x2="0" y1="${margin.top}" y2="${(height - margin.bottom).toFixed(1)}" visibility="hidden"/>`);
+    parts.push(`<circle class="viz-dot viz-hover-dot" cx="0" cy="0" r="4.5" visibility="hidden"/>`);
+    parts.push(`<rect class="viz-hit viz-plot-hit" x="${margin.left}" y="${margin.top}" width="${plotWidth}" height="${plotHeight}" tabindex="0" aria-label="Cumulative net position by month"/>`);
+    container.innerHTML = `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Cumulative net position over ${horizon} months, starting at ${escapeMarkup(formatWhole(-model.investment))}">${parts.join('')}</svg>`;
+
+    const svg = container.querySelector('svg');
+    const crosshair = svg.querySelector('.viz-crosshair');
+    const dot = svg.querySelector('.viz-hover-dot');
+    const hit = svg.querySelector('.viz-plot-hit');
+    const showMonth = (month, clientX, clientY) => {
+      const point = series[clamp(Math.round(month), 0, horizon)];
+      crosshair.setAttribute('x1', x(point.month));
+      crosshair.setAttribute('x2', x(point.month));
+      crosshair.setAttribute('visibility', 'visible');
+      dot.setAttribute('cx', x(point.month));
+      dot.setAttribute('cy', y(point.value));
+      dot.setAttribute('visibility', 'visible');
+      showChartTooltip(formatWhole(point.value), `Month ${point.month} · net position`, clientX, clientY);
+    };
+    const hide = () => {
+      crosshair.setAttribute('visibility', 'hidden');
+      dot.setAttribute('visibility', 'hidden');
+      hideChartTooltip();
+    };
+    hit.addEventListener('pointermove', (event) => {
+      const rect = svg.getBoundingClientRect();
+      const localX = (event.clientX - rect.left) * (width / rect.width);
+      showMonth(((localX - margin.left) / plotWidth) * horizon, event.clientX, event.clientY);
+    });
+    hit.addEventListener('pointerleave', hide);
+    hit.addEventListener('blur', hide);
+    let focusMonth = 0;
+    hit.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+      event.preventDefault();
+      focusMonth = clamp(focusMonth + (event.key === 'ArrowRight' ? 1 : -1), 0, horizon);
+      const rect = svg.getBoundingClientRect();
+      showMonth(focusMonth, rect.left + (x(focusMonth) / width) * rect.width, rect.top + (y(series[focusMonth].value) / height) * rect.height);
+    });
+
+    const table = document.createElement('table');
+    table.className = 'mini-table';
+    const head = table.createTHead().insertRow();
+    ['Month', `Net position (${state.config.outputCurrency})`].forEach((text) => { const th = document.createElement('th'); th.textContent = text; head.append(th); });
+    const body = table.createTBody();
+    series.filter((point) => point.month % 3 === 0 || point.month === horizon).forEach((point) => {
+      const row = body.insertRow();
+      row.insertCell().textContent = String(point.month);
+      const cell = row.insertCell();
+      cell.textContent = formatWhole(point.value);
+      cell.className = 'number';
+    });
+    dom.cumulativeTable.replaceChildren(table);
+  }
+
+  function renderGroupChart(container, model) {
+    const groups = model.groups;
+    if (groups.length < 2) {
+      container.innerHTML = '';
+      const hint = document.createElement('p');
+      hint.className = 'chart-empty';
+      hint.textContent = state.groups.length
+        ? 'Assign parts to more than one group to compare them here.'
+        : 'All parts are ungrouped. Select parts in Consolidated or a kit tab and choose “Assign to sales group” to compare groups here.';
+      container.append(hint);
+      return;
+    }
+    const width = chartWidth(container);
+    const rowHeight = 34;
+    const barHeight = 18;
+    const margin = { top: 8, right: 76, bottom: 22, left: Math.min(170, Math.max(110, width * 0.24)) };
+    const height = margin.top + margin.bottom + groups.length * rowHeight;
+    const plotWidth = width - margin.left - margin.right;
+    const values = groups.map((group) => group.net);
+    const scale = niceTicks(Math.min(0, ...values), Math.max(0, ...values), 4);
+    const x = (value) => margin.left + ((value - scale.min) / (scale.max - scale.min)) * plotWidth;
+    const parts = [];
+    scale.ticks.forEach((tick) => {
+      parts.push(`<line class="viz-grid" x1="${x(tick).toFixed(1)}" x2="${x(tick).toFixed(1)}" y1="${margin.top}" y2="${(height - margin.bottom).toFixed(1)}"/>`);
+      parts.push(`<text class="viz-tick" x="${x(tick).toFixed(1)}" y="${height - 6}" text-anchor="middle">${escapeMarkup(formatCompact(tick))}</text>`);
+    });
+    parts.push(`<line class="viz-axis" x1="${x(0).toFixed(1)}" x2="${x(0).toFixed(1)}" y1="${margin.top}" y2="${(height - margin.bottom).toFixed(1)}"/>`);
+    groups.forEach((group, index) => {
+      const top = margin.top + index * rowHeight;
+      const barY = top + (rowHeight - barHeight) / 2;
+      const name = group.name.length > 22 ? `${group.name.slice(0, 21)}…` : group.name;
+      parts.push(`<text class="viz-category" x="${margin.left - 10}" y="${(barY + barHeight / 2 + 4).toFixed(1)}" text-anchor="end">${escapeMarkup(name)}</text>`);
+      parts.push(`<path d="${horizontalBarPath(x(0), x(group.net), barY, barHeight)}" fill="${escapeMarkup(group.color)}"/>`);
+      const end = x(group.net);
+      const anchor = group.net >= 0 ? 'start' : 'end';
+      parts.push(`<text class="viz-value" x="${(end + (group.net >= 0 ? 6 : -6)).toFixed(1)}" y="${(barY + barHeight / 2 + 4).toFixed(1)}" text-anchor="${anchor}">${escapeMarkup(formatCompact(group.net))}</text>`);
+      parts.push(`<rect class="viz-hit" x="0" y="${top}" width="${width}" height="${rowHeight}" ${tipAttributes(formatWhole(group.net), `${group.name} · net profit / yr · ${group.items} items · revenue ${formatWhole(group.revenue)}`)}/>`);
+    });
+    container.innerHTML = `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Annual net profit by sales group">${parts.join('')}</svg>`;
+  }
+
+  function renderGroupTable(model) {
+    const output = state.config.outputCurrency;
+    const table = document.createElement('table');
+    table.className = 'mini-table';
+    const head = table.createTHead().insertRow();
+    ['Sales group', 'Items', 'Stock units', 'Sales units / yr', `Revenue / yr (${output})`, `Gross profit / yr`, `Net profit / yr`, 'Gross margin'].forEach((text, index) => {
+      const th = document.createElement('th');
+      th.textContent = text;
+      if (index) th.className = 'number';
+      head.append(th);
+    });
+    const body = table.createTBody();
+    model.groups.forEach((group) => {
+      const row = body.insertRow();
+      const nameCell = row.insertCell();
+      const chip = document.createElement('span');
+      chip.className = 'group-chip';
+      chip.style.setProperty('--group-color', group.color);
+      chip.textContent = group.name;
+      nameCell.append(chip);
+      [formatNumber(group.items, 0), formatNumber(group.units, 0), formatNumber(group.sales, 1), formatWhole(group.revenue), formatWhole(group.gross), formatWhole(group.net), group.revenue > 0 ? formatPercent(group.gross / group.revenue) : '—']
+        .forEach((value) => { const cell = row.insertCell(); cell.textContent = value; cell.className = 'number'; });
+    });
+    dom.groupTable.replaceChildren(table);
+  }
+
+  function renderDashboardItems(model) {
+    const output = state.config.outputCurrency;
+    const table = document.createElement('table');
+    table.className = 'parts-table dashboard-table';
+    const headers = ['Part', 'Description', 'Sales group', 'Stock qty', 'Sales / yr', `Unit price (${output})`, 'Unit landed cost', 'Unit margin', 'Margin %', 'Revenue / yr', 'Gross profit / yr', 'Storage / yr', 'Outtake & freight / yr', 'Net profit / yr'];
+    const head = table.createTHead().insertRow();
+    headers.forEach((text, index) => { const th = document.createElement('th'); th.textContent = text; if (index > 2) th.className = 'number'; head.append(th); });
+    const body = table.createTBody();
+    model.rows.forEach((row) => {
+      const tr = body.insertRow();
+      if (row.item.common) tr.className = 'common';
+      tr.insertCell().textContent = row.item.part;
+      tr.insertCell().textContent = row.item.description;
+      const groupCell = tr.insertCell();
+      if (row.item.groupId) {
+        const chip = document.createElement('span');
+        chip.className = 'group-chip';
+        chip.style.setProperty('--group-color', row.item.groupColor);
+        chip.textContent = row.item.groupName;
+        groupCell.append(chip);
+      } else {
+        groupCell.textContent = '—';
+      }
+      [
+        formatNumber(row.item.maxQuantity, 2), formatNumber(row.sales, 2), formatNullableNumber(row.unitPrice, 2), formatNullableNumber(row.unitCost, 2),
+        formatNullableNumber(row.unitMargin, 2), row.unitPrice ? formatPercent(row.unitMargin / row.unitPrice) : '—',
+        formatNumber(row.revenue, 0), formatNumber(row.gross, 0), formatNumber(row.storage, 0), formatNumber(row.handling, 0), formatNumber(row.net, 0),
+      ].forEach((value, index, list) => {
+        const cell = tr.insertCell();
+        cell.textContent = value;
+        cell.className = 'number';
+        if (index === list.length - 1) cell.classList.add('strong-cell');
+      });
+    });
+    dom.dashboardItems.replaceChildren(table);
+  }
+
+  /* ---------- Chart tooltip ---------- */
+
+  function bindChartTooltip() {
+    const show = (event) => {
+      const target = event.target.closest?.('[data-tip-value]');
+      if (!target) return;
+      const rect = target.getBoundingClientRect();
+      const x = event.clientX ?? rect.left + rect.width / 2;
+      const y = event.clientY ?? rect.top;
+      showChartTooltip(target.dataset.tipValue, target.dataset.tipLabel, x || rect.left + rect.width / 2, y || rect.top);
+    };
+    document.addEventListener('pointermove', (event) => {
+      if (event.target.closest?.('[data-tip-value]')) show(event);
+    });
+    document.addEventListener('pointerout', (event) => {
+      if (event.target.closest?.('[data-tip-value]') && !event.relatedTarget?.closest?.('[data-tip-value]')) hideChartTooltip();
+    });
+    document.addEventListener('focusin', (event) => {
+      const target = event.target.closest?.('[data-tip-value]');
+      if (!target) return;
+      const rect = target.getBoundingClientRect();
+      showChartTooltip(target.dataset.tipValue, target.dataset.tipLabel, rect.left + rect.width / 2, rect.top + 20);
+    });
+    document.addEventListener('focusout', (event) => { if (event.target.closest?.('[data-tip-value]')) hideChartTooltip(); });
+  }
+
+  function showChartTooltip(value, label, clientX, clientY) {
+    const tip = dom.chartTooltip;
+    const strong = document.createElement('strong');
+    strong.textContent = value;
+    const span = document.createElement('span');
+    span.textContent = label;
+    tip.replaceChildren(strong, span);
+    tip.hidden = false;
+    const { width, height } = tip.getBoundingClientRect();
+    const left = clamp(clientX + 14, 8, window.innerWidth - width - 8);
+    const top = clientY - height - 12 < 8 ? clientY + 16 : clientY - height - 12;
+    tip.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
+  }
+
+  function hideChartTooltip() {
+    if (dom.chartTooltip) dom.chartTooltip.hidden = true;
+  }
+
+  /* ---------- Factory-to-customer flow ---------- */
+
+  function renderFlow() {
+    const model = calculateProfitability();
+    const warehouse = model.warehouse;
+    const items = state.consolidated;
+    const sum = (field) => items.reduce((total, item) => total + (item[field] ?? 0), 0);
+    setStats(dom.flowFactoryStats, [
+      ['List value', formatWhole(sum('convertedTotal'))],
+      ['After discount', formatWhole(sum('discountedTotal'))],
+      ['Parts · units', `${items.length} · ${formatNumber(warehouse.inventoryUnits, 0)}`],
+    ]);
+    renderFlowKitRows();
+    dom.flowImportVat.textContent = formatWhole(sum('importVat'));
+    dom.flowInboundTotal.textContent = formatWhole(sum('freightAndImport'));
+    setStats(dom.flowNorwayStats, [
+      ['Landed value', formatWhole(sum('landedCost'))],
+      ['Freight & import', formatWhole(sum('freightAndImport'))],
+      ['Import VAT', formatWhole(sum('importVat'))],
+    ]);
+
+    const palletKey = `${state.warehouse.palletType}${state.warehouse.palletHeight}`;
+    dom.flowPalletRate.dataset.bind = `warehouse.rates.${palletKey}`;
+    dom.flowPalletLabel.textContent = `${state.warehouse.palletType === 'eu' ? 'EU' : 'Sea'} pallet ≤${state.warehouse.palletHeight} / mo`;
+    dom.flowWarehouseTotal.textContent = `${formatNok(warehouse.monthlyNok)} · ${formatWhole(warehouse.monthlyTotal)}`;
+    setStats(dom.flowWarehouseStats, [
+      ['Locations', `${warehouse.shelfLocations} shelf · ${warehouse.drawerLocations} drawer · ${warehouse.pallets} pallet`],
+      ['Per month', formatWhole(warehouse.monthlyTotal)],
+      ['Per year', formatWhole(warehouse.annualTotal)],
+    ]);
+
+    const active = document.activeElement;
+    FLOW_OVERRIDE_KEYS.forEach((key) => {
+      const input = dom.flowPerItem.querySelector(`[data-override="${key}"]`);
+      const status = dom.flowPerItem.querySelector(`[data-override-state="${key}"]`);
+      const value = model.perUnit[key];
+      if (input !== active) input.value = Number.isFinite(value) ? String(Math.round(value * 100) / 100) : '';
+      status.textContent = model.manual[key] ? 'manual' : Number.isFinite(value) ? state.config.outputCurrency : 'rate missing';
+      status.classList.toggle('manual', model.manual[key]);
+    });
+    dom.flowResetOverrides.disabled = !FLOW_OVERRIDE_KEYS.some((key) => model.manual[key]);
+    renderFlowLock();
+    if (state.flowMode === 'map') renderMaps();
+
+    setStats(dom.flowCustomerStats, [
+      ['Avg. price / unit', model.averageUnitPrice === null ? '—' : `${formatWhole(model.averageUnitPrice)} excl. VAT`],
+      ['incl. VAT', model.averageUnitPrice === null ? '—' : formatWhole(model.averageUnitPrice * (1 + state.config.vatRate))],
+      ['Sales / yr', `${formatNumber(model.salesUnits, 0)} units · ${formatWhole(model.revenue)}`],
+      ['Net profit / yr', formatWhole(model.net)],
+    ]);
+  }
+
+  function renderFlowKitRows() {
+    const kits = state.workbook.SheetNames.filter((name) => state.mappings[name]?.enabled && isSourceKit(name));
+    const signature = kits.join('\u0000');
+    if (dom.flowKitRows.dataset.signature !== signature) {
+      dom.flowKitRows.dataset.signature = signature;
+      dom.flowKitRows.replaceChildren(...kits.map((sheetName) => {
+        const row = document.createElement('tr');
+        row.className = 'stack';
+        const th = document.createElement('th');
+        th.scope = 'row';
+        th.textContent = `${sheetName} kit freight`;
+        const td = document.createElement('td');
+        const wrap = document.createElement('div');
+        wrap.className = 'kit-inline';
+        const mode = document.createElement('select');
+        mode.dataset.kitBind = sheetName;
+        mode.dataset.kitField = 'shippingMode';
+        mode.setAttribute('aria-label', `${sheetName} freight mode`);
+        Object.entries(KIT_SHIPPING_MODES).forEach(([value, label]) => mode.append(new Option(label, value)));
+        const amount = document.createElement('input');
+        amount.type = 'number';
+        amount.min = '0';
+        amount.step = '0.01';
+        amount.dataset.kitBind = sheetName;
+        amount.dataset.kitField = 'shippingAmount';
+        amount.setAttribute('aria-label', `${sheetName} freight amount`);
+        const currency = document.createElement('span');
+        currency.className = 'kit-currency';
+        currency.dataset.kitCurrency = sheetName;
+        wrap.append(mode, amount, currency);
+        td.append(wrap);
+        row.append(th, td);
+        return row;
+      }));
+    }
+    dom.flowKitRows.querySelectorAll('[data-kit-currency]').forEach((node) => { node.textContent = kitSettings(node.dataset.kitCurrency).shippingCurrency; });
+  }
+
+  function renderFlowLock() {
+    const unlocked = state.flowUnlocked;
+    dom.flowPerItem.classList.toggle('locked', !unlocked);
+    dom.flowLock.setAttribute('aria-pressed', String(unlocked));
+    dom.flowLock.querySelector('.lock-label').textContent = unlocked ? 'Unlocked' : 'Locked';
+    dom.flowLock.title = unlocked ? 'Lock the per-item values' : 'Unlock to edit the per-item values';
+    dom.flowPerItem.querySelectorAll('[data-override]').forEach((input) => { input.readOnly = !unlocked; });
+  }
+
+  /* ---------- Customs & VAT guide ---------- */
+
+  function originName(id = state.supplier.country) {
+    return ORIGIN_PRESETS[id]?.name || state.map.names?.get(id) || state.supplier.countryName || 'Selected country';
+  }
+
+  function originAgreement(id) {
+    if (id === '578') return 'norway';
+    if (EU_MEMBERS.has(id)) return 'eu';
+    if (EFTA_MEMBERS.has(id)) return 'efta';
+    if (id === '840') return 'usa';
+    return 'other';
+  }
+
+  const AGREEMENT_TEXT = {
+    eu: {
+      badge: 'EU · EEA agreement',
+      duty: 'Free trade through the EEA agreement. Dutiable goods (such as clothing or food) are 0% only when the shipment carries valid proof of origin: an EUR.1 certificate or a valid invoice declaration showing the goods were made in the EU.',
+    },
+    efta: {
+      badge: 'EFTA member',
+      duty: 'Free trade through the EFTA convention. Dutiable goods are 0% only when the shipment carries valid proof of origin: an EUR.1 certificate or a valid invoice declaration.',
+    },
+    usa: {
+      badge: 'No broad free trade agreement',
+      duty: 'Norway has no broad free trade agreement with the USA, so ordinary Norwegian rates apply. Dutiable goods such as textiles pay duty, but machinery, electronics and most consumer goods already have 0% base duty.',
+    },
+    other: {
+      badge: 'Ordinary rates unless an agreement applies',
+      duty: 'Ordinary Norwegian rates apply unless a trade agreement covers this origin. Most industrial and technical goods are duty-free in Norway regardless of origin.',
+    },
+    norway: {
+      badge: 'Domestic',
+      duty: 'Goods bought inside Norway are not imported, so no customs duty or import VAT applies.',
+    },
+  };
+
+  const CUSTOMS_STRATEGIES = [
+    { key: 'tollager', title: 'Use a customs warehouse (Tollager)', text: 'Store dutiable goods uncleared at a warehouse partner with a Tollager permit. Duty is paid only when a part leaves for a Norwegian customer; parts shipped on out of Norway (for example to Sweden) pay no Norwegian duty.', origins: ['usa', 'other'] },
+    { key: 't1', title: 'Truck through the EU under T1 transit', text: 'Goods trucked from Bulgaria or Switzerland through the EU and Sweden must travel under a T1 transit document. If the forwarder clears them into the EU by mistake, you pay EU duty first and then Norwegian duty and fees at the border.', origins: ['eu', 'efta'] },
+    { key: 'tollkreditt', title: 'Apply for Tollkreditt', text: 'If duty or special fees do arise, apply for Tollkreditt with Skatteetaten. Charges are collected on one monthly invoice instead of the forwarder paying at the border and billing disbursement fees.', origins: ['eu', 'efta', 'usa', 'other'] },
+    { key: 'incoterms', title: 'Buy DAP or FCA, not DDP', text: 'Buy on DAP (Delivered at Place) or FCA (Free Carrier). Avoid DDP (Delivered Duty Paid): the supplier then handles Norwegian customs, you lose control of the declaration, and the import VAT deduction gets lost or complicated.', origins: ['eu', 'efta', 'usa', 'other'] },
+  ];
+
+  function buildCustomsGuide(countryId = state.supplier.country, { compact = false } = {}) {
+    const agreement = originAgreement(countryId);
+    const info = AGREEMENT_TEXT[agreement];
+    const fragment = document.createDocumentFragment();
+    const head = document.createElement('div');
+    head.className = 'guide-head';
+    const title = document.createElement('strong');
+    title.textContent = `Importing from ${originName(countryId)}`;
+    const badge = document.createElement('span');
+    badge.className = `guide-badge ${agreement}`;
+    badge.textContent = info.badge;
+    head.append(title, badge);
+    fragment.append(head);
+
+    const section = (heading, text) => {
+      const block = document.createElement('div');
+      block.className = 'guide-block';
+      const h = document.createElement('h5');
+      h.textContent = heading;
+      const p = document.createElement('p');
+      p.textContent = text;
+      block.append(h, p);
+      return block;
+    };
+    fragment.append(section('Customs duty', `${info.duty} In Norway most industrial and technical goods are duty-free wherever they are made; Tolletaten mainly charges duty on clothing, textiles and food. Rock-drill spare parts are machinery parts, which normally fall in the duty-free group — confirm the HS code with your forwarder.`));
+    if (agreement !== 'norway') {
+      const importVat = state.consolidated.reduce((sum, item) => sum + (item.importVat ?? 0), 0);
+      fragment.append(section('Import VAT (MVA)', `Normally 25% (15% on food), calculated on the purchase value plus freight and any duty — about ${formatWhole(importVat)} for this order. Through a Norwegian VAT-registered company nothing is paid at the border: the import VAT is reported as both input and output VAT in the ordinary MVA-melding to Skatteetaten, so cash flow is unaffected.`));
+      const strategies = CUSTOMS_STRATEGIES.filter((strategy) => strategy.origins.includes(agreement));
+      const list = document.createElement(compact ? 'ul' : 'div');
+      list.className = compact ? 'guide-list' : 'guide-strategies';
+      strategies.forEach((strategy) => {
+        if (compact) {
+          const item = document.createElement('li');
+          const strong = document.createElement('strong');
+          strong.textContent = `${strategy.title}. `;
+          item.append(strong, document.createTextNode(strategy.text));
+          list.append(item);
+        } else {
+          const details = document.createElement('details');
+          const summary = document.createElement('summary');
+          summary.textContent = strategy.title;
+          const p = document.createElement('p');
+          p.textContent = strategy.text;
+          details.append(summary, p);
+          list.append(details);
+        }
+      });
+      const h = document.createElement('h5');
+      h.textContent = 'Avoid unnecessary cost and border stops';
+      fragment.append(h, list);
+    }
+    return fragment;
+  }
+
+  function renderCustomsGuides() {
+    const sidebar = el('sidebar-customs-guide');
+    if (sidebar?.closest('details')?.open) sidebar.replaceChildren(buildCustomsGuide(state.supplier.country));
+    if (!dom.customsPopover.hidden) dom.customsPopover.querySelector('.customs-popover-body')?.replaceChildren(buildCustomsGuide(state.supplier.country, { compact: true }));
+  }
+
+  function populateOriginSelects() {
+    const ids = [...new Set([...Object.keys(ORIGIN_PRESETS), state.supplier.country])].sort((a, b) => originName(a).localeCompare(originName(b)));
+    document.querySelectorAll('[data-origin-select]').forEach((select) => {
+      const signature = ids.join(',');
+      if (select.dataset.signature !== signature) {
+        select.dataset.signature = signature;
+        select.replaceChildren(...ids.map((id) => new Option(originName(id), id)));
+      }
+      if (select !== document.activeElement) select.value = state.supplier.country;
+    });
+  }
+
+  function setSupplierOrigin(countryId, { name, lat, lon } = {}) {
+    const preset = ORIGIN_PRESETS[countryId];
+    state.supplier.country = countryId;
+    state.supplier.countryName = preset?.name || name || originName(countryId);
+    if (preset) {
+      state.supplier.location = preset.place;
+      state.supplier.lat = preset.lat;
+      state.supplier.lon = preset.lon;
+    } else if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      state.supplier.location = state.supplier.countryName;
+      state.supplier.lat = lat;
+      state.supplier.lon = lon;
+    }
+    populateOriginSelects();
+    saveSettingsSoon();
+    refreshViews();
+  }
+
+  let customsPopoverTimer = 0;
+  function bindCustomsPopover() {
+    const show = (anchor, delay = 0) => {
+      clearTimeout(customsPopoverTimer);
+      if (delay) customsPopoverTimer = setTimeout(() => showCustomsPopover(anchor), delay);
+      else showCustomsPopover(anchor);
+    };
+    const scheduleHide = () => {
+      if (state.customsPinned) return;
+      clearTimeout(customsPopoverTimer);
+      customsPopoverTimer = setTimeout(() => { if (!dom.customsPopover.matches(':hover')) hideCustomsPopover(); }, 220);
+    };
+    document.addEventListener('mouseover', (event) => {
+      const anchor = event.target.closest?.('[data-customs-info]');
+      if (anchor) {
+        if (!dom.customsPopover.hidden && state.customsAnchor === anchor) clearTimeout(customsPopoverTimer);
+        else show(anchor, dom.customsPopover.hidden ? 280 : 0);
+      } else if (event.target.closest?.('#customs-popover')) {
+        clearTimeout(customsPopoverTimer);
+      }
+    });
+    document.addEventListener('mouseout', (event) => {
+      if (event.target.closest?.('[data-customs-info], #customs-popover') && !event.relatedTarget?.closest?.('[data-customs-info], #customs-popover')) scheduleHide();
+    });
+    document.addEventListener('focusin', (event) => {
+      const anchor = event.target.closest?.('[data-customs-info]');
+      if (anchor) show(anchor);
+    });
+    document.addEventListener('focusout', (event) => {
+      if (event.target.closest?.('[data-customs-info]') && !event.relatedTarget?.closest?.('[data-customs-info], #customs-popover')) scheduleHide();
+    });
+    document.addEventListener('click', (event) => {
+      const pin = event.target.closest?.('[data-customs-pin]');
+      if (pin) {
+        state.customsPinned = !state.customsPinned;
+        pin.setAttribute('aria-expanded', String(state.customsPinned));
+        if (state.customsPinned) showCustomsPopover(pin.closest('[data-customs-info]') || pin);
+        else hideCustomsPopover();
+      } else if (event.target.closest?.('[data-customs-close]')) {
+        state.customsPinned = false;
+        hideCustomsPopover();
+      }
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && !dom.customsPopover.hidden) {
+        state.customsPinned = false;
+        hideCustomsPopover();
+      }
+    });
+    el('sidebar-customs-guide')?.closest('details')?.addEventListener('toggle', renderCustomsGuides);
+  }
+
+  function showCustomsPopover(anchor) {
+    const popover = dom.customsPopover;
+    state.customsAnchor = anchor;
+    const head = document.createElement('div');
+    head.className = 'customs-popover-head';
+    const title = document.createElement('span');
+    title.textContent = 'Customs & VAT in Norway';
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'icon-button';
+    close.dataset.customsClose = 'true';
+    close.setAttribute('aria-label', 'Close customs rules');
+    close.textContent = '×';
+    head.append(title, close);
+    const body = document.createElement('div');
+    body.className = 'customs-popover-body customs-guide';
+    body.append(buildCustomsGuide(state.supplier.country, { compact: true }));
+    popover.replaceChildren(head, body);
+    popover.hidden = false;
+    const rect = anchor.getBoundingClientRect();
+    const width = Math.min(360, window.innerWidth - 16);
+    popover.style.width = `${width}px`;
+    const { height } = popover.getBoundingClientRect();
+    // Prefer the right of the field, then the left, then below it on narrow screens.
+    let left = rect.left;
+    let top = rect.bottom + 8;
+    if (window.innerWidth - rect.right - 18 >= width) {
+      left = rect.right + 10;
+      top = rect.top - 20;
+    } else if (rect.left - 18 >= width) {
+      left = rect.left - width - 10;
+      top = rect.top - 20;
+    }
+    left = clamp(left, 8, window.innerWidth - width - 8);
+    top = clamp(top, 8, Math.max(8, window.innerHeight - height - 8));
+    popover.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
+  }
+
+  function hideCustomsPopover() {
+    dom.customsPopover.hidden = true;
+    document.querySelectorAll('[data-customs-pin]').forEach((pin) => pin.setAttribute('aria-expanded', 'false'));
+  }
+
+  /* ---------- Route map ---------- */
+
+  function setFlowMode(mode) {
+    state.flowMode = mode === 'map' ? 'map' : 'route';
+    document.querySelectorAll('[data-flow-mode]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.flowMode === state.flowMode)));
+    dom.flowMap.classList.toggle('hidden', state.flowMode !== 'map');
+    dom.flowOverview.querySelector('.flow-scroll').classList.toggle('hidden', state.flowMode === 'map');
+    if (state.flowMode === 'map') renderMaps();
+  }
+
+  async function ensureMapData() {
+    if (state.map.features || state.map.loading) return;
+    if (!window.topojson) {
+      state.map.error = 'The map library could not be loaded. Check the internet connection and reload.';
+      return;
+    }
+    state.map.loading = true;
+    try {
+      const response = await fetch(MAP_DATA_URL);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const topology = await response.json();
+      const collection = window.topojson.feature(topology, topology.objects.countries);
+      state.map.names = new Map();
+      state.map.features = collection.features.map((feature) => {
+        const id = String(feature.id ?? '').padStart(3, '0');
+        const rings = feature.geometry?.type === 'Polygon' ? feature.geometry.coordinates
+          : feature.geometry?.type === 'MultiPolygon' ? feature.geometry.coordinates.flat() : [];
+        let lonMin = Infinity; let lonMax = -Infinity; let latMin = Infinity; let latMax = -Infinity;
+        rings.forEach((ring) => ring.forEach(([lon, lat]) => {
+          lonMin = Math.min(lonMin, lon); lonMax = Math.max(lonMax, lon);
+          latMin = Math.min(latMin, lat); latMax = Math.max(latMax, lat);
+        }));
+        const name = feature.properties?.name || id;
+        state.map.names.set(id, name);
+        return { id, name, rings, bbox: [lonMin, latMin, lonMax, latMax] };
+      }).filter((feature) => feature.rings.length && feature.bbox[3] > -60);
+      state.map.error = null;
+    } catch (error) {
+      console.warn('Map data could not be loaded.', error);
+      state.map.error = 'The map outline could not be downloaded. Routes are still listed on the right.';
+    } finally {
+      state.map.loading = false;
+    }
+    populateOriginSelects();
+    if (state.flowMode === 'map' && state.activeView === VIEW.wire) renderMaps();
+  }
+
+  // Equirectangular projection with a standard parallel at the view's middle latitude.
+  function createProjection(bounds, width, maxHeight) {
+    let [lonMin, latMin, lonMax, latMax] = bounds;
+    const cos = Math.cos(((latMin + latMax) / 2) * Math.PI / 180);
+    const scale = Math.min(width / ((lonMax - lonMin) * cos), maxHeight / (latMax - latMin));
+    const extra = width / (scale * cos) - (lonMax - lonMin);
+    lonMin -= extra / 2;
+    lonMax += extra / 2;
+    const height = Math.round((latMax - latMin) * scale);
+    const project = ([lon, lat]) => [(lon - lonMin) * cos * scale, (latMax - lat) * scale];
+    return { project, width, height, bounds: [lonMin, latMin, lonMax, latMax] };
+  }
+
+  function countryPath(feature, project) {
+    return feature.rings.map((ring) => {
+      let d = '';
+      let previousLon = null;
+      ring.forEach(([lon, lat], index) => {
+        const [x, y] = project([lon, lat]);
+        const jump = previousLon !== null && Math.abs(lon - previousLon) > 180;
+        d += `${index === 0 || jump ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+        previousLon = lon;
+      });
+      return `${d}Z`;
+    }).join('');
+  }
+
+  function countryLayer(projection, highlight = {}) {
+    const [lonMin, latMin, lonMax, latMax] = projection.bounds;
+    return state.map.features
+      .filter(({ bbox }) => bbox[2] >= lonMin - 5 && bbox[0] <= lonMax + 5 && bbox[3] >= latMin - 5 && bbox[1] <= latMax + 5)
+      .map((feature) => {
+        const agreement = originAgreement(feature.id);
+        const classes = ['map-country', agreement];
+        if (feature.id === highlight.supplier) classes.push('supplier');
+        if (feature.id === highlight.compare) classes.push('compare');
+        return `<path class="${classes.join(' ')}" d="${countryPath(feature, projection.project)}" data-country-id="${feature.id}"><title>${escapeMarkup(`${feature.name} · ${AGREEMENT_TEXT[agreement].badge}`)}</title></path>`;
+      }).join('');
+  }
+
+  // A curved "flight path" between two projected points, bowed towards the top of the map.
+  function arcPath([x1, y1], [x2, y2], bow = 0.22) {
+    const mx = (x1 + x2) / 2;
+    const my = (y1 + y2) / 2;
+    const distance = Math.hypot(x2 - x1, y2 - y1);
+    const cx = mx;
+    const cy = my - distance * bow;
+    const at = (t) => {
+      const u = 1 - t;
+      return [u * u * x1 + 2 * u * t * cx + t * t * x2, u * u * y1 + 2 * u * t * cy + t * t * y2];
+    };
+    const angle = (t) => Math.atan2(2 * (1 - t) * (cy - y1) + 2 * t * (y2 - cy), 2 * (1 - t) * (cx - x1) + 2 * t * (x2 - cx)) * 180 / Math.PI;
+    return { d: `M${x1.toFixed(1)},${y1.toFixed(1)} Q${cx.toFixed(1)},${cy.toFixed(1)} ${x2.toFixed(1)},${y2.toFixed(1)}`, at, angle };
+  }
+
+  function mapArrows(arc, positions, className) {
+    return positions.map((t) => {
+      const [x, y] = arc.at(t);
+      return `<path class="${className}" transform="translate(${x.toFixed(1)} ${y.toFixed(1)}) rotate(${arc.angle(t).toFixed(1)})" d="M-5,-4 L5,0 L-5,4 Z"/>`;
+    }).join('');
+  }
+
+  function mapPoint([x, y], target, label, kind, anchor = 'start') {
+    const dx = anchor === 'start' ? 9 : anchor === 'end' ? -9 : 0;
+    const dy = anchor === 'middle' ? -10 : 4;
+    return `<g class="map-point ${kind}" data-map-target="${target}" tabindex="0" role="button" aria-label="${escapeMarkup(label)}"><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="12" class="map-hit-circle"/><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5.5"/><text x="${(x + dx).toFixed(1)}" y="${(y + dy).toFixed(1)}" text-anchor="${anchor}">${escapeMarkup(label)}</text></g>`;
+  }
+
+  function renderMaps() {
+    if (state.flowMode !== 'map') return;
+    ensureMapData();
+    renderWorldMap();
+    renderNorwayMap();
+    renderMapInfo();
+  }
+
+  function renderWorldMap() {
+    const container = dom.mapWorld;
+    if (!state.map.features) {
+      container.innerHTML = `<p class="map-status">${escapeMarkup(state.map.error || 'Loading map outlines…')}</p>`;
+      return;
+    }
+    const supplier = [state.supplier.lon, state.supplier.lat];
+    const compareFeature = state.map.compare ? state.map.features.find((feature) => feature.id === state.map.compare) : null;
+    const compare = compareFeature ? compareFeature.centroid || (compareFeature.centroid = featureCentroid(compareFeature)) : null;
+    const points = [supplier, NORWAY_ARRIVAL, ...(compare ? [compare] : [])];
+    const lons = points.map(([lon]) => lon);
+    const lats = points.map(([, lat]) => lat);
+    let bounds = [Math.min(...lons) - 22, Math.max(-50, Math.min(...lats) - 14), Math.max(...lons) + 18, Math.min(80, Math.max(72, Math.max(...lats) + 8))];
+    if (bounds[2] - bounds[0] < 70) {
+      const middle = (bounds[0] + bounds[2]) / 2;
+      bounds = [middle - 35, bounds[1], middle + 35, bounds[3]];
+    }
+    const width = Math.max(300, container.clientWidth || 520);
+    const projection = createProjection(bounds, width, 330);
+    const layerKey = `${width}|${bounds.join(',')}|${state.supplier.country}|${state.map.compare}`;
+    if (state.map.worldKey !== layerKey) {
+      state.map.worldKey = layerKey;
+      state.map.worldLayer = countryLayer(projection, { supplier: state.supplier.country, compare: state.map.compare });
+    }
+    const from = projection.project(supplier);
+    const to = projection.project(NORWAY_ARRIVAL);
+    const route = arcPath(from, to);
+    const parts = [
+      `<rect class="map-sea" width="${width}" height="${projection.height}"/>`,
+      `<g class="map-countries">${state.map.worldLayer}</g>`,
+    ];
+    if (compare) {
+      const compareArc = arcPath(projection.project(compare), to, 0.16);
+      parts.push(`<path class="map-route-hit" d="${compareArc.d}" data-map-target="compare"/><path class="map-route compare" d="${compareArc.d}"/>${mapArrows(compareArc, [0.5], 'map-arrow compare')}`);
+      parts.push(mapPoint(projection.project(compare), 'compare', originName(state.map.compare), 'compare', 'middle'));
+    }
+    parts.push(`<path class="map-route-hit" d="${route.d}" data-map-target="route" tabindex="0" role="button" aria-label="Freight and tolls from ${escapeMarkup(originName())} to Norway"/><path class="map-route" d="${route.d}"/>${mapArrows(route, [0.3, 0.55, 0.8], 'map-arrow')}`);
+    const [labelX, labelY] = route.at(0.5);
+    parts.push(`<text class="map-route-label" x="${labelX.toFixed(1)}" y="${(labelY - 9).toFixed(1)}" text-anchor="middle">Freight &amp; tolls</text>`);
+    parts.push(mapPoint(from, 'supplier', state.supplier.name || originName(), 'supplier', from[0] > width * 0.7 ? 'end' : 'start'));
+    parts.push(mapPoint(to, 'customs', 'Norway customs', 'customs', 'end'));
+    container.innerHTML = `<svg width="${width}" height="${projection.height}" viewBox="0 0 ${width} ${projection.height}" role="img" aria-label="Map of the supply route from ${escapeMarkup(originName())} to Norway">${parts.join('')}</svg>
+      <div class="map-legend"><span><i class="eu"></i>EU / EEA</span><span><i class="efta"></i>EFTA</span><span><i class="usa"></i>USA · no broad FTA</span><span><i class="other"></i>Other</span><span><i class="norway"></i>Norway</span></div>`;
+  }
+
+  function featureCentroid(feature) {
+    const largest = feature.rings.reduce((best, ring) => (ring.length > best.length ? ring : best), []);
+    const sum = largest.reduce(([sx, sy], [lon, lat]) => [sx + lon, sy + lat], [0, 0]);
+    return [sum[0] / largest.length, sum[1] / largest.length];
+  }
+
+  function renderNorwayMap() {
+    const container = dom.mapNorway;
+    if (!state.map.features) {
+      container.innerHTML = '';
+      return;
+    }
+    const width = Math.max(220, container.clientWidth || 260);
+    const projection = createProjection([2.5, 57.6, 32, 71.4], width, 330);
+    const key = `${width}`;
+    if (state.map.norwayKey !== key) {
+      state.map.norwayKey = key;
+      state.map.norwayLayer = countryLayer(projection);
+    }
+    const arrival = projection.project(NORWAY_ARRIVAL);
+    const warehouse = projection.project(NORWAY_WAREHOUSE);
+    const parts = [`<rect class="map-sea" width="${width}" height="${projection.height}"/>`, `<g class="map-countries">${state.map.norwayLayer}</g>`];
+    const inbound = arcPath([4, projection.height - 6], arrival, 0.1);
+    parts.push(`<path class="map-route-hit" d="${inbound.d}" data-map-target="route"/><path class="map-route" d="${inbound.d}"/>${mapArrows(inbound, [0.55], 'map-arrow')}`);
+    NORWAY_CUSTOMERS.forEach(([name, lat, lon]) => {
+      const point = projection.project([lon, lat]);
+      const arc = arcPath(warehouse, point, 0.12);
+      parts.push(`<path class="map-route-hit" d="${arc.d}" data-map-target="delivery"/><path class="map-route delivery" d="${arc.d}"/>${mapArrows(arc, [0.92], 'map-arrow delivery')}`);
+      parts.push(`<g class="map-city"><circle cx="${point[0].toFixed(1)}" cy="${point[1].toFixed(1)}" r="3"/><text x="${(point[0] - 6).toFixed(1)}" y="${(point[1] + 3.5).toFixed(1)}" text-anchor="end">${escapeMarkup(name)}</text></g>`);
+    });
+    const receive = arcPath(arrival, warehouse, 0.35);
+    parts.push(`<path class="map-route-hit" d="${receive.d}" data-map-target="warehouse"/><path class="map-route receive" d="${receive.d}"/>`);
+    parts.push(mapPoint(arrival, 'customs', 'Customs', 'customs', 'start'));
+    parts.push(mapPoint(warehouse, 'warehouse', state.warehouse.site || 'Warehouse', 'warehouse', 'start'));
+    container.innerHTML = `<svg width="${width}" height="${projection.height}" viewBox="0 0 ${width} ${projection.height}" role="img" aria-label="Map of Norway with customs, warehouse and delivery routes">${parts.join('')}</svg>`;
+  }
+
+  function renderMapInfo() {
+    const target = state.map.hover || state.map.pinned || 'overview';
+    const model = calculateProfitability();
+    const items = state.consolidated;
+    const sum = (field) => items.reduce((total, item) => total + (item[field] ?? 0), 0);
+    const nodes = [];
+    const heading = (eyebrow, title) => {
+      const p = document.createElement('p');
+      p.className = 'eyebrow';
+      p.textContent = eyebrow;
+      const h = document.createElement('h4');
+      h.textContent = title;
+      nodes.push(p, h);
+    };
+    const stats = (pairs) => {
+      const dl = document.createElement('dl');
+      dl.className = 'stat-list';
+      setStats(dl, pairs);
+      nodes.push(dl);
+    };
+    const note = (text) => {
+      const p = document.createElement('p');
+      p.className = 'fine-print';
+      p.textContent = text;
+      nodes.push(p);
+    };
+    const guide = (countryId) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'customs-guide';
+      wrap.append(buildCustomsGuide(countryId, { compact: true }));
+      nodes.push(wrap);
+    };
+
+    if (target === 'supplier') {
+      heading('Manufacturer', state.supplier.name);
+      stats([['Location', `${state.supplier.location} · ${originName()}`], ['Discount', formatPercent(state.config.discount)], ['List value', formatWhole(sum('convertedTotal'))], ['Purchase after discount', formatWhole(sum('discountedTotal'))]]);
+    } else if (target === 'route') {
+      heading('Freight & tolls', `${originName()} → Norway`);
+      stats([
+        ['Consolidated shipment', formatWhole(sum('consolidatedFreight'))],
+        ['Kit freight', formatWhole(sum('kitFreight'))],
+        ['Customs duty', `${formatPercent(state.freight.dutyRate)} · ${formatWhole(items.reduce((total, item) => total + (item.duty ?? 0), 0))}`],
+        ['Insurance & clearance', formatWhole(items.reduce((total, item) => total + (item.insurance ?? 0) + (item.clearance ?? 0), 0))],
+        ['Freight & import total', formatWhole(sum('freightAndImport'))],
+      ]);
+      guide(state.supplier.country);
+    } else if (target === 'compare' && state.map.compare) {
+      heading('Comparison line', `${originName(state.map.compare)} → Norway`);
+      guide(state.map.compare);
+      const actions = document.createElement('div');
+      actions.className = 'map-actions';
+      const use = document.createElement('button');
+      use.type = 'button';
+      use.className = 'button small primary';
+      use.dataset.mapUseOrigin = state.map.compare;
+      use.textContent = `Use ${originName(state.map.compare)} as supplier country`;
+      const clear = document.createElement('button');
+      clear.type = 'button';
+      clear.className = 'button small ghost';
+      clear.dataset.mapClearCompare = 'true';
+      clear.textContent = 'Remove line';
+      actions.append(use, clear);
+      nodes.push(actions);
+    } else if (target === 'customs') {
+      heading('Norway customs', 'Import clearance');
+      stats([['Landed value', formatWhole(sum('landedCost'))], ['Import VAT on this order', formatWhole(sum('importVat'))], ['Duty', formatWhole(items.reduce((total, item) => total + (item.duty ?? 0), 0))]]);
+      guide(state.supplier.country);
+    } else if (target === 'warehouse') {
+      heading('Warehouse', state.warehouse.site || 'Warehouse');
+      stats([
+        ['Locations', `${model.warehouse.shelfLocations} shelf · ${model.warehouse.drawerLocations} drawer · ${model.warehouse.pallets} pallet`],
+        ['Per month', `${formatNok(model.warehouse.monthlyNok)} · ${formatWhole(model.warehouse.monthlyTotal)}`],
+        ['Storage / unit / month', formatWhole(model.perUnit.storagePerUnitMonth)],
+      ]);
+    } else if (target === 'delivery') {
+      heading('Delivery', 'Warehouse → customers in Norway');
+      stats([
+        ['Parcel ≤35 kg (business)', formatNok(state.warehouse.rates.parcel)],
+        ['Private recipient surcharge', formatNok(state.warehouse.rates.privateSurcharge)],
+        ['Shipment / unit sold', formatWhole(model.perUnit.outboundPerUnit)],
+        ['Outtake / unit sold', formatWhole(model.perUnit.outtakePerUnit)],
+        ['Expected sales / yr', `${formatNumber(model.salesUnits, 0)} units · ${formatWhole(model.revenue)}`],
+      ]);
+      note(state.sales.customerPaysOutbound ? 'Outbound freight is recharged to the customer.' : 'Outbound freight is counted as a cost in the dashboard.');
+    } else if (typeof target === 'string' && target.startsWith('country:')) {
+      const id = target.slice(8);
+      heading('Country', originName(id));
+      note(`${AGREEMENT_TEXT[originAgreement(id)].badge}. Click to draw a comparison line to Norway.`);
+    } else {
+      heading('Route overview', `${originName()} → Norway`);
+      stats([
+        ['Purchase after discount', formatWhole(sum('discountedTotal'))],
+        ['Freight & import', formatWhole(sum('freightAndImport'))],
+        ['Landed in Norway', formatWhole(sum('landedCost'))],
+        ['Warehouse / month', formatWhole(model.warehouse.monthlyTotal)],
+        ['Net profit / yr', formatWhole(model.net)],
+      ]);
+      note('Hover a wire or point for details; click one to keep it here. Click any country to compare its customs rules.');
+    }
+    if (state.map.pinned && !state.map.hover) {
+      const unpin = document.createElement('button');
+      unpin.type = 'button';
+      unpin.className = 'link-button';
+      unpin.dataset.mapUnpin = 'true';
+      unpin.textContent = 'Back to overview';
+      nodes.push(unpin);
+    }
+    dom.mapInfo.replaceChildren(...nodes);
+  }
+
+  function bindMapEvents() {
+    const targetOf = (event) => {
+      const element = event.target.closest?.('[data-map-target]');
+      if (element) return element.dataset.mapTarget;
+      const country = event.target.closest?.('[data-country-id]');
+      return country ? `country:${country.dataset.countryId}` : null;
+    };
+    [dom.mapWorld, dom.mapNorway].forEach((container) => {
+      container.addEventListener('mouseover', (event) => {
+        const target = targetOf(event);
+        if (target && target !== state.map.hover) {
+          state.map.hover = target;
+          renderMapInfo();
+        }
+      });
+      container.addEventListener('mouseleave', () => {
+        state.map.hover = null;
+        renderMapInfo();
+      });
+      container.addEventListener('focusin', (event) => {
+        state.map.hover = targetOf(event);
+        renderMapInfo();
+      });
+      container.addEventListener('focusout', () => {
+        state.map.hover = null;
+        renderMapInfo();
+      });
+      container.addEventListener('click', (event) => {
+        const target = targetOf(event);
+        if (!target) return;
+        if (target.startsWith('country:')) {
+          const id = target.slice(8);
+          if (id === '578') return;
+          state.map.compare = id === state.supplier.country ? null : id;
+          state.map.pinned = state.map.compare ? 'compare' : 'route';
+          state.map.hover = null;
+          renderWorldMap();
+        } else {
+          state.map.pinned = target;
+          state.map.hover = null;
+        }
+        renderMapInfo();
+      });
+      container.addEventListener('keydown', (event) => {
+        if ((event.key === 'Enter' || event.key === ' ') && event.target.closest?.('[data-map-target]')) {
+          event.preventDefault();
+          state.map.pinned = event.target.closest('[data-map-target]').dataset.mapTarget;
+          renderMapInfo();
+        }
+      });
+    });
+    dom.mapInfo.addEventListener('click', (event) => {
+      const use = event.target.closest('[data-map-use-origin]');
+      if (use) {
+        const feature = state.map.features?.find((item) => item.id === use.dataset.mapUseOrigin);
+        const [lon, lat] = feature ? feature.centroid || featureCentroid(feature) : [];
+        state.map.compare = null;
+        state.map.pinned = 'route';
+        setSupplierOrigin(use.dataset.mapUseOrigin, { name: feature?.name, lat, lon });
+        showToast(`Supplier country set to ${originName()}. Customs guidance updated.`);
+      }
+      if (event.target.closest('[data-map-clear-compare]')) {
+        state.map.compare = null;
+        state.map.pinned = null;
+        renderWorldMap();
+        renderMapInfo();
+      }
+      if (event.target.closest('[data-map-unpin]')) {
+        state.map.pinned = null;
+        renderMapInfo();
+      }
+    });
+    document.querySelectorAll('[data-flow-mode]').forEach((button) => button.addEventListener('click', () => setFlowMode(button.dataset.flowMode)));
+  }
+
+  function summaryCard(label, value) {
+    const card = document.createElement('article');
+    card.className = 'summary-card';
+    const title = document.createElement('span');
+    title.textContent = label;
+    const number = document.createElement('strong');
+    number.textContent = value;
+    card.append(title, number);
+    return card;
+  }
+
+  async function refreshRates(force) {
+    if (!state.workbook) return;
+    const target = state.config.outputCurrency;
+    const sources = [...new Set(state.consolidated.map((item) => item.currency).filter(Boolean))];
+    const kitCurrencies = state.workbook.SheetNames
+      .filter((name) => state.mappings[name]?.enabled)
+      .map((name) => kitSettings(name).shippingCurrency);
+    const requestedPairs = uniqueBy([
+      ...sources.map((source) => ({ from: source, to: target })),
+      { from: 'USD', to: target },
+      { from: 'NOK', to: target },
+      ...kitCurrencies.map((currency) => ({ from: currency, to: target })),
+      { from: state.freight.consolidatedCurrency, to: target },
+      { from: state.freight.clearanceCurrency, to: target },
+      ...state.liveRateCells.map(({ from, to }) => ({ from, to })),
+    ], (pair) => `${pair.from}/${pair.to}`);
+    if (!requestedPairs.length) {
+      dom.rateStatus.textContent = 'No currencies were found in the enabled parts sheets.';
+      return;
+    }
+
+    dom.refreshRates.disabled = true;
+    dom.rateStatus.textContent = `Loading rates to ${target}…`;
+    const errors = [];
+
+    await Promise.all(requestedPairs.map(async ({ from, to }) => {
+      const pairKey = `${from}/${to}`;
+      if (from === to) {
+        state.pairRates[pairKey] = 1;
+        if (to === target) {
+          state.rates[from] = 1;
+          state.rateDates[from] = new Date().toISOString().slice(0, 10);
+        }
+        return;
+      }
+      const cacheKey = `partslist-rate-${from}-${to}`;
+      const cached = readRateCache(cacheKey);
+      if (!force && cached && Date.now() - cached.savedAt < RATE_CACHE_MS) {
+        state.pairRates[pairKey] = cached.rate;
+        if (to === target) {
+          state.rates[from] = cached.rate;
+          state.rateDates[from] = cached.date;
+        }
+        return;
+      }
+
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        const response = await fetch(`${RATE_SOURCE}/rate/${from.toLowerCase()}/${to.toLowerCase()}`, { signal: controller.signal });
+        clearTimeout(timeout);
+        if (!response.ok) throw new Error(`${pairKey}: HTTP ${response.status}`);
+        const data = await response.json();
+        const rate = toNumber(data.rate);
+        if (rate === null || rate <= 0) throw new Error(`${pairKey}: invalid rate`);
+        const rateDate = data.date || new Date().toISOString().slice(0, 10);
+        state.pairRates[pairKey] = rate;
+        if (to === target) {
+          state.rates[from] = rate;
+          state.rateDates[from] = rateDate;
+        }
+        try {
+          localStorage.setItem(cacheKey, JSON.stringify({ rate, date: rateDate, savedAt: Date.now() }));
+        } catch { /* Cache is optional. */ }
+      } catch (error) {
+        if (cached) {
+          state.pairRates[pairKey] = cached.rate;
+          if (to === target) {
+            state.rates[from] = cached.rate;
+            state.rateDates[from] = cached.date;
+          }
+          errors.push(`${pairKey} (cached)`);
+        } else {
+          delete state.pairRates[pairKey];
+          if (to === target) delete state.rates[from];
+          errors.push(pairKey);
+        }
+      }
+    }));
+
+    dom.refreshRates.disabled = false;
+    applyLiveRatesToEngine();
+    rebuildConsolidation();
+    const dates = [...new Set(Object.values(state.rateDates).filter(Boolean))].sort();
+    dom.rateStatus.textContent = errors.length
+      ? `Some rates could not be refreshed: ${errors.join(', ')}. Missing conversions remain blank.`
+      : `Daily reference rates loaded${dates.length ? ` for ${dates[dates.length - 1]}` : ''}. Source: Frankfurter.`;
+  }
+
+  function applyLiveRatesToEngine() {
+    state.liveRateCells.forEach((cell) => {
+      const original = state.matrices[cell.sheetName]?.[cell.row]?.[cell.col];
+      if (!extractCurrencyPair(original)) return;
+      const rate = state.pairRates[`${cell.from}/${cell.to}`];
+      if (!Number.isFinite(rate)) return;
+      state.hf.setCellContents({ sheet: state.sheetIds[cell.sheetName], row: cell.row, col: cell.col }, [[rate]]);
+    });
+  }
+
+  function readRateCache(key) {
+    try {
+      const value = JSON.parse(localStorage.getItem(key));
+      if (value && Number.isFinite(value.rate) && Number.isFinite(value.savedAt)) return value;
+    } catch { /* Ignore unavailable or invalid cache data. */ }
+    return null;
+  }
+
+  function renderTabs() {
+    dom.tabs.replaceChildren(
+      createTab('Consolidated', VIEW.consolidated),
+      createTab('Dashboard', VIEW.dashboard),
+      createTab('Warehouse', VIEW.warehouse),
+      createTab('Wire view', VIEW.wire),
+      ...state.workbook.SheetNames.map((sheetName) => createTab(sheetName, sheetName)),
+    );
+  }
+
+  function createTab(label, view) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `view-tab${state.activeView === view ? ' active' : ''}${SPECIAL_VIEWS.has(view) ? ' app-tab' : ''}`;
+    button.dataset.view = view;
+    button.textContent = label;
+    button.addEventListener('click', () => showView(view));
+    return button;
+  }
+
+  function showView(view) {
+    state.activeView = view;
+    const isSheet = !SPECIAL_VIEWS.has(view);
+    dom.welcome.classList.add('hidden');
+    dom.consolidatedView.classList.toggle('hidden', view !== VIEW.consolidated);
+    dom.dashboardView.classList.toggle('hidden', view !== VIEW.dashboard);
+    dom.warehouseView.classList.toggle('hidden', view !== VIEW.warehouse);
+    dom.wireView.classList.toggle('hidden', view !== VIEW.wire);
+    dom.sheetView.classList.toggle('hidden', !isSheet);
+    [...dom.tabs.children].forEach((tab) => tab.classList.toggle('active', tab.dataset.view === view));
+    hideChartTooltip();
+    if (isSheet) {
+      if (!state.selectedCell || state.selectedCell.sheetName !== view) {
+        state.selectedCell = { sheetName: view, row: 0, col: 0 };
+      }
+      if (state.sheetSelection.sheetName !== view) state.sheetSelection = { sheetName: view, rows: new Set(), anchor: null };
+      renderSheetGrid();
+      updateSelectionUI();
+      renderSelectionBar(dom.sheetActions, sheetSelectionKeys(), 'sheet');
+    } else {
+      refreshViews();
+      if (view === VIEW.consolidated) renderSelectionBar(dom.consolidatedActions, [...state.selectedKeys], 'consolidated');
+    }
+  }
+
+  function renderSheetGrid() {
+    const sheetName = state.activeView;
+    if (SPECIAL_VIEWS.has(sheetName)) return;
+    const matrix = state.matrices[sheetName] || [[]];
+    let dimensions = { height: matrix.length, width: Math.max(1, ...matrix.map((row) => row.length)) };
+    try { dimensions = state.hf.getSheetDimensions(state.sheetIds[sheetName]); } catch { /* Use matrix dimensions. */ }
+    const rows = Math.min(Math.max(dimensions.height, 20), MAX_GRID_ROWS);
+    const cols = Math.min(Math.max(dimensions.width, 12), MAX_GRID_COLS);
+    const selectedRows = state.sheetSelection.sheetName === sheetName ? state.sheetSelection.rows : new Set();
+
+    const table = document.createElement('table');
+    table.className = 'spreadsheet-table';
+    const thead = document.createElement('thead');
+    const headerRow = document.createElement('tr');
+    headerRow.append(document.createElement('th'));
+    for (let col = 0; col < cols; col += 1) {
+      const th = document.createElement('th');
+      th.textContent = columnName(col);
+      headerRow.append(th);
+    }
+    thead.append(headerRow);
+    table.append(thead);
+
+    const tbody = document.createElement('tbody');
+    for (let row = 0; row < rows; row += 1) {
+      const tr = document.createElement('tr');
+      if (selectedRows.has(row)) tr.classList.add('row-selected');
+      const numberCell = document.createElement('td');
+      numberCell.className = 'row-number';
+      numberCell.textContent = String(row + 1);
+      numberCell.tabIndex = 0;
+      numberCell.setAttribute('role', 'button');
+      numberCell.setAttribute('aria-pressed', String(selectedRows.has(row)));
+      numberCell.setAttribute('aria-label', `Select row ${row + 1}`);
+      numberCell.addEventListener('click', (event) => toggleSheetRow(sheetName, row, event));
+      numberCell.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          toggleSheetRow(sheetName, row, { ctrlKey: true, metaKey: false, shiftKey: event.shiftKey });
+        }
+      });
+      tr.append(numberCell);
+      for (let col = 0; col < cols; col += 1) {
+        const td = document.createElement('td');
+        const raw = matrix[row]?.[col] ?? null;
+        const value = readCalculatedValue(sheetName, row, col);
+        td.textContent = displayValue(value);
+        td.title = raw === null ? '' : String(raw);
+        td.dataset.row = String(row);
+        td.dataset.col = String(col);
+        if (typeof raw === 'string' && raw.startsWith('=')) td.classList.add('formula');
+        if (isFormulaError(value)) td.classList.add('error');
+        if (state.selectedCell?.sheetName === sheetName && state.selectedCell.row === row && state.selectedCell.col === col) td.classList.add('selected');
+        td.addEventListener('click', () => selectCell(sheetName, row, col));
+        td.addEventListener('dblclick', () => {
+          selectCell(sheetName, row, col);
+          dom.formulaInput.focus();
+          dom.formulaInput.select();
+        });
+        tr.append(td);
+      }
+      tbody.append(tr);
+    }
+    table.append(tbody);
+    dom.grid.replaceChildren(table);
+  }
+
+  function toggleSheetRow(sheetName, row, event) {
+    const selection = state.sheetSelection.sheetName === sheetName
+      ? state.sheetSelection
+      : (state.sheetSelection = { sheetName, rows: new Set(), anchor: null });
+    if (event.shiftKey && selection.anchor !== null) {
+      const [from, to] = [selection.anchor, row].sort((a, b) => a - b);
+      if (!(event.ctrlKey || event.metaKey)) selection.rows.clear();
+      for (let index = from; index <= to; index += 1) selection.rows.add(index);
+    } else if (event.ctrlKey || event.metaKey) {
+      if (selection.rows.has(row)) selection.rows.delete(row);
+      else selection.rows.add(row);
+      selection.anchor = row;
+    } else {
+      const only = selection.rows.size === 1 && selection.rows.has(row);
+      selection.rows.clear();
+      if (!only) selection.rows.add(row);
+      selection.anchor = row;
+    }
+    dom.grid.querySelectorAll('tbody tr').forEach((tr, index) => {
+      tr.classList.toggle('row-selected', selection.rows.has(index));
+      tr.firstElementChild?.setAttribute('aria-pressed', String(selection.rows.has(index)));
+    });
+    renderSelectionBar(dom.sheetActions, sheetSelectionKeys(), 'sheet');
+  }
+
+  // Part keys for the selected rows of the active kit tab.
+  function sheetSelectionKeys() {
+    const { sheetName, rows } = state.sheetSelection;
+    const mapping = state.mappings[sheetName];
+    if (!sheetName || !mapping || mapping.part === null || !rows.size) return [];
+    const keys = [];
+    [...rows].sort((a, b) => a - b).forEach((row) => {
+      if (row < mapping.dataStartRow) return;
+      const part = readCalculatedValue(sheetName, row, mapping.part);
+      const key = part === null || part === undefined ? '' : normalizePart(String(part).trim());
+      if (key && !/^(?:total(?:s)?|effective\b|confidential\b)/i.test(key)) keys.push(key);
+    });
+    return [...new Set(keys)];
+  }
+
+  function selectCell(sheetName, row, col) {
+    state.selectedCell = { sheetName, row, col };
+    dom.grid.querySelectorAll('td.selected').forEach((cell) => cell.classList.remove('selected'));
+    const cell = dom.grid.querySelector(`td[data-row="${row}"][data-col="${col}"]`);
+    if (cell) cell.classList.add('selected');
+    updateSelectionUI();
+  }
+
+  function updateSelectionUI() {
+    if (!state.selectedCell) return;
+    const { sheetName, row, col } = state.selectedCell;
+    const address = XLSX.utils.encode_cell({ r: row, c: col });
+    const raw = state.matrices[sheetName]?.[row]?.[col] ?? '';
+    dom.selectedAddress.textContent = address;
+    dom.formulaInput.value = raw === null ? '' : String(raw).replace(/^'(?==)/, '');
+    dom.targetRange.value = `${address}:${address}`;
+    if (typeof raw === 'string' && raw.startsWith('=')) dom.rangeFormula.value = raw;
+    renderDependencies(sheetName, row, col);
+  }
+
+  function saveSelectedCell() {
+    if (!state.selectedCell) return;
+    const raw = parseUserInput(dom.formulaInput.value);
+    const { sheetName, row, col } = state.selectedCell;
+    try {
+      setEngineBlock(sheetName, row, col, [[raw]]);
+      afterWorkbookEdit(sheetName);
+      showToast(`Updated ${sheetName}!${XLSX.utils.encode_cell({ r: row, c: col })}.`);
+    } catch (error) {
+      showToast(error.message || 'The cell could not be updated.', true);
+    }
+  }
+
+  function applyToRange(clear) {
+    if (!state.activeView || SPECIAL_VIEWS.has(state.activeView)) return;
+    try {
+      const range = parseRange(dom.targetRange.value);
+      const cellCount = (range.e.r - range.s.r + 1) * (range.e.c - range.s.c + 1);
+      if (cellCount > MAX_FILL_CELLS) throw new Error(`The range is too large. The limit is ${MAX_FILL_CELLS.toLocaleString()} cells.`);
+      const seed = clear ? null : parseUserInput(dom.rangeFormula.value);
+      const block = [];
+      for (let row = range.s.r; row <= range.e.r; row += 1) {
+        const values = [];
+        for (let col = range.s.c; col <= range.e.c; col += 1) {
+          values.push(typeof seed === 'string' && seed.startsWith('=')
+            ? shiftFormula(seed, row - range.s.r, col - range.s.c)
+            : seed);
+        }
+        block.push(values);
+      }
+      setEngineBlock(state.activeView, range.s.r, range.s.c, block);
+      state.selectedCell = { sheetName: state.activeView, row: range.s.r, col: range.s.c };
+      afterWorkbookEdit(state.activeView);
+      showToast(clear ? 'Range cleared.' : `Formula applied to ${cellCount.toLocaleString()} cells.`);
+    } catch (error) {
+      showToast(error.message || 'The range could not be updated.', true);
+    }
+  }
+
+  function parseRange(value) {
+    const cleaned = String(value).trim().replace(/\$/g, '').toUpperCase();
+    if (!/^[A-Z]{1,3}[1-9]\d*(?::[A-Z]{1,3}[1-9]\d*)?$/.test(cleaned)) throw new Error('Use an A1 range such as G2:G20 or B2:F12.');
+    return XLSX.utils.decode_range(cleaned);
+  }
+
+  function shiftFormula(formula, rowOffset, colOffset) {
+    const referencePattern = /((?:'[^']*(?:''[^']*)*'|[A-Za-z_][\w.]*)!)?(\$?)([A-Z]{1,3})(\$?)(\d+)/g;
+    return formula.replace(referencePattern, (match, sheet, fixedCol, letters, fixedRow, rowText) => {
+      const originalCol = XLSX.utils.decode_col(letters);
+      const originalRow = Number(rowText) - 1;
+      const nextCol = fixedCol ? originalCol : originalCol + colOffset;
+      const nextRow = fixedRow ? originalRow : originalRow + rowOffset;
+      if (nextCol < 0 || nextRow < 0) return '#REF!';
+      return `${sheet || ''}${fixedCol || ''}${columnName(nextCol)}${fixedRow || ''}${nextRow + 1}`;
+    });
+  }
+
+  function setEngineBlock(sheetName, startRow, startCol, block) {
+    const sheetId = state.sheetIds[sheetName];
+    state.hf.setCellContents({ sheet: sheetId, row: startRow, col: startCol }, block);
+    const matrix = state.matrices[sheetName];
+    block.forEach((values, rowOffset) => {
+      const row = startRow + rowOffset;
+      if (!matrix[row]) matrix[row] = [];
+      values.forEach((value, colOffset) => {
+        const col = startCol + colOffset;
+        matrix[row][col] = value;
+        updateWorksheetCell(sheetName, row, col, value);
+      });
+    });
+  }
+
+  function updateWorksheetCell(sheetName, row, col, value) {
+    const worksheet = state.workbook.Sheets[sheetName];
+    const address = XLSX.utils.encode_cell({ r: row, c: col });
+    const previous = worksheet[address] || {};
+    const preserved = {};
+    ['s', 'z', 'l', 'c'].forEach((key) => { if (previous[key] !== undefined) preserved[key] = previous[key]; });
+
+    if (value === null || value === '') {
+      delete worksheet[address];
+    } else if (typeof value === 'string' && value.startsWith('=')) {
+      worksheet[address] = { ...preserved, t: 'n', f: value.slice(1) };
+    } else if (value instanceof Date) {
+      worksheet[address] = { ...preserved, t: 'd', v: value };
+    } else if (typeof value === 'number') {
+      worksheet[address] = { ...preserved, t: 'n', v: value };
+    } else if (typeof value === 'boolean') {
+      worksheet[address] = { ...preserved, t: 'b', v: value };
+    } else {
+      worksheet[address] = { ...preserved, t: 's', v: String(value).replace(/^'(?==)/, '') };
+    }
+
+    const current = worksheet['!ref'] ? XLSX.utils.decode_range(worksheet['!ref']) : { s: { r: row, c: col }, e: { r: row, c: col } };
+    current.s.r = Math.min(current.s.r, row);
+    current.s.c = Math.min(current.s.c, col);
+    current.e.r = Math.max(current.e.r, row);
+    current.e.c = Math.max(current.e.c, col);
+    worksheet['!ref'] = XLSX.utils.encode_range(current);
+  }
+
+  function afterWorkbookEdit(sheetName) {
+    rebuildDependencyIndex();
+    rebuildConsolidation();
+    if (state.activeView === sheetName) {
+      renderSheetGrid();
+      updateSelectionUI();
+    }
+  }
+
+  function importNamedExpressions(workbook) {
+    const names = workbook.Workbook?.Names || [];
+    names.forEach((entry) => {
+      if (!entry.Name || !entry.Ref || entry.Name.startsWith('_xlnm.')) return;
+      const expression = String(entry.Ref).startsWith('=') ? String(entry.Ref) : `=${entry.Ref}`;
+      try {
+        state.hf.addNamedExpression(entry.Name, expression);
+        state.variables.push({ name: entry.Name, expression });
+      } catch (error) {
+        console.warn(`Named expression ${entry.Name} was not imported:`, error);
+      }
+    });
+  }
+
+  function addVariable(event) {
+    event.preventDefault();
+    const name = dom.variableName.value.trim();
+    const expressionText = dom.variableExpression.value.trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(name)) {
+      showToast('Variable names must start with a letter or underscore and contain no spaces.', true);
+      return;
+    }
+    if (!expressionText) {
+      showToast('Enter a value or formula for the variable.', true);
+      return;
+    }
+    try {
+      const expression = parseUserInput(expressionText);
+      state.hf.addNamedExpression(name, expression);
+      state.variables.push({ name, expression: expressionText });
+      dom.variableForm.reset();
+      renderVariables();
+      renderSheetGrid();
+      rebuildConsolidation();
+    } catch (error) {
+      showToast(error.message || 'The variable could not be added.', true);
+    }
+  }
+
+  function renderVariables() {
+    dom.variablesList.replaceChildren();
+    if (!state.variables.length) {
+      const note = document.createElement('p');
+      note.className = 'fine-print';
+      note.textContent = 'No workbook variables are defined.';
+      dom.variablesList.append(note);
+      return;
+    }
+    state.variables.forEach((variable) => {
+      const row = document.createElement('div');
+      row.className = 'variable-row';
+      const label = document.createElement('span');
+      label.textContent = `${variable.name} = ${variable.expression}`;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'icon-button';
+      remove.textContent = '×';
+      remove.title = `Remove ${variable.name}`;
+      remove.addEventListener('click', () => removeVariable(variable.name));
+      row.append(label, remove);
+      dom.variablesList.append(row);
+    });
+  }
+
+  function removeVariable(name) {
+    try {
+      state.hf.removeNamedExpression(name);
+      state.variables = state.variables.filter((variable) => variable.name !== name);
+      renderVariables();
+      renderSheetGrid();
+      rebuildConsolidation();
+    } catch (error) {
+      showToast(error.message || `Could not remove ${name}.`, true);
+    }
+  }
+
+  function rebuildDependencyIndex() {
+    const index = new Map();
+    Object.entries(state.matrices).forEach(([sheetName, matrix]) => {
+      matrix.forEach((row, rowIndex) => {
+        (row || []).forEach((raw, colIndex) => {
+          if (typeof raw !== 'string' || !raw.startsWith('=')) return;
+          const dependent = `${sheetName}!${XLSX.utils.encode_cell({ r: rowIndex, c: colIndex })}`;
+          extractFormulaReferences(raw, sheetName).forEach((reference) => {
+            if (!index.has(reference.key)) index.set(reference.key, new Set());
+            index.get(reference.key).add(dependent);
+          });
+        });
+      });
+    });
+    state.dependencyIndex = index;
+  }
+
+  function extractFormulaReferences(formula, currentSheet) {
+    const references = [];
+    const pattern = /(?:(?:'((?:[^']|'')+)'|([A-Za-z_][\w.]*))!)?(\$?[A-Z]{1,3}\$?\d+)(?::(\$?[A-Z]{1,3}\$?\d+))?/g;
+    let match;
+    while ((match = pattern.exec(formula)) !== null) {
+      const sheetName = (match[1] ? match[1].replace(/''/g, "'") : match[2]) || currentSheet;
+      if (!(sheetName in state.matrices)) continue;
+      const start = XLSX.utils.decode_cell(match[3].replace(/\$/g, ''));
+      const end = match[4] ? XLSX.utils.decode_cell(match[4].replace(/\$/g, '')) : start;
+      const size = (end.r - start.r + 1) * (end.c - start.c + 1);
+      if (size > 2000 || end.r < start.r || end.c < start.c) continue;
+      for (let row = start.r; row <= end.r; row += 1) {
+        for (let col = start.c; col <= end.c; col += 1) {
+          const address = XLSX.utils.encode_cell({ r: row, c: col });
+          references.push({ sheetName, row, col, address, key: `${sheetName}!${address}` });
+        }
+      }
+    }
+    return uniqueBy(references, (reference) => reference.key);
+  }
+
+  function renderDependencies(sheetName, row, col) {
+    const address = XLSX.utils.encode_cell({ r: row, c: col });
+    const raw = state.matrices[sheetName]?.[row]?.[col] ?? null;
+    const key = `${sheetName}!${address}`;
+    const precedents = typeof raw === 'string' && raw.startsWith('=') ? extractFormulaReferences(raw, sheetName) : [];
+    const dependents = [...(state.dependencyIndex.get(key) || [])];
+
+    dom.dependencyPanel.replaceChildren();
+    const eyebrow = document.createElement('p');
+    eyebrow.className = 'eyebrow';
+    eyebrow.textContent = 'Cell links';
+    const title = document.createElement('h3');
+    title.textContent = key;
+    dom.dependencyPanel.append(eyebrow, title);
+
+    if (typeof raw === 'string' && raw.startsWith('=')) {
+      const formula = document.createElement('p');
+      formula.className = 'dependency-formula';
+      formula.textContent = raw;
+      dom.dependencyPanel.append(formula);
+    }
+
+    dom.dependencyPanel.append(dependencySection('Uses', precedents.map((item) => item.key)));
+    dom.dependencyPanel.append(dependencySection('Used by', dependents));
+  }
+
+  function dependencySection(label, keys) {
+    const section = document.createElement('section');
+    const heading = document.createElement('h3');
+    heading.textContent = label;
+    section.append(heading);
+    if (!keys.length) {
+      const empty = document.createElement('p');
+      empty.className = 'muted';
+      empty.textContent = 'None detected.';
+      section.append(empty);
+      return section;
+    }
+    const list = document.createElement('div');
+    list.className = 'dependency-list';
+    keys.slice(0, 100).forEach((key) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'dependency-link';
+      button.textContent = key;
+      button.addEventListener('click', () => jumpToCell(key));
+      list.append(button);
+    });
+    section.append(list);
+    return section;
+  }
+
+  function jumpToCell(key) {
+    const divider = key.lastIndexOf('!');
+    const sheetName = key.slice(0, divider);
+    const address = key.slice(divider + 1);
+    const point = XLSX.utils.decode_cell(address);
+    showView(sheetName);
+    state.selectedCell = { sheetName, row: point.r, col: point.c };
+    renderSheetGrid();
+    updateSelectionUI();
+    const cell = dom.grid.querySelector(`td[data-row="${point.r}"][data-col="${point.c}"]`);
+    cell?.scrollIntoView({ block: 'center', inline: 'center' });
+  }
+
+  async function exportSecureProject() {
+    if (!state.workbook) {
+      showToast('Import a workbook before exporting a secure project.', true);
+      return;
+    }
+    const password = dom.securePassword.value;
+    if (password.length < 10) {
+      showToast('Use a password with at least 10 characters.', true);
+      return;
+    }
+    if (password !== dom.securePasswordConfirm.value) {
+      showToast('The secure project passwords do not match.', true);
+      return;
+    }
+    if (!window.crypto?.subtle) {
+      showToast('Secure project encryption is not available in this browser.', true);
+      return;
+    }
+
+    dom.secureExport.disabled = true;
+    setStatus('Encrypting the secure project…', 'busy');
+    try {
+      const payload = {
+        version: 1,
+        createdAt: new Date().toISOString(),
+        fileName: state.fileName,
+        workbook: XLSX.write(state.workbook, { type: 'base64', bookType: 'xlsx', cellStyles: true, compression: true }),
+        config: state.config,
+        warehouse: state.warehouse,
+        mappings: state.mappings,
+        variables: state.variables,
+        wireRelations: state.wireRelations,
+        settings: collectSettings(),
+      };
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const iterations = 250000;
+      const key = await deriveSecureKey(password, salt, iterations, ['encrypt']);
+      const plaintext = new TextEncoder().encode(JSON.stringify(payload));
+      const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext));
+      const envelope = {
+        format: 'partslist-secure',
+        version: 1,
+        kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations, salt: bytesToBase64(salt) },
+        cipher: { name: 'AES-GCM', iv: bytesToBase64(iv) },
+        data: bytesToBase64(ciphertext),
+      };
+      const base = state.fileName.replace(/\.[^.]+$/, '') || 'partslist';
+      const secureBlob = new Blob([JSON.stringify(envelope)], { type: 'application/json' });
+      prepareSecureDownload(secureBlob, `${base}.partslist`);
+      dom.securePassword.value = '';
+      dom.securePasswordConfirm.value = '';
+      setStatus(`Encrypted project is ready to download for ${state.fileName}.`);
+      showToast('Encrypted project ready. Use the download button.');
+    } catch (error) {
+      console.error(error);
+      setStatus('The secure project could not be encrypted.', 'error');
+      showToast(error.message || 'Secure project export failed.', true);
+    } finally {
+      dom.secureExport.disabled = false;
+    }
+  }
+
+  async function importSecureProject(file) {
+    const password = dom.securePassword.value;
+    if (!password) {
+      showToast('Enter the secure project password first.', true);
+      return;
+    }
+    if (!window.crypto?.subtle) {
+      showToast('Secure project decryption is not available in this browser.', true);
+      return;
+    }
+    setStatus(`Decrypting ${file.name}…`, 'busy');
+    try {
+      const envelope = JSON.parse(await file.text());
+      if (envelope.format !== 'partslist-secure' || envelope.version !== 1) throw new Error('This is not a supported PartsList secure project.');
+      const iterations = Number(envelope.kdf?.iterations);
+      if (envelope.kdf?.name !== 'PBKDF2' || envelope.kdf?.hash !== 'SHA-256' || !Number.isInteger(iterations) || iterations < 100000 || iterations > 1000000) throw new Error('The secure project uses unsupported key settings.');
+      if (envelope.cipher?.name !== 'AES-GCM') throw new Error('The secure project uses an unsupported cipher.');
+      const salt = base64ToBytes(envelope.kdf.salt);
+      const iv = base64ToBytes(envelope.cipher?.iv);
+      const ciphertext = base64ToBytes(envelope.data);
+      if (salt.length !== 16 || iv.length !== 12 || ciphertext.length < 17) throw new Error('The secure project envelope is damaged.');
+      const key = await deriveSecureKey(password, salt, iterations, ['decrypt']);
+      let plaintext;
+      try {
+        plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+      } catch {
+        throw new Error('The password is incorrect or the secure project is damaged.');
+      }
+      const payload = JSON.parse(new TextDecoder().decode(plaintext));
+      if (payload.version !== 1 || typeof payload.workbook !== 'string') throw new Error('The decrypted project data is invalid.');
+      const workbookBytes = base64ToBytes(payload.workbook);
+      const workbookFile = new File([workbookBytes], payload.fileName || 'secure-project.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      await importWorkbook(workbookFile);
+
+      state.config = { ...state.config, ...(payload.config || {}) };
+      state.warehouse = {
+        ...WAREHOUSE_DEFAULTS,
+        ...(payload.warehouse || {}),
+        rates: { ...WAREHOUSE_RATE_DEFAULTS, ...(payload.warehouse?.rates || {}) },
+      };
+      state.warehouse.unitsPerShelf = state.warehouse.binsPerShelf * state.warehouse.unitsPerBin;
+      state.wireRelations = Array.isArray(payload.wireRelations) ? payload.wireRelations.filter(isValidWireRelation) : [];
+      if (payload.settings) applySettings(payload.settings);
+      state.pendingDisabledKits = null;
+      if (payload.mappings && typeof payload.mappings === 'object') {
+        state.workbook.SheetNames.forEach((sheetName) => {
+          if (payload.mappings[sheetName]) state.mappings[sheetName] = { ...state.mappings[sheetName], ...payload.mappings[sheetName] };
+        });
+      }
+      restoreVariables(payload.variables);
+      syncControlsFromState();
+      persistWarehouseRates();
+      saveSettingsSoon();
+      renderMappings();
+      renderVariables();
+      renderGroups();
+      rebuildConsolidation();
+      renderTabs();
+      showView(VIEW.consolidated);
+      dom.securePassword.value = '';
+      dom.securePasswordConfirm.value = '';
+      setStatus(`Secure project unlocked: ${state.fileName}.`);
+      showToast('Secure project imported and unlocked.');
+      await refreshRates(false);
+    } catch (error) {
+      console.error(error);
+      setStatus(`Could not open ${file.name}: ${error.message}`, 'error');
+      showToast(error.message || 'Secure project import failed.', true);
+    }
+  }
+
+  function syncControlsFromState(active = null) {
+    dom.sourceCurrency.value = state.config.sourceCurrency;
+    dom.outputCurrency.value = state.config.outputCurrency;
+    const bindings = [
+      [dom.whShelfShare, 'shelfShare'], [dom.whDrawerShare, 'drawerShare'],
+      [dom.whBinsPerShelf, 'binsPerShelf'], [dom.whShelvesPerRack, 'shelvesPerRack'],
+      [dom.whUnitsPerBin, 'unitsPerBin'], [dom.whUnitsShelf, 'unitsPerShelf'],
+      [dom.whUnitsDrawer, 'unitsPerDrawer'], [dom.whUnitsPallet, 'unitsPerPallet'],
+      [dom.whReceipts, 'receipts'], [dom.whReceiptLines, 'receiptLines'],
+      [dom.whOrders, 'orders'], [dom.whOrderLines, 'orderLines'],
+      [dom.whEdiLabels, 'ediLabels'], [dom.whBusinessParcels, 'businessParcels'],
+      [dom.whPrivateParcels, 'privateParcels'], [dom.whPackaging, 'packaging'],
+    ];
+    bindings.forEach(([input, key]) => { if (input !== active) input.value = String(state.warehouse[key]); });
+    dom.whPalletType.value = state.warehouse.palletType;
+    dom.whPalletHeight.value = state.warehouse.palletHeight;
+    dom.whWms.checked = Boolean(state.warehouse.includeWms);
+    dom.warehouseRateInputs.querySelectorAll('[data-warehouse-rate]').forEach((input) => {
+      if (input !== active) input.value = String(state.warehouse.rates[input.dataset.warehouseRate] ?? 0);
+    });
+  }
+
+  function restoreVariables(variables) {
+    if (!Array.isArray(variables)) return;
+    const existing = new Set(state.variables.map((variable) => variable.name.toUpperCase()));
+    variables.forEach((variable) => {
+      if (!variable || !/^[A-Za-z_][A-Za-z0-9_.]*$/.test(variable.name) || existing.has(variable.name.toUpperCase())) return;
+      try {
+        state.hf.addNamedExpression(variable.name, parseUserInput(variable.expression));
+        state.variables.push({ name: variable.name, expression: String(variable.expression) });
+        existing.add(variable.name.toUpperCase());
+      } catch { /* Invalid or unsupported stored named expressions are ignored. */ }
+    });
+  }
+
+  function isValidWireRelation(edge) {
+    return edge && typeof edge.id === 'string' && typeof edge.from === 'string' && typeof edge.to === 'string' && typeof edge.label === 'string';
+  }
+
+  async function deriveSecureKey(password, salt, iterations, usages) {
+    const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, material, { name: 'AES-GCM', length: 256 }, false, usages);
+  }
+
+  function bytesToBase64(bytes) {
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+    return btoa(binary);
+  }
+
+  function base64ToBytes(value) {
+    const binary = atob(String(value || ''));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  }
+
+  function prepareSecureDownload(blob, fileName) {
+    if (state.secureDownloadUrl) URL.revokeObjectURL(state.secureDownloadUrl);
+    state.secureDownloadUrl = URL.createObjectURL(blob);
+    dom.secureDownload.href = state.secureDownloadUrl;
+    dom.secureDownload.download = fileName;
+    dom.secureDownload.classList.remove('hidden');
+  }
+
+  function exportWorkbook() {
+    if (!state.workbook || !state.consolidated.length) {
+      showToast('There are no consolidated parts to export.', true);
+      return;
+    }
+    try {
+      // Sheets generated by an earlier export are rebuilt, not copied, so names stay stable across round trips.
+      const sourceNames = state.workbook.SheetNames.filter((name) => !isGeneratedSheet(state.workbook.Sheets[name]));
+      const usedNames = new Set(sourceNames);
+      const claim = (base) => {
+        const name = uniqueSheetName(base, usedNames);
+        usedNames.add(name);
+        return name;
+      };
+      const consolidatedName = claim('Consolidated');
+      const profitabilityName = claim('Profitability');
+      const warehousingName = claim('Warehousing');
+      const assumptionsName = claim('Assumptions');
+      const settingsName = claim('PartsList settings');
+      const output = XLSX.utils.book_new();
+      const consolidated = buildConsolidatedSheet(assumptionsName);
+      XLSX.utils.book_append_sheet(output, consolidated.sheet, consolidatedName);
+      XLSX.utils.book_append_sheet(output, buildProfitabilitySheet(consolidatedName, assumptionsName, consolidated.layout), profitabilityName);
+      XLSX.utils.book_append_sheet(output, buildWarehousingSheet(), warehousingName);
+      XLSX.utils.book_append_sheet(output, buildAssumptionsSheet(), assumptionsName);
+      sourceNames.forEach((sheetName) => {
+        XLSX.utils.book_append_sheet(output, state.workbook.Sheets[sheetName], sheetName);
+      });
+      XLSX.utils.book_append_sheet(output, buildSettingsSheet(), settingsName);
+      output.Workbook = output.Workbook || {};
+      output.Workbook.Sheets = output.SheetNames.map((name) => ({ name, Hidden: name === settingsName ? 1 : 0 }));
+      output.Workbook.CalcPr = { calcMode: 'auto', fullCalcOnLoad: '1', forceFullCalc: '1' };
+      if (state.workbook.Workbook?.Names) output.Workbook.Names = state.workbook.Workbook.Names;
+      if (state.workbook.Props) output.Props = { ...state.workbook.Props };
+      if (state.workbook.Custprops) output.Custprops = { ...state.workbook.Custprops };
+      const base = state.fileName.replace(/\.[^.]+$/, '').replace(/-consolidated$/i, '') || 'partslist';
+      XLSX.writeFile(output, `${base}-consolidated.xlsx`, { bookType: 'xlsx', cellStyles: true, compression: true });
+      showToast('Consolidated workbook exported with profitability, warehouse and settings sheets.');
+    } catch (error) {
+      console.error(error);
+      showToast(error.message || 'The workbook could not be exported.', true);
+    }
+  }
+
+  function buildAssumptionsSheet() {
+    const output = state.config.outputCurrency;
+    // Rows 2-8 keep their original addresses so older exports still re-import.
+    const rows = [
+      ['Assumption', 'Value'],
+      ['Discount', state.config.discount],
+      ['Price multiplier', state.config.multiplier],
+      ['Freight margin', state.config.shippingMargin],
+      ['Output currency', output],
+      ['USD to output currency', output === 'USD' ? 1 : state.rates.USD ?? null],
+      ['NOK to output currency', output === 'NOK' ? 1 : state.rates.NOK ?? null],
+      ['Exported at', new Date().toISOString()],
+      ['VAT rate', state.config.vatRate],
+      ['Customs duty', state.freight.dutyRate],
+      ['Insurance', state.freight.insuranceRate],
+      [`Consolidated shipment (${output})`, toOutput(state.freight.consolidatedShipment, state.freight.consolidatedCurrency) ?? 0],
+      [`Clearance & broker fees (${output})`, toOutput(state.freight.clearanceFee, state.freight.clearanceCurrency) ?? 0],
+      ['Shipment split basis', { value: 'Purchase value', quantity: 'Quantity', lines: 'Item lines' }[state.freight.allocation]],
+      ['Consolidated shipment as entered', `${state.freight.consolidatedShipment} ${state.freight.consolidatedCurrency}`],
+      ['Clearance fees as entered', `${state.freight.clearanceFee} ${state.freight.clearanceCurrency}`],
+      [],
+      ['Rate source', 'https://frankfurter.dev/'],
+      ['Rate type', 'Daily reference / mid-market rate'],
+      [],
+      ['Source currency', `Rate to ${output}`, 'Rate date'],
+    ];
+    const headerRow = rows.length - 1;
+    const currencies = new Set([
+      ...state.consolidated.map((item) => item.currency),
+      state.freight.consolidatedCurrency,
+      state.freight.clearanceCurrency,
+      ...state.workbook.SheetNames.filter((name) => state.mappings[name]?.enabled).map((name) => kitSettings(name).shippingCurrency),
+    ]);
+    [...currencies].filter(Boolean).sort().forEach((currency) => {
+      rows.push([currency, currency === output ? 1 : state.rates[currency] ?? null, state.rateDates[currency] ?? null]);
+    });
+    const sheet = XLSX.utils.aoa_to_sheet(rows);
+    sheet['!cols'] = [{ wch: 34 }, { wch: 30 }, { wch: 14 }];
+    styleHeader(sheet, 0, 0, 1);
+    styleHeader(sheet, headerRow, 0, 2);
+    ['B2', 'B4', 'B9', 'B10', 'B11'].forEach((address) => { if (sheet[address]) sheet[address].z = '0.0%'; });
+    ['B12', 'B13'].forEach((address) => { if (sheet[address]) sheet[address].z = '#,##0.00'; });
+    return sheet;
+  }
+
+  const CONSOLIDATED_EXPORT_COLUMNS = ['sources', 'part', 'description', 'quantity', 'amountOut', 'amountUsd', 'match', 'group', 'salesPerYear', 'currency', 'unitPrice', 'fx', 'unitOut', 'discount', 'purchase', 'multiplier', 'sales', 'kitFreight', 'consFreight', 'importCosts', 'freightImport', 'margin', 'freightWithMargin', 'lineTotal', 'vat', 'lineTotalVat', 'landed', 'pricingSource'];
+
+  function buildConsolidatedSheet(assumptionsName) {
+    const o = state.config.outputCurrency;
+    const A = quoteSheetName(assumptionsName);
+    const L = Object.fromEntries(CONSOLIDATED_EXPORT_COLUMNS.map((key, index) => [key, XLSX.utils.encode_col(index)]));
+    const lastCol = CONSOLIDATED_EXPORT_COLUMNS.length - 1;
+    const headerLabels = {
+      sources: 'Source Sheets', part: 'Part', description: 'Description', quantity: 'Quantity', amountOut: `Amount in ${o}`, amountUsd: 'Amount in USD',
+      match: 'Match', group: 'Sales Group', salesPerYear: 'Expected Sales / yr', currency: 'Currency', unitPrice: 'Unit Price', fx: `FX to ${o}`,
+      unitOut: `Unit in ${o}`, discount: 'Discount', purchase: `Purchase After Discount in ${o}`, multiplier: 'Price Multiplier', sales: `Sales Price in ${o}`,
+      kitFreight: `Kit Freight in ${o}`, consFreight: `Consolidated Shipment in ${o}`, importCosts: `Duty, Insurance & Fees in ${o}`, freightImport: `Freight & Import in ${o}`,
+      margin: 'Freight Margin', freightWithMargin: `Freight & Import incl. Margin in ${o}`, lineTotal: `Line Total excl. VAT in ${o}`, vat: `VAT in ${o}`,
+      lineTotalVat: `Line Total incl. VAT in ${o}`, landed: `Landed Cost in ${o}`, pricingSource: 'Pricing Source',
+    };
+    const rows = [
+      ['Consolidated parts'],
+      ['Common parts are highlighted in yellow and listed first. Quantity is the maximum found (or the stock override); pricing inputs come from the row with that maximum quantity. Excluded parts are not listed.'],
+      CONSOLIDATED_EXPORT_COLUMNS.map((key) => headerLabels[key]),
+    ];
+    const groups = [
+      ['Common', state.consolidated.filter((item) => item.common)],
+      ['Unique', state.consolidated.filter((item) => !item.common)],
+    ];
+    const layout = [];
+    let excelRow = rows.length + 1;
+    groups.forEach(([label, items]) => {
+      if (!items.length) return;
+      layout.push({ label, row: excelRow });
+      excelRow += 1;
+      items.forEach((item) => {
+        layout.push({ item, row: excelRow });
+        excelRow += 1;
+      });
+    });
+    const itemRows = layout.filter((entry) => entry.item).map((entry) => entry.row);
+    const first = Math.min(...itemRows);
+    const last = Math.max(...itemRows);
+    const range = (key) => `${L[key]}$${first}:${L[key]}$${last}`;
+    const share = (r) => {
+      if (state.freight.allocation === 'lines') return `IF(${L.quantity}${r}>0,1,0)/MAX(1,COUNTIF(${range('quantity')},">0"))`;
+      const key = state.freight.allocation === 'quantity' ? 'quantity' : 'purchase';
+      return `IF(SUM(${range(key)})=0,0,${L[key]}${r}/SUM(${range(key)}))`;
+    };
+    const commonRows = [];
+    const groupRows = [];
+
+    layout.forEach((entry) => {
+      if (!entry.item) {
+        rows.push([`${entry.label} parts`]);
+        groupRows.push(entry.row - 1);
+        return;
+      }
+      const { item, row: r } = entry;
+      const cells = {
+        sources: item.sources.join(', '),
+        part: item.part,
+        description: item.description,
+        quantity: item.maxQuantity,
+        amountOut: formulaCell(`${L.quantity}${r}*${L.unitOut}${r}`, item.convertedTotal),
+        amountUsd: formulaCell(`IF(${A}!$B$6="","",${L.amountOut}${r}/${A}!$B$6)`, item.amountUsd),
+        match: item.common ? 'Common' : 'Unique',
+        group: item.groupName || '',
+        salesPerYear: item.salesPerYear,
+        currency: item.currency,
+        unitPrice: item.unitPrice,
+        fx: item.fx,
+        unitOut: formulaCell(`${L.unitPrice}${r}*${L.fx}${r}`, item.convertedUnit),
+        discount: formulaCell(`${A}!$B$2`, item.discount),
+        purchase: formulaCell(`${L.amountOut}${r}*(1-${L.discount}${r})`, item.discountedTotal),
+        multiplier: item.multiplierOverridden ? item.multiplier : formulaCell(`${A}!$B$3`, item.multiplier),
+        sales: formulaCell(`${L.purchase}${r}*${L.multiplier}${r}`, item.sellingTotal),
+        kitFreight: item.kitFreight,
+        consFreight: formulaCell(`${A}!$B$12*${share(r)}`, item.consolidatedFreight),
+        importCosts: formulaCell(`${L.purchase}${r}*${A}!$B$11+(${L.purchase}${r}+${L.kitFreight}${r}+${L.consFreight}${r}+${L.purchase}${r}*${A}!$B$11)*${A}!$B$10+${A}!$B$13*${share(r)}`, item.importCosts),
+        freightImport: formulaCell(`${L.kitFreight}${r}+${L.consFreight}${r}+${L.importCosts}${r}`, item.freightAndImport),
+        margin: formulaCell(`${A}!$B$4`, item.shippingMargin),
+        freightWithMargin: formulaCell(`${L.freightImport}${r}/(1-${L.margin}${r})`, item.freightWithMargin),
+        lineTotal: formulaCell(`IF(${L.unitPrice}${r}="","",${L.sales}${r}+${L.freightWithMargin}${r})`, item.lineTotal),
+        vat: formulaCell(`IF(${L.lineTotal}${r}="","",${L.lineTotal}${r}*${A}!$B$9)`, item.vat),
+        lineTotalVat: formulaCell(`IF(${L.lineTotal}${r}="","",${L.lineTotal}${r}+${L.vat}${r})`, item.lineTotalInclVat),
+        landed: formulaCell(`${L.purchase}${r}+${L.freightImport}${r}`, item.landedCost),
+        pricingSource: `${item.pricingSource} row ${item.pricingRow}`,
+      };
+      rows.push(CONSOLIDATED_EXPORT_COLUMNS.map((key) => cells[key] ?? null));
+      if (item.common) commonRows.push(r - 1);
+    });
+
+    const sumKeys = ['quantity', 'amountOut', 'amountUsd', 'salesPerYear', 'purchase', 'sales', 'kitFreight', 'consFreight', 'importCosts', 'freightImport', 'freightWithMargin', 'lineTotal', 'vat', 'lineTotalVat', 'landed'];
+    const totalRow = last + 2;
+    rows.push([]);
+    rows.push(CONSOLIDATED_EXPORT_COLUMNS.map((key, index) => {
+      if (index === 0) return 'Total';
+      if (!sumKeys.includes(key)) return null;
+      const field = { quantity: 'maxQuantity', amountOut: 'convertedTotal', amountUsd: 'amountUsd', salesPerYear: 'salesPerYear', purchase: 'discountedTotal', sales: 'sellingTotal', kitFreight: 'kitFreight', consFreight: 'consolidatedFreight', importCosts: 'importCosts', freightImport: 'freightAndImport', freightWithMargin: 'freightWithMargin', lineTotal: 'lineTotal', vat: 'vat', lineTotalVat: 'lineTotalInclVat', landed: 'landedCost' }[key];
+      const value = state.consolidated.reduce((sum, item) => sum + (item[field] ?? 0), 0);
+      return formulaCell(`SUM(${range(key)})`, value);
+    }));
+
+    const sheet = XLSX.utils.aoa_to_sheet(rows);
+    const widths = { sources: 28, part: 18, description: 28, quantity: 10, amountOut: 15, amountUsd: 14, match: 10, group: 16, salesPerYear: 12, currency: 9, unitPrice: 12, fx: 12, unitOut: 13, discount: 10, purchase: 18, multiplier: 11, sales: 16, kitFreight: 14, consFreight: 18, importCosts: 18, freightImport: 16, margin: 11, freightWithMargin: 20, lineTotal: 18, vat: 13, lineTotalVat: 18, landed: 16, pricingSource: 22 };
+    sheet['!cols'] = CONSOLIDATED_EXPORT_COLUMNS.map((key) => ({ wch: widths[key] || 14 }));
+    sheet['!autofilter'] = { ref: `A3:${XLSX.utils.encode_col(lastCol)}${last}` };
+    sheet['!freeze'] = { xSplit: 0, ySplit: 3, topLeftCell: 'A4', activePane: 'bottomLeft', state: 'frozen' };
+    styleTitle(sheet, 0, lastCol);
+    styleHeader(sheet, 2, 0, lastCol);
+    commonRows.forEach((rowIndex) => styleCommonRow(sheet, rowIndex, 0, lastCol));
+    groupRows.forEach((rowIndex) => styleGroupRow(sheet, rowIndex, 0, lastCol));
+    styleGroupRow(sheet, totalRow - 1, 0, lastCol);
+    const moneyKeys = ['amountOut', 'amountUsd', 'unitPrice', 'unitOut', 'purchase', 'sales', 'kitFreight', 'consFreight', 'importCosts', 'freightImport', 'freightWithMargin', 'lineTotal', 'vat', 'lineTotalVat', 'landed'];
+    for (let row = 4; row <= totalRow; row += 1) {
+      moneyKeys.forEach((key) => { if (sheet[`${L[key]}${row}`]) sheet[`${L[key]}${row}`].z = '#,##0.00'; });
+      ['discount', 'margin'].forEach((key) => { if (sheet[`${L[key]}${row}`]) sheet[`${L[key]}${row}`].z = '0.0%'; });
+      ['quantity', 'salesPerYear'].forEach((key) => { if (sheet[`${L[key]}${row}`]) sheet[`${L[key]}${row}`].z = '#,##0.##'; });
+      if (sheet[`${L.fx}${row}`]) sheet[`${L.fx}${row}`].z = '0.000000';
+    }
+    return { sheet, layout: { columns: L, rows: layout.filter((entry) => entry.item), first, last } };
+  }
+
+  function buildProfitabilitySheet(consolidatedName, assumptionsName, layout) {
+    const model = calculateProfitability();
+    const C = quoteSheetName(consolidatedName);
+    const A = quoteSheetName(assumptionsName);
+    const L = layout.columns;
+    const o = state.config.outputCurrency;
+    const itemStart = 26;
+    const itemEnd = itemStart + layout.rows.length - 1;
+    const col = (letter) => `${letter}$${itemStart}:${letter}$${itemEnd}`;
+    const rows = [
+      ['Profitability estimate'],
+      [`Expected annual sales, landed cost and logistics in ${o}, excluding VAT. Change the blue inputs in Consolidated or the per-unit values below and Excel recalculates.`],
+      [],
+      ['Per-unit logistics', 'Value', 'Source'],
+      [`Storage per stock unit / month (${o})`, model.perUnit.storagePerUnitMonth ?? 0, model.manual.storagePerUnitMonth ? 'Manual' : 'Warehouse monthly storage ÷ stock units'],
+      [`Outtake per unit sold (${o})`, model.perUnit.outtakePerUnit ?? 0, model.manual.outtakePerUnit ? 'Manual' : 'Order handling + EDI + packaging ÷ units sold'],
+      [`Outbound freight per unit sold (${o})`, model.perUnit.outboundPerUnit ?? 0, model.manual.outboundPerUnit ? 'Manual' : 'Parcel freight ÷ units sold'],
+      ['Customer pays outbound freight', state.sales.customerPaysOutbound, ''],
+      [`Receiving & WMS / year (${o})`, model.fixed, 'Fixed warehouse costs'],
+      ['VAT rate', formulaCell(`${A}!$B$9`, state.config.vatRate), ''],
+      [],
+      ['Summary', 'Value'],
+      [`Annual revenue excl. VAT (${o})`, formulaCell(`SUM(${col('J')})`, model.revenue)],
+      [`Annual cost of goods, landed (${o})`, formulaCell(`SUM(${col('K')})`, model.cogs)],
+      [`Annual gross profit (${o})`, formulaCell('B13-B14', model.gross)],
+      [`Storage / year (${o})`, formulaCell(`SUM(${col('M')})`, model.storage)],
+      [`Outtake & outbound freight / year (${o})`, formulaCell(`SUM(${col('N')})`, model.outtake + model.outbound)],
+      [`Receiving & WMS / year (${o})`, formulaCell('B9', model.fixed)],
+      [`Annual net profit (${o})`, formulaCell('B15-B16-B17-B18', model.net)],
+      [`Stock investment, landed (${o})`, formulaCell(`SUM(${C}!${L.landed}$${layout.first}:${L.landed}$${layout.last})`, model.investment)],
+      ['Payback (months)', formulaCell('IF(OR(B19<=0,B20=0),"",B20/(B19/12))', model.paybackMonths)],
+      ['Annual return on stock', formulaCell('IF(B20=0,"",B19/B20)', model.roi)],
+      [`Output VAT / year (${o})`, formulaCell('B13*B10', model.outputVat)],
+      [],
+      ['Part', 'Description', 'Sales Group', 'Stock Qty', 'Expected Sales / yr', `Unit Price excl. VAT (${o})`, 'Unit Landed Cost', 'Unit Margin', 'Margin %', 'Revenue / yr', 'Cost of Goods / yr', 'Gross Profit / yr', 'Storage / yr', 'Outtake & Freight / yr', 'Net Profit / yr'],
+    ];
+    const rowsByKey = new Map(model.rows.map((row) => [row.item.key, row]));
+    layout.rows.forEach(({ item, row: cr }, index) => {
+      const r = itemStart + index;
+      const profit = rowsByKey.get(item.key);
+      rows.push([
+        item.part,
+        item.description,
+        item.groupName || 'Ungrouped',
+        formulaCell(`${C}!${L.quantity}${cr}`, item.maxQuantity),
+        formulaCell(`${C}!${L.salesPerYear}${cr}`, item.salesPerYear),
+        formulaCell(`IF(OR(D${r}=0,${C}!${L.lineTotal}${cr}=""),"",${C}!${L.lineTotal}${cr}/D${r})`, profit?.unitPrice),
+        formulaCell(`IF(D${r}=0,"",${C}!${L.landed}${cr}/D${r})`, profit?.unitCost),
+        formulaCell(`IF(OR(F${r}="",G${r}=""),"",F${r}-G${r})`, profit?.unitMargin),
+        formulaCell(`IF(OR(H${r}="",F${r}=0),"",H${r}/F${r})`, profit && profit.unitPrice ? profit.unitMargin / profit.unitPrice : null),
+        formulaCell(`IF(F${r}="",0,E${r}*F${r})`, profit?.revenue),
+        formulaCell(`IF(G${r}="",0,E${r}*G${r})`, profit?.cogs),
+        formulaCell(`J${r}-K${r}`, profit?.gross),
+        formulaCell(`D${r}*$B$5*12`, profit?.storage),
+        formulaCell(`E${r}*($B$6+IF($B$8,0,$B$7))`, profit?.handling),
+        formulaCell(`L${r}-M${r}-N${r}`, profit?.net),
+      ]);
+    });
+
+    // Group summary beside the totals, driven by SUMIF over the item table.
+    const groupNames = [...state.groups.map((group) => group.name), 'Ungrouped'];
+    const sheet = XLSX.utils.aoa_to_sheet(rows);
+    const put = (address, cell) => { sheet[address] = typeof cell === 'object' && cell !== null ? cell : { t: typeof cell === 'number' ? 'n' : 's', v: cell }; };
+    ['Sales Group', 'Items', `Revenue / yr (${o})`, 'Gross Profit / yr', 'Net Profit / yr'].forEach((label, index) => put(`${XLSX.utils.encode_col(4 + index)}12`, label));
+    groupNames.forEach((name, index) => {
+      const r = 13 + index;
+      const summary = model.groups.find((group) => group.name === name);
+      put(`E${r}`, name);
+      put(`F${r}`, formulaCell(`COUNTIF(${col('C')},E${r})`, summary?.items ?? 0));
+      put(`G${r}`, formulaCell(`SUMIF(${col('C')},E${r},${col('J')})`, summary?.revenue ?? 0));
+      put(`H${r}`, formulaCell(`SUMIF(${col('C')},E${r},${col('L')})`, summary?.gross ?? 0));
+      put(`I${r}`, formulaCell(`SUMIF(${col('C')},E${r},${col('O')})`, summary?.net ?? 0));
+    });
+    const lastRow = Math.max(itemEnd, 13 + groupNames.length);
+    sheet['!ref'] = `A1:O${lastRow}`;
+    sheet['!cols'] = [{ wch: 38 }, { wch: 28 }, { wch: 18 }, { wch: 11 }, { wch: 16 }, { wch: 18 }, { wch: 16 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 13 }, { wch: 20 }, { wch: 16 }];
+    styleTitle(sheet, 0, 14);
+    styleHeader(sheet, 3, 0, 2);
+    styleHeader(sheet, 11, 0, 1);
+    styleHeader(sheet, 11, 4, 8);
+    styleHeader(sheet, 24, 0, 14);
+    styleGroupRow(sheet, 18, 0, 1);
+    ['B5', 'B6', 'B7', 'B9', 'B13', 'B14', 'B15', 'B16', 'B17', 'B18', 'B19', 'B20', 'B23'].forEach((address) => { if (sheet[address]) sheet[address].z = '#,##0.00'; });
+    ['B10', 'B22'].forEach((address) => { if (sheet[address]) sheet[address].z = '0.0%'; });
+    if (sheet.B21) sheet.B21.z = '0.0';
+    for (let r = 13; r < 13 + groupNames.length; r += 1) ['G', 'H', 'I'].forEach((letter) => { if (sheet[`${letter}${r}`]) sheet[`${letter}${r}`].z = '#,##0'; });
+    for (let r = itemStart; r <= itemEnd; r += 1) {
+      ['F', 'G', 'H'].forEach((letter) => { if (sheet[`${letter}${r}`]) sheet[`${letter}${r}`].z = '#,##0.00'; });
+      ['J', 'K', 'L', 'M', 'N', 'O'].forEach((letter) => { if (sheet[`${letter}${r}`]) sheet[`${letter}${r}`].z = '#,##0'; });
+      if (sheet[`I${r}`]) sheet[`I${r}`].z = '0.0%';
+      ['D', 'E'].forEach((letter) => { if (sheet[`${letter}${r}`]) sheet[`${letter}${r}`].z = '#,##0.##'; });
+    }
+    return sheet;
+  }
+
+  function buildSettingsSheet() {
+    const json = JSON.stringify(collectSettings());
+    const chunks = json.match(/[\s\S]{1,30000}/g) || ['{}'];
+    const rows = [
+      ['PartsList settings'],
+      ['Machine-readable settings (kit freight, freight & import, VAT, sales groups, item overrides). Re-import this workbook into PartsList to restore them.'],
+      ...chunks.map((chunk) => [chunk]),
+    ];
+    const sheet = XLSX.utils.aoa_to_sheet(rows);
+    sheet['!cols'] = [{ wch: 120 }];
+    return sheet;
+  }
+
+  function buildWarehousingSheet() {
+    const model = calculateWarehouseModel();
+    const warehouse = state.warehouse;
+    const rates = warehouse.rates;
+    const convertedRate = (value) => model.nokToOutput === null ? null : value * model.nokToOutput;
+    const rows = [
+      ['Warehouse cost estimate'],
+      [`Storage quantities use the imported maximum part quantities. Private rates are stored in NOK and converted to ${model.outputCurrency} with the live reference rate.`],
+      [],
+      ['Inventory & storage assumption', 'Value', '', 'Quoted rate', 'NOK', `${model.outputCurrency} reference`, 'Currency reference', 'Value'],
+      ['Inventory units', model.inventoryUnits, '', 'EU pallet ≤120 cm / month', rates.eu120, formulaCell('IF($H$5="","",E5*$H$5)', convertedRate(rates.eu120)), 'NOK to output', model.nokToOutput],
+      ['Distinct part numbers', model.distinctParts, '', 'EU pallet ≤220 cm / month', rates.eu220, formulaCell('IF($H$5="","",E6*$H$5)', convertedRate(rates.eu220)), 'Rate date', state.rateDates.NOK || ''],
+      ['Shelf share', warehouse.shelfShare / 100, '', 'Sea pallet ≤120 cm / month', rates.sea120, formulaCell('IF($H$5="","",E7*$H$5)', convertedRate(rates.sea120)), 'Output currency', model.outputCurrency],
+      ['Drawer share', warehouse.drawerShare / 100, '', 'Sea pallet ≤220 cm / month', rates.sea220, formulaCell('IF($H$5="","",E8*$H$5)', convertedRate(rates.sea220))],
+      ['Pallet share', formulaCell('1-SUM(B7:B8)', model.palletShare), '', 'Shelf location / month', rates.shelf, formulaCell('IF($H$5="","",E9*$H$5)', convertedRate(rates.shelf))],
+      ['Bins per shelf', warehouse.binsPerShelf, '', 'Drawer location / month', rates.drawer, formulaCell('IF($H$5="","",E10*$H$5)', convertedRate(rates.drawer))],
+      ['Shelf levels per rack', warehouse.shelvesPerRack, '', 'EDI label', rates.edi, formulaCell('IF($H$5="","",E11*$H$5)', convertedRate(rates.edi))],
+      ['Units per bin', warehouse.unitsPerBin, '', 'Receipt base', rates.receiptBase, formulaCell('IF($H$5="","",E12*$H$5)', convertedRate(rates.receiptBase))],
+      ['Units per shelf', formulaCell('B10*B12', model.unitsPerShelf), '', 'Receipt per item line', rates.receiptLine, formulaCell('IF($H$5="","",E13*$H$5)', convertedRate(rates.receiptLine))],
+      ['Units per drawer', warehouse.unitsPerDrawer, '', 'Order base', rates.orderBase, formulaCell('IF($H$5="","",E14*$H$5)', convertedRate(rates.orderBase))],
+      ['Units per pallet', warehouse.unitsPerPallet, '', 'Order per item line', rates.orderLine, formulaCell('IF($H$5="","",E15*$H$5)', convertedRate(rates.orderLine))],
+      ['Pallet type', warehouse.palletType === 'eu' ? 'EU' : 'Sea', '', 'Parcel ≤35 kg', rates.parcel, formulaCell('IF($H$5="","",E16*$H$5)', convertedRate(rates.parcel))],
+      ['Pallet height class (cm)', Number(warehouse.palletHeight), '', 'Private-person surcharge', rates.privateSurcharge, formulaCell('IF($H$5="","",E17*$H$5)', convertedRate(rates.privateSurcharge))],
+      ['Selected pallet rate', formulaCell('IF(B16="EU",IF(B17=120,E5,E6),IF(B17=120,E7,E8))', model.palletRate), '', 'WMS license / month', rates.wms, formulaCell('IF($H$5="","",E18*$H$5)', convertedRate(rates.wms))],
+      [],
+      ['Calculated capacity', 'Count'],
+      ['Shelf locations', formulaCell('IF(B5=0,0,ROUNDUP(B5*B7/B13,0))', model.shelfLocations)],
+      ['Racks required', formulaCell('IF(B21=0,0,ROUNDUP(B21/B11,0))', model.racks)],
+      ['Total bins', formulaCell('B21*B10', model.totalBins)],
+      ['Drawer locations', formulaCell('IF(B5=0,0,ROUNDUP(B5*B8/B14,0))', model.drawerLocations)],
+      ['Pallets', formulaCell('IF(B5=0,0,ROUNDUP(B5*B9/B15,0))', model.pallets)],
+      ['Total unit capacity', formulaCell('B21*B13+B24*B14+B25*B15', model.capacity)],
+      [],
+      ['Monthly operating assumption', 'Value', '', 'Monthly cost breakdown', 'NOK', model.outputCurrency],
+      ['Receipts', warehouse.receipts, '', 'Shelf storage', formulaCell('B21*E9', model.costs[0].value), formulaCell('IF($H$5="","",E29*$H$5)', model.costs[0].converted)],
+      ['Lines per receipt', warehouse.receiptLines, '', 'Drawer storage', formulaCell('B24*E10', model.costs[1].value), formulaCell('IF($H$5="","",E30*$H$5)', model.costs[1].converted)],
+      ['Orders', warehouse.orders, '', 'Pallet storage', formulaCell('B25*B18', model.costs[2].value), formulaCell('IF($H$5="","",E31*$H$5)', model.costs[2].converted)],
+      ['Lines per order', warehouse.orderLines, '', 'Receiving', formulaCell('B29*E12+B29*B30*E13', model.costs[3].value), formulaCell('IF($H$5="","",E32*$H$5)', model.costs[3].converted)],
+      ['EDI labels', warehouse.ediLabels, '', 'Order handling', formulaCell('B31*E14+B31*B32*E15', model.costs[4].value), formulaCell('IF($H$5="","",E33*$H$5)', model.costs[4].converted)],
+      ['Business parcels', warehouse.businessParcels, '', 'EDI labels', formulaCell('B33*E11', model.costs[5].value), formulaCell('IF($H$5="","",E34*$H$5)', model.costs[5].converted)],
+      ['Private parcels', warehouse.privateParcels, '', 'Outbound freight', formulaCell('(B34+B35)*E16+B35*E17', model.costs[6].value), formulaCell('IF($H$5="","",E35*$H$5)', model.costs[6].converted)],
+      ['Packaging / month', warehouse.packaging, '', 'Packaging', formulaCell('B36', model.costs[7].value), formulaCell('IF($H$5="","",E36*$H$5)', model.costs[7].converted)],
+      ['Include WMS license', warehouse.includeWms, '', 'WMS license', formulaCell('IF(B37,E18,0)', model.costs[8].value), formulaCell('IF($H$5="","",E37*$H$5)', model.costs[8].converted)],
+      ['', '', '', 'Monthly total', formulaCell('SUM(E29:E37)', model.monthlyNok), formulaCell('IF($H$5="","",E38*$H$5)', model.monthlyTotal)],
+      ['', '', '', 'Annual total', formulaCell('E38*12', model.annualNok), formulaCell('IF($H$5="","",E39*$H$5)', model.annualTotal)],
+      [],
+      ['Notes'],
+      ['Packaging is entered as a monthly assumption because the quote says it is charged after usage.'],
+      ['API integration is excluded because the quote contains no price.'],
+      ['Freight assumes one parcel per shipment up to 35 kg; private parcels add the quoted surcharge.'],
+      ['WMS is excluded by default and only added when Include WMS license is TRUE.'],
+    ];
+    const sheet = XLSX.utils.aoa_to_sheet(rows);
+    sheet['!cols'] = [{ wch: 33 }, { wch: 17 }, { wch: 4 }, { wch: 32 }, { wch: 17 }, { wch: 18 }, { wch: 21 }, { wch: 18 }];
+    sheet['!freeze'] = { xSplit: 0, ySplit: 4, topLeftCell: 'A5', activePane: 'bottomLeft', state: 'frozen' };
+    styleTitle(sheet, 0, 7);
+    [3, 19, 27].forEach((row) => styleHeader(sheet, row, 0, 7));
+    [6, 7, 8].forEach((row) => { if (sheet[`B${row + 1}`]) sheet[`B${row + 1}`].z = '0.0%'; });
+    for (let row = 4; row <= 38; row += 1) {
+      if (sheet[`E${row + 1}`]) sheet[`E${row + 1}`].z = '#,##0.00';
+      if (sheet[`F${row + 1}`]) sheet[`F${row + 1}`].z = '#,##0.00';
+      if (sheet[`B${row + 1}`] && [17, 35].includes(row)) sheet[`B${row + 1}`].z = '#,##0.00';
+    }
+    if (sheet.H5) sheet.H5.z = '0.000000';
+    styleGroupRow(sheet, 37, 3, 5);
+    styleGroupRow(sheet, 38, 3, 5);
+    return sheet;
+  }
+
+  function formulaCell(formula, value) {
+    const cell = { t: 'n', f: formula };
+    if (Number.isFinite(value)) cell.v = value;
+    return cell;
+  }
+
+  function styleTitle(sheet, row, lastCol) {
+    for (let col = 0; col <= lastCol; col += 1) {
+      const address = XLSX.utils.encode_cell({ r: row, c: col });
+      if (!sheet[address]) sheet[address] = { t: 's', v: '' };
+      sheet[address].s = {
+        font: { name: 'Arial', sz: col === 0 ? 16 : 11, bold: col === 0, color: { rgb: '173C2B' } },
+        alignment: { vertical: 'center' },
+      };
+    }
+    sheet['!rows'] = sheet['!rows'] || [];
+    sheet['!rows'][row] = { hpt: 25 };
+  }
+
+  function styleHeader(sheet, row, startCol, endCol) {
+    for (let col = startCol; col <= endCol; col += 1) {
+      const address = XLSX.utils.encode_cell({ r: row, c: col });
+      if (!sheet[address]) sheet[address] = { t: 's', v: '' };
+      sheet[address].s = {
+        fill: { patternType: 'solid', fgColor: { rgb: '24543D' } },
+        font: { name: 'Arial', sz: 10, bold: true, color: { rgb: 'FFFFFF' } },
+        alignment: { vertical: 'center', wrapText: true },
+        border: { bottom: { style: 'thin', color: { rgb: '173C2B' } } },
+      };
+    }
+  }
+
+  function styleCommonRow(sheet, row, startCol, endCol) {
+    for (let col = startCol; col <= endCol; col += 1) {
+      const address = XLSX.utils.encode_cell({ r: row, c: col });
+      if (!sheet[address]) sheet[address] = { t: 's', v: '' };
+      sheet[address].s = {
+        ...(sheet[address].s || {}),
+        fill: { patternType: 'solid', fgColor: { rgb: 'FFF2A8' } },
+        font: { name: 'Arial', sz: 10, color: { rgb: '17211B' } },
+      };
+    }
+  }
+
+  function styleGroupRow(sheet, row, startCol, endCol) {
+    for (let col = startCol; col <= endCol; col += 1) {
+      const address = XLSX.utils.encode_cell({ r: row, c: col });
+      if (!sheet[address]) sheet[address] = { t: 's', v: '' };
+      sheet[address].s = {
+        fill: { patternType: 'solid', fgColor: { rgb: 'E4EFE8' } },
+        font: { name: 'Arial', sz: 10, bold: true, color: { rgb: '24543D' } },
+      };
+    }
+  }
+
+  function parseUserInput(text) {
+    const value = String(text);
+    if (value === '') return null;
+    if (value.startsWith('=')) return value;
+    if (value.startsWith("'=")) return value;
+    if (/^(true|false)$/i.test(value)) return value.toLowerCase() === 'true';
+    const number = toNumber(value);
+    if (number !== null && /^[\s+\-\d.,%]+$/.test(value)) return value.trim().endsWith('%') ? number : number;
+    return value;
+  }
+
+  function toNumber(value) {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    if (typeof value === 'boolean' || value === null || value === undefined || value === '') return null;
+    let text = String(value).trim();
+    if (!text) return null;
+    const percent = text.endsWith('%');
+    text = text.replace(/[^0-9,\.\-+eE]/g, '');
+    if (!text || text === '-' || text === '+') return null;
+    const comma = text.lastIndexOf(',');
+    const dot = text.lastIndexOf('.');
+    if (comma >= 0 && dot >= 0) {
+      if (comma > dot) text = text.replace(/\./g, '').replace(',', '.');
+      else text = text.replace(/,/g, '');
+    } else if (comma >= 0) {
+      const decimals = text.length - comma - 1;
+      text = decimals > 0 && decimals <= 2 ? text.replace(',', '.') : text.replace(/,/g, '');
+    }
+    const number = Number(text);
+    if (!Number.isFinite(number)) return null;
+    return percent ? number / 100 : number;
+  }
+
+  function normalizeRate(value) {
+    const number = toNumber(value);
+    if (number === null) return 0;
+    return Math.abs(number) > 1 ? number / 100 : number;
+  }
+
+  function normalizePart(value) {
+    return String(value).trim().toLocaleLowerCase().replace(/\s+/g, ' ');
+  }
+
+  function normalizeCurrency(value) {
+    if (value === null || value === undefined) return null;
+    const text = String(value).trim().toUpperCase();
+    const code = text.match(/\b[A-Z]{3}\b/)?.[0];
+    return code || ({ '$': 'USD', '€': 'EUR', '£': 'GBP' }[text] ?? null);
+  }
+
+  function currencyFromText(value) {
+    if (!value) return null;
+    const text = String(value).toUpperCase();
+    return text.match(/\b(SEK|EUR|USD|GBP|NOK|DKK|CHF|CAD|AUD|JPY|CNY|PLN)\b/)?.[1]
+      || (text.includes('€') ? 'EUR' : null)
+      || (text.includes('£') ? 'GBP' : null)
+      || (text.includes('$') ? 'USD' : null);
+  }
+
+  function formatNumber(value, digits = 2) {
+    return new Intl.NumberFormat(undefined, { maximumFractionDigits: digits, minimumFractionDigits: 0 }).format(value);
+  }
+
+  function formatNullableNumber(value, digits = 2) {
+    return value === null || value === undefined || !Number.isFinite(value) ? '—' : formatNumber(value, digits);
+  }
+
+  function formatPercent(value) {
+    return new Intl.NumberFormat(undefined, { style: 'percent', maximumFractionDigits: 1 }).format(value || 0);
+  }
+
+  function displayValue(value) {
+    if (value === null || value === undefined) return '';
+    if (value instanceof Date) return value.toISOString().slice(0, 10);
+    if (isFormulaError(value)) return value.value || value.type || '#ERROR!';
+    if (typeof value === 'object') return value.value ?? String(value);
+    return String(value);
+  }
+
+  function isFormulaError(value) {
+    return Boolean(value && typeof value === 'object' && (value.type || String(value.value || '').startsWith('#')));
+  }
+
+  function columnName(index) {
+    return XLSX.utils.encode_col(index);
+  }
+
+  function populateCurrencySelect(select, selected) {
+    select.replaceChildren();
+    CURRENCIES.forEach((currency) => {
+      const option = document.createElement('option');
+      option.value = currency;
+      option.textContent = currency;
+      option.selected = currency === selected;
+      select.append(option);
+    });
+  }
+
+  function setStatus(message, type = '') {
+    dom.statusMessage.textContent = message;
+    dom.statusBar.classList.toggle('busy', type === 'busy');
+    dom.statusBar.classList.toggle('error', type === 'error');
+  }
+
+  let toastTimer;
+  function showToast(message, error = false) {
+    clearTimeout(toastTimer);
+    dom.toast.textContent = message;
+    dom.toast.classList.toggle('error', error);
+    dom.toast.classList.add('show');
+    toastTimer = setTimeout(() => dom.toast.classList.remove('show'), 3200);
+  }
+
+  function enabledSheetCount() {
+    return Object.values(state.mappings).filter((mapping) => mapping.enabled).length;
+  }
+
+  function uniqueSheetName(base, usedNames) {
+    if (!usedNames.has(base)) return base;
+    let index = 2;
+    while (usedNames.has(`${base} ${index}`)) index += 1;
+    return `${base} ${index}`;
+  }
+
+  function quoteSheetName(name) {
+    return `'${String(name).replace(/'/g, "''")}'`;
+  }
+
+  function uniqueBy(items, keyFn) {
+    const seen = new Set();
+    return items.filter((item) => {
+      const key = keyFn(item);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+})();

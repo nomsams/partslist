@@ -1,444 +1,634 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Excel to Visual Canvas | Pure JavaScript Engine</title>
-    <!-- SheetJS for parsing XLSX files directly in the browser -->
-    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-    <style>
-        :root {
-            --bg-dark: #272822;
-            --bg-panel: #1e1f1c;
-            --border-color: #3e3d32;
-            --text-main: #f8f8f2;
-            --text-muted: #75715e;
-            --neon-pink: #f92672;
-            --neon-green: #a6e22e;
-            --neon-blue: #66d9ef;
-            --neon-orange: #fd971f;
-            --neon-yellow: #e6db74;
-            --neon-purple: #ae81ff;
-        }
-
-        * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
-
-        body {
-            font-family: Consolas, "Courier New", monospace;
-            background-color: var(--bg-dark);
-            color: var(--text-main);
-            overflow: hidden;
-        }
-
-        /* Toolbar */
-        .toolbar {
-            position: absolute;
-            top: 20px; left: 20px;
-            background: rgba(30, 31, 28, 0.95);
-            border: 1px solid var(--border-color);
-            padding: 12px 18px;
-            border-radius: 6px;
-            z-index: 1000;
-            display: flex;
-            gap: 12px;
-            align-items: center;
-            backdrop-filter: blur(5px);
-            box-shadow: 0 4px 20px rgba(0,0,0,0.6);
-        }
-
-        button, label.upload-btn {
-            background: #272822; color: var(--neon-green);
-            border: 1px solid var(--border-color); padding: 6px 14px;
-            font-family: inherit; font-size: 13px; cursor: pointer;
-            border-radius: 4px; transition: color 0.2s, border-color 0.2s;
-            display: inline-block; text-align: center;
-        }
-        button:hover, label.upload-btn:hover { color: var(--neon-pink); border-color: var(--neon-pink); }
-        input[type="file"] { display: none; }
-
-        /* Canvas & Viewport */
-        #viewport {
-            width: 100vw; height: 100vh;
-            position: relative;
-        }
-
-        #canvas {
-            position: absolute;
-            top: 0; left: 0;
-            width: 8000px; height: 8000px;
-            transform-origin: 0 0;
-            background-image: 
-                linear-gradient(var(--border-color) 1px, transparent 1px),
-                linear-gradient(90deg, var(--border-color) 1px, transparent 1px);
-            background-size: 40px 40px;
-            background-position: -1px -1px;
-            cursor: grab;
-        }
-        #canvas.panning { cursor: grabbing; }
-
-        svg {
-            position: absolute; top: 0; left: 0;
-            width: 100%; height: 100%;
-            pointer-events: none;
-            z-index: 0;
-        }
-
-        path.wire {
-            fill: none; stroke-width: 3; stroke-linecap: round;
-            filter: drop-shadow(0 0 5px currentColor);
-            pointer-events: visibleStroke;
-            cursor: pointer;
-            transition: stroke-width 0.2s;
-        }
-        path.wire:hover { stroke-width: 6; }
-
-        /* Nodes (Tables) */
-        .node {
-            position: absolute;
-            background-color: var(--bg-panel);
-            border: 1px solid var(--border-color);
-            border-radius: 6px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.6);
-            min-width: 320px;
-            z-index: 10;
-            display: flex;
-            flex-direction: column;
-            cursor: default;
-        }
-
-        .node-header {
-            background-color: #3e3d32; padding: 10px 14px; font-size: 13px;
-            font-weight: bold; color: var(--neon-blue); cursor: grab;
-            border-top-left-radius: 6px; border-top-right-radius: 6px;
-            display: flex; justify-content: space-between; align-items: center;
-        }
-        .node-header:active { cursor: grabbing; }
-
-        .node-content { padding: 10px; max-height: 450px; overflow-y: auto; }
-
-        /* Rows & Cells */
-        .row {
-            display: flex; align-items: center; justify-content: space-between;
-            margin-bottom: 6px; position: relative; font-size: 12px;
-        }
-
-        .cell-label {
-            color: var(--neon-orange); width: 65px; font-size: 11px;
-            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-        }
-
-        .input-wrapper {
-            display: flex; align-items: center; background: #272822;
-            border: 1px solid var(--border-color); border-radius: 4px;
-            padding: 2px 6px; flex-grow: 1; margin: 0 8px;
-        }
-
-        input {
-            background: transparent; border: none; color: var(--neon-yellow);
-            font-family: inherit; font-size: 12px; width: 100%; outline: none;
-        }
-        input:focus { color: var(--text-main); }
-
-        /* Ports */
-        .port {
-            width: 12px; height: 12px; background-color: var(--border-color);
-            border-radius: 50%; cursor: crosshair; position: absolute;
-            transition: transform 0.2s, background-color 0.2s; pointer-events: auto;
-        }
-        .port:hover { transform: scale(1.6); }
-        .port.in { left: -15px; border: 2px solid var(--bg-panel); }
-        .port.out { right: -15px; border: 2px solid var(--bg-panel); }
-
-        #status-msg {
-            font-size: 12px; color: var(--neon-green); margin-left: 10px;
-        }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Import Excel parts lists, consolidate kits, add freight, tolls and VAT, estimate warehousing and profitability, and export a calculated workbook.">
+  <title>PartsList Workbook</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hyperformula@3.4.0/dist/hyperformula.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js" defer></script>
 </head>
 <body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">PL</span>
+      <div>
+        <h1>PartsList Workbook</h1>
+        <p>Excel import, linked calculations, and parts consolidation</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <label class="button primary" for="workbook-file">Import workbook</label>
+      <input id="workbook-file" type="file" accept=".xlsx,.xls,.xlsm,.xlsb,.ods,.csv">
+      <button id="export-button" class="button" type="button" disabled>Export consolidated .xlsx</button>
+    </div>
+  </header>
 
-    <div class="toolbar">
-        <span style="color: var(--text-muted);"><b>Excel2Canvas</b> (Pure JS)</span>
-        <label class="upload-btn">
-            📂 Load .xlsx Workbook
-            <input type="file" id="excel-file" accept=".xlsx, .xls" onchange="handleExcelUpload(event)">
+  <div id="status-bar" class="status-bar" role="status" aria-live="polite">
+    <span id="status-dot" class="status-dot"></span>
+    <span id="status-message">Import an Excel workbook to begin. Files stay in this browser.</span>
+  </div>
+
+  <main class="workspace">
+    <aside class="sidebar" aria-label="Workbook controls">
+      <section class="panel upload-panel" id="empty-panel">
+        <p class="eyebrow">Start here</p>
+        <h2>Bring in the source sheets</h2>
+        <p>Import the workbook that contains the three or four parts lists. The app detects likely part, quantity, price, margin, shipping, and currency columns.</p>
+        <label class="drop-zone" id="drop-zone" for="workbook-file">
+          <strong>Drop a workbook here</strong>
+          <span>or choose a file</span>
         </label>
-        <span id="status-msg">Upload your spare parts Excel file to parse sheets & formulas</span>
-    </div>
+      </section>
 
-    <div id="viewport">
-        <div id="canvas">
-            <svg id="svg-canvas"></svg>
+      <section id="workbook-controls" class="hidden">
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Workbook</p>
+              <h2 id="workbook-name">Imported file</h2>
+            </div>
+            <span id="sheet-count" class="badge">0 sheets</span>
+          </div>
+          <div class="settings-grid">
+            <label>
+              Discount
+              <span class="input-suffix"><input id="discount-input" type="number" value="30" min="0" max="100" step="0.1" data-bind="config.discount" data-scale="100"><span>%</span></span>
+            </label>
+            <label>
+              Price multiplier
+              <span class="input-suffix"><input id="multiplier-input" type="number" value="2" min="0" step="0.01" data-bind="config.multiplier"><span>×</span></span>
+            </label>
+            <label>
+              Freight margin
+              <span class="input-suffix"><input id="shipping-margin-input" type="number" value="15" min="0" max="99.9" step="0.1" data-bind="config.shippingMargin" data-scale="100"><span>%</span></span>
+            </label>
+            <label>
+              <span class="field-caption">VAT (MVA) <span class="info-tip" tabindex="0" role="img" aria-label="Information: Norwegian VAT added to customer prices. It is shown separately and never counted as profit." data-tip="Norwegian VAT added to customer prices. It is shown separately and never counted as profit.">i</span></span>
+              <span class="input-suffix"><input id="vat-input" type="number" value="25" min="0" max="100" step="0.1" data-bind="config.vatRate" data-scale="100"><span>%</span></span>
+            </label>
+            <label>
+              Default source currency
+              <select id="source-currency"></select>
+            </label>
+            <label>
+              Output currency
+              <select id="output-currency"></select>
+            </label>
+          </div>
+          <button id="refresh-rates" class="button full" type="button">Refresh currency rates</button>
+          <p id="rate-status" class="fine-print">Rates are loaded after import.</p>
+          <button id="reset-settings" class="button small ghost full" type="button">Reset kit, freight &amp; group settings</button>
+        </section>
+
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Inbound logistics</p>
+              <h2>Freight &amp; import</h2>
+            </div>
+          </div>
+          <p class="panel-copy">Kit freight is set per sheet under Parts sheets. Add one shipment for the whole consolidated order plus the import costs paid in Norway.</p>
+          <div class="settings-grid two">
+            <label class="span-2" data-customs-info>
+              Supplier country
+              <select data-bind="supplier.country" data-origin-select aria-label="Supplier country"></select>
+            </label>
+            <label class="span-2">
+              <span class="field-caption">Consolidated shipment <span class="info-tip" tabindex="0" role="img" aria-label="Information: One freight charge for the whole consolidated order, split across its lines. Set kit freight to zero to use only this." data-tip="One freight charge for the whole consolidated order, split across its lines. Set kit freight to zero to use only this.">i</span></span>
+              <span class="amount-currency"><input type="number" min="0" step="1" value="0" data-bind="freight.consolidatedShipment" aria-label="Consolidated shipment amount"><select data-bind="freight.consolidatedCurrency" data-currency-select aria-label="Consolidated shipment currency"></select></span>
+            </label>
+            <label class="span-2">
+              Split shipment by
+              <select data-bind="freight.allocation">
+                <option value="value">Purchase value</option>
+                <option value="quantity">Quantity</option>
+                <option value="lines">Item lines</option>
+              </select>
+            </label>
+            <label data-customs-info>
+              Customs duty
+              <span class="input-suffix"><input type="number" min="0" max="100" step="0.1" value="0" data-bind="freight.dutyRate" data-scale="100"><span>%</span></span>
+            </label>
+            <label>
+              Insurance
+              <span class="input-suffix"><input type="number" min="0" max="100" step="0.1" value="0" data-bind="freight.insuranceRate" data-scale="100"><span>%</span></span>
+            </label>
+            <label class="span-2">
+              <span class="field-caption">Clearance &amp; broker fees <span class="info-tip" tabindex="0" role="img" aria-label="Information: Fixed customs clearance, declaration and broker fees for the consolidated shipment." data-tip="Fixed customs clearance, declaration and broker fees for the consolidated shipment.">i</span></span>
+              <span class="amount-currency"><input type="number" min="0" step="1" value="0" data-bind="freight.clearanceFee" aria-label="Clearance and broker fees"><select data-bind="freight.clearanceCurrency" data-currency-select aria-label="Clearance fee currency"></select></span>
+            </label>
+          </div>
+          <p id="freight-summary" class="fine-print"></p>
+          <details class="customs-details">
+            <summary>Customs &amp; VAT guide for this origin</summary>
+            <div id="sidebar-customs-guide" class="customs-guide"></div>
+          </details>
+        </section>
+
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Source mapping</p>
+              <h2>Parts sheets</h2>
+            </div>
+          </div>
+          <p class="panel-copy">Enable the sheets to include, then correct any detected columns. Changes update the consolidated list immediately.</p>
+          <div id="mapping-list" class="mapping-list"></div>
+        </section>
+
+        <section class="panel variables-panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Named values</p>
+              <h2>Variables</h2>
+            </div>
+          </div>
+          <div id="variables-list" class="variables-list"></div>
+          <form id="variable-form" class="variable-form">
+            <input id="variable-name" aria-label="Variable name" placeholder="Name" autocomplete="off">
+            <input id="variable-expression" aria-label="Variable value or formula" placeholder="Value or =formula" autocomplete="off">
+            <button class="button small" type="submit">Add</button>
+          </form>
+        </section>
+
+      </section>
+
+      <section class="panel secure-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Local access control</p>
+            <h2>Secure project</h2>
+          </div>
+          <span class="badge">AES-GCM</span>
         </div>
-    </div>
+        <p class="panel-copy">Save the workbook, pricing, mappings, warehouse assumptions, and custom wires as one password-encrypted file. The password is never stored or sent anywhere.</p>
+        <div class="secure-fields">
+          <label>Password <input id="secure-password" type="password" minlength="10" autocomplete="new-password" placeholder="At least 10 characters"></label>
+          <label>Confirm password <input id="secure-password-confirm" type="password" minlength="10" autocomplete="new-password" placeholder="Repeat password"></label>
+        </div>
+        <div class="secure-actions">
+          <button id="secure-export" class="button small" type="button">Export secure project</button>
+          <label class="button small ghost" for="secure-project-file">Import secure project</label>
+          <input id="secure-project-file" type="file" accept=".partslist,application/json">
+          <a id="secure-download" class="button small secure-download hidden" href="#" download>Download encrypted project</a>
+        </div>
+        <p class="fine-print">The ordinary Excel export is not encrypted. Share the <code>.partslist</code> file when access must require a password.</p>
+      </section>
+    </aside>
 
-    <script>
-        let connections = [];
-        let wireCounter = 0;
-        let cellPortMap = {}; 
+    <section class="main-panel">
+      <nav id="view-tabs" class="view-tabs hidden" aria-label="Workbook views"></nav>
 
-        // Viewport Panning State
-        let isPanning = false;
-        let panStartX = 0, panStartY = 0;
-        let panOffsetX = -300, panOffsetY = -200;
-        const canvas = document.getElementById('canvas');
-        const svg = document.getElementById('svg-canvas');
-        const viewport = document.getElementById('viewport');
-        canvas.style.transform = `translate(${panOffsetX}px, ${panOffsetY}px)`;
+      <section id="welcome-view" class="welcome-view">
+        <div class="welcome-card">
+          <p class="eyebrow">One calculated parts list</p>
+          <h2>Common parts first. Unique parts underneath.</h2>
+          <p>The consolidated sheet identifies parts found in more than one source sheet, highlights them in yellow, uses the maximum quantity found, and keeps discount, margin, shipping, and currency calculations traceable.</p>
+          <div class="feature-grid">
+            <article><strong>Common parts</strong><span>Grouped and highlighted automatically</span></article>
+            <article><strong>Formula engine</strong><span>Linked cells and cross-sheet references recalculate</span></article>
+            <article><strong>Reusable formulas</strong><span>Apply one formula across a row, column, or range</span></article>
+            <article><strong>Currency rates</strong><span>Refresh official-source daily reference rates</span></article>
+          </div>
+        </div>
+      </section>
 
-        // Dragging Nodes
-        let isDraggingNode = false, dragTarget = null, nodeOffsetX = 0, nodeOffsetY = 0;
-        // Drawing Wires
-        let isDrawingWire = false, activeStartPort = null, mouseX = 0, mouseY = 0;
+      <section id="consolidated-view" class="content-view hidden">
+        <div class="content-header">
+          <div>
+            <p class="eyebrow">Calculated output</p>
+            <h2>Consolidated parts</h2>
+            <p id="consolidated-summary" class="content-subtitle"></p>
+          </div>
+          <div class="legend"><span class="legend-swatch"></span>Common part</div>
+        </div>
+        <div class="kit-strip">
+          <div id="kit-bar" class="kit-bar" aria-label="Kits included in the consolidation"></div>
+          <details id="kit-breakdown" class="kit-breakdown">
+            <summary>Per-kit totals</summary>
+            <div id="kit-breakdown-table"></div>
+          </details>
+        </div>
+        <div id="summary-cards" class="summary-cards"></div>
+        <div class="table-toolbar">
+          <input id="consolidated-search" class="search-input" type="search" placeholder="Search part, description or kit" aria-label="Search consolidated parts" autocomplete="off">
+          <label>Show <select id="consolidated-filter" aria-label="Filter consolidated parts"></select></label>
+          <span id="consolidated-count" class="toolbar-count"></span>
+        </div>
+        <div id="consolidated-actions" class="selection-bar hidden" aria-live="polite"></div>
+        <div id="consolidated-table" class="table-shell" tabindex="0" aria-label="Scrollable consolidated parts table"></div>
+      </section>
 
-        viewport.addEventListener('mousedown', (e) => {
-            if (e.button === 2 || e.target === viewport || e.target === canvas) {
-                isPanning = true;
-                panStartX = e.clientX - panOffsetX;
-                panStartY = e.clientY - panOffsetY;
-                canvas.classList.add('panning');
-            }
-        });
-        window.addEventListener('contextmenu', e => e.preventDefault());
+      <section id="dashboard-view" class="content-view hidden">
+        <div class="content-header">
+          <div>
+            <p class="eyebrow">Profitability</p>
+            <h2>Sales dashboard</h2>
+            <p id="dashboard-subtitle" class="content-subtitle"></p>
+          </div>
+          <span id="dashboard-badge" class="quote-badge">SEK · excl. VAT</span>
+        </div>
+        <div id="dashboard-kit-bar" class="kit-bar dashboard-kit-bar" aria-label="Kits included in the consolidation"></div>
+        <div class="dashboard-layout">
+          <aside class="dashboard-side">
+            <section class="dash-card">
+              <p class="eyebrow">Sales assumptions</p>
+              <h3>Expected sales</h3>
+              <div class="warehouse-fields">
+                <label>
+                  <span class="field-caption">Default expected sales <span class="info-tip" tabindex="0" role="img" aria-label="Information: Used for items without a group or item override. Times stock quantity means stock turns per year." data-tip="Used for items without a group or item override. “× stock qty” means stock turns per year.">i</span></span>
+                  <span class="amount-currency wide-select"><input type="number" min="0" step="0.1" value="1" data-bind="sales.defaultValue" aria-label="Default expected sales"><select data-bind="sales.defaultMode" aria-label="Default expected sales unit"><option value="turns">× stock qty / yr</option><option value="units">units / item / yr</option></select></span>
+                </label>
+                <label>
+                  Chart horizon
+                  <span class="input-suffix wide"><input type="number" min="6" max="120" step="1" value="24" data-bind="sales.horizonMonths"><span>months</span></span>
+                </label>
+              </div>
+              <label class="warehouse-check"><input type="checkbox" data-bind="sales.customerPaysOutbound"><span class="field-caption">Customer pays outbound freight <span class="info-tip" tabindex="0" role="img" aria-label="Information: When checked, parcel freight from the warehouse is recharged to the customer and not counted as a cost." data-tip="When checked, parcel freight from the warehouse is recharged to the customer and not counted as a cost.">i</span></span></label>
+            </section>
 
-        document.addEventListener('mousedown', (e) => {
-            if (e.button !== 0) return;
-            if (e.target.classList.contains('node-header') || e.target.closest('.node-header')) {
-                isDraggingNode = true;
-                dragTarget = e.target.closest('.node-header').parentElement;
-                const rect = dragTarget.getBoundingClientRect();
-                nodeOffsetX = e.clientX - rect.left;
-                nodeOffsetY = e.clientY - rect.top;
-                dragTarget.style.zIndex = 100;
-            } else if (e.target.classList.contains('port') && e.target.classList.contains('out')) {
-                isDrawingWire = true;
-                activeStartPort = e.target;
-                updateMouse(e);
-                renderWires();
-            }
-        });
+            <section class="dash-card vat-box" aria-labelledby="vat-box-title">
+              <p class="eyebrow">VAT box</p>
+              <h3 id="vat-box-title">MVA</h3>
+              <label class="vat-rate">VAT rate <span class="input-suffix"><input type="number" min="0" max="100" step="0.1" value="25" data-bind="config.vatRate" data-scale="100"><span>%</span></span></label>
+              <dl id="vat-summary" class="stat-list"></dl>
+              <p class="fine-print">Output VAT is collected from customers and paid on. Import VAT through a Norwegian VAT-registered company is reported as both input and output VAT in the MVA-melding, so it is liquidity-neutral. Neither counts as profit or cost.</p>
+            </section>
 
-        document.addEventListener('mousemove', (e) => {
-            if (isPanning) {
-                panOffsetX = e.clientX - panStartX;
-                panOffsetY = e.clientY - panStartY;
-                canvas.style.transform = `translate(${panOffsetX}px, ${panOffsetY}px)`;
-            }
-            if (isDraggingNode && dragTarget) {
-                dragTarget.style.left = (e.clientX - nodeOffsetX - panOffsetX) + 'px';
-                dragTarget.style.top = (e.clientY - nodeOffsetY - panOffsetY) + 'px';
-                renderWires();
-            }
-            if (isDrawingWire) {
-                updateMouse(e);
-                renderWires();
-            }
-        });
+            <section class="dash-card">
+              <p class="eyebrow">Item groups</p>
+              <h3>Sales groups</h3>
+              <p class="fine-print">Select items in Consolidated or a kit tab and choose “Assign to group”. A group can override expected sales and the price multiplier. Up to 8 groups.</p>
+              <div id="group-list" class="group-list"></div>
+              <form id="group-form" class="group-form">
+                <input id="group-name" maxlength="40" placeholder="New group name" aria-label="New group name" autocomplete="off">
+                <button class="button small" type="submit">Add group</button>
+              </form>
+            </section>
+          </aside>
 
-        document.addEventListener('mouseup', (e) => {
-            isPanning = false; canvas.classList.remove('panning');
-            if (isDraggingNode) { isDraggingNode = false; if(dragTarget) dragTarget.style.zIndex = 10; dragTarget = null; }
-            if (isDrawingWire) {
-                isDrawingWire = false;
-                if (e.target.classList.contains('port') && e.target.classList.contains('in')) {
-                    const fromId = activeStartPort.getAttribute('data-id');
-                    const toId = e.target.getAttribute('data-id');
-                    const color = '#66d9ef';
-                    e.target.style.backgroundColor = color;
-                    activeStartPort.style.backgroundColor = color;
-                    connections = connections.filter(c => c.to !== toId);
-                    connections.push({ from: fromId, to: toId, color, index: wireCounter++ });
-                    evaluateGraph();
-                }
-                activeStartPort = null;
-                renderWires();
-            }
-        });
+          <div class="dashboard-main">
+            <div id="dashboard-kpis" class="kpi-grid"></div>
+            <div class="chart-grid">
+              <section class="chart-card" aria-labelledby="waterfall-title">
+                <header>
+                  <h3 id="waterfall-title">Annual profit bridge</h3>
+                  <p>From expected revenue to net profit, excluding VAT</p>
+                </header>
+                <div id="chart-waterfall" class="chart-body"></div>
+                <details class="chart-table-toggle"><summary>Show as table</summary><div id="waterfall-table"></div></details>
+              </section>
+              <section class="chart-card" aria-labelledby="payback-title">
+                <header>
+                  <h3 id="payback-title">Payback on stock investment</h3>
+                  <p>Cumulative net position, starting from the landed stock cost</p>
+                </header>
+                <div id="chart-cumulative" class="chart-body"></div>
+                <details class="chart-table-toggle"><summary>Show as table</summary><div id="cumulative-table"></div></details>
+              </section>
+            </div>
+            <section class="chart-card" aria-labelledby="group-chart-title">
+              <header>
+                <h3 id="group-chart-title">Net profit by sales group</h3>
+                <p>Annual, after storage, outtake and outbound freight</p>
+              </header>
+              <div id="chart-groups" class="chart-body"></div>
+              <div id="group-table" class="table-shell compact-table"></div>
+            </section>
+            <section class="chart-card" aria-labelledby="item-profit-title">
+              <header>
+                <h3 id="item-profit-title">Item profitability</h3>
+                <p>Sorted by annual net profit. Fixed warehouse costs are shown only in the totals.</p>
+              </header>
+              <div id="dashboard-items" class="table-shell dashboard-items" tabindex="0" aria-label="Scrollable item profitability table"></div>
+            </section>
+          </div>
+        </div>
+      </section>
 
-        svg.addEventListener('dblclick', (e) => {
-            if (e.target.classList.contains('wire')) {
-                const idx = parseInt(e.target.getAttribute('data-index'));
-                connections = connections.filter(c => c.index !== idx);
-                renderWires();
-            }
-        });
+      <section id="warehouse-view" class="content-view hidden">
+        <div class="content-header">
+          <div>
+            <p class="eyebrow">Capacity &amp; monthly cost</p>
+            <h2>Warehouse planner</h2>
+            <p id="warehouse-data-note" class="content-subtitle"></p>
+          </div>
+          <span class="quote-badge">3P quote · NOK/month</span>
+        </div>
 
-        function updateMouse(e) {
-            mouseX = e.clientX - panOffsetX;
-            mouseY = e.clientY - panOffsetY;
-        }
+        <div id="warehouse-summary-cards" class="summary-cards warehouse-summary-cards"></div>
 
-        // --- EXCEL PARSING ENGINE USING SHEETJS ---
-        function handleExcelUpload(e) {
-            const file = e.target.files[0];
-            if (!file) return;
+        <div class="warehouse-layout">
+          <section class="warehouse-control-panel" aria-labelledby="warehouse-assumptions-title">
+            <div class="warehouse-section-heading">
+              <div>
+                <p class="eyebrow">Storage model</p>
+                <h3 id="warehouse-assumptions-title">Capacity assumptions</h3>
+              </div>
+              <span id="warehouse-pallet-share" class="badge">0% pallets</span>
+            </div>
+            <div class="warehouse-fields two-column-fields">
+              <label>Shelf share <span class="input-suffix"><input id="wh-shelf-share" type="number" min="0" max="100" step="1" value="55"><span>%</span></span></label>
+              <label>Drawer share <span class="input-suffix"><input id="wh-drawer-share" type="number" min="0" max="100" step="1" value="25"><span>%</span></span></label>
+              <label>Bins per shelf <input id="wh-bins-per-shelf" type="number" min="1" max="12" step="1" value="4"></label>
+              <label>Shelf levels per rack <input id="wh-shelves-per-rack" type="number" min="1" max="8" step="1" value="4"></label>
+              <label>Units per bin <input id="wh-units-per-bin" type="number" min="1" step="1" value="5"></label>
+              <label>Units per shelf <input id="wh-units-shelf" type="number" value="20" readonly></label>
+              <label>Units per drawer <input id="wh-units-drawer" type="number" min="1" step="1" value="8"></label>
+              <label>Units per pallet <input id="wh-units-pallet" type="number" min="1" step="1" value="60"></label>
+              <label>Pallet type
+                <select id="wh-pallet-type"><option value="eu">EU pallet</option><option value="sea">Sea pallet</option></select>
+              </label>
+              <label>Pallet height
+                <select id="wh-pallet-height"><option value="120">Up to 120 cm</option><option value="220">Up to 220 cm</option></select>
+              </label>
+            </div>
+            <p id="warehouse-share-warning" class="warehouse-warning" role="alert"></p>
 
-            const reader = new FileReader();
-            reader.onload = function(e) {
-                const data = new Uint8Array(e.target.result);
-                const workbook = XLSX.read(data, { type: 'array', cellFormula: true, cellStyles: true });
+            <hr>
+            <p class="eyebrow">Monthly activity</p>
+            <div class="warehouse-fields two-column-fields">
+              <label><span class="field-caption">Receipts / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Number of inbound deliveries received by the warehouse each month." data-tip="Number of inbound deliveries received by the warehouse each month.">i</span></span><input id="wh-receipts" type="number" min="0" step="1" value="2"></label>
+              <label><span class="field-caption">Lines / receipt <span class="info-tip" tabindex="0" role="img" aria-label="Information: Average number of distinct item lines checked in for each receipt." data-tip="Average number of distinct item lines checked in for each receipt.">i</span></span><input id="wh-receipt-lines" type="number" min="0" step="1" value="8"></label>
+              <label><span class="field-caption">Orders / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Number of outbound orders the warehouse prepares each month." data-tip="Number of outbound orders the warehouse prepares each month.">i</span></span><input id="wh-orders" type="number" min="0" step="1" value="10"></label>
+              <label><span class="field-caption">Lines / order <span class="info-tip" tabindex="0" role="img" aria-label="Information: Average number of distinct item lines picked for each outbound order." data-tip="Average number of distinct item lines picked for each outbound order.">i</span></span><input id="wh-order-lines" type="number" min="0" step="1" value="5"></label>
+              <label><span class="field-caption">EDI labels / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Number of chargeable electronic shipping or logistics labels produced each month." data-tip="Number of chargeable electronic shipping or logistics labels produced each month.">i</span></span><input id="wh-edi-labels" type="number" min="0" step="1" value="10"></label>
+              <label><span class="field-caption">Business parcels / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Business deliveries up to 35 kilograms charged at the quoted parcel rate." data-tip="Business deliveries up to 35 kg charged at the quoted parcel rate.">i</span></span><input id="wh-business-parcels" type="number" min="0" step="1" value="8"></label>
+              <label><span class="field-caption">Private parcels / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Consumer deliveries charged at the parcel rate plus the private-recipient surcharge." data-tip="Consumer deliveries charged at the parcel rate plus the private-recipient surcharge.">i</span></span><input id="wh-private-parcels" type="number" min="0" step="1" value="2"></label>
+              <label><span class="field-caption">Packaging / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Estimated monthly packaging material cost, entered in Norwegian kroner." data-tip="Estimated monthly packaging material cost, entered in NOK.">i</span></span><span class="input-suffix"><input id="wh-packaging" type="number" min="0" step="1" value="0"><span>NOK</span></span></label>
+            </div>
+            <label class="warehouse-check"><input id="wh-wms" type="checkbox" data-bind="warehouse.includeWms"><span class="field-caption">Include WMS web license <span class="info-tip" tabindex="0" role="img" aria-label="Information: Adds the optional monthly warehouse-management-system license. It is off by default." data-tip="Adds the optional monthly WMS license. It is off by default.">i</span></span></label>
 
-                document.getElementById('status-msg').innerText = `Loaded: ${file.name} (${workbook.SheetNames.length} sheets parsed)`;
-                
-                document.querySelectorAll('.node').forEach(n => n.remove());
-                connections = []; cellPortMap = {}; svg.innerHTML = '';
+            <details class="rate-editor">
+              <summary>Quoted rates</summary>
+              <p>Private rate values are not shipped in the app. Enter them here, import a prior consolidated workbook, or unlock an encrypted project.</p>
+              <div class="rate-file-actions">
+                <button id="warehouse-rates-export" class="button small" type="button">Export rates JSON</button>
+                <label class="button small ghost" for="warehouse-rates-file">Import rates JSON</label>
+                <input id="warehouse-rates-file" type="file" accept=".json,application/json">
+                <span id="warehouse-rates-status" class="rate-save-status">Caesar-14 encoded · saved locally</span>
+              </div>
+              <p class="rate-security-note">Caesar-14 is reversible obfuscation, not access control. Use the password-encrypted secure project when the rates must be protected.</p>
+              <div id="warehouse-rate-inputs" class="warehouse-fields rate-fields">
+                <label>EU pallet ≤120 cm <span class="input-suffix"><input data-warehouse-rate="eu120" data-bind="warehouse.rates.eu120" type="number" min="0" value="0"><span>NOK</span></span></label>
+                <label>EU pallet ≤220 cm <span class="input-suffix"><input data-warehouse-rate="eu220" data-bind="warehouse.rates.eu220" type="number" min="0" value="0"><span>NOK</span></span></label>
+                <label>Sea pallet ≤120 cm <span class="input-suffix"><input data-warehouse-rate="sea120" data-bind="warehouse.rates.sea120" type="number" min="0" value="0"><span>NOK</span></span></label>
+                <label>Sea pallet ≤220 cm <span class="input-suffix"><input data-warehouse-rate="sea220" data-bind="warehouse.rates.sea220" type="number" min="0" value="0"><span>NOK</span></span></label>
+                <label>Shelf location <span class="input-suffix"><input data-warehouse-rate="shelf" data-bind="warehouse.rates.shelf" type="number" min="0" value="0"><span>NOK</span></span></label>
+                <label>Drawer location <span class="input-suffix"><input data-warehouse-rate="drawer" data-bind="warehouse.rates.drawer" type="number" min="0" value="0"><span>NOK</span></span></label>
+                <label>EDI label <span class="input-suffix"><input data-warehouse-rate="edi" data-bind="warehouse.rates.edi" type="number" min="0" value="0"><span>NOK</span></span></label>
+                <label>Receipt base <span class="input-suffix"><input data-warehouse-rate="receiptBase" data-bind="warehouse.rates.receiptBase" type="number" min="0" value="0"><span>NOK</span></span></label>
+                <label>Receipt line <span class="input-suffix"><input data-warehouse-rate="receiptLine" data-bind="warehouse.rates.receiptLine" type="number" min="0" value="0"><span>NOK</span></span></label>
+                <label>Order base <span class="input-suffix"><input data-warehouse-rate="orderBase" data-bind="warehouse.rates.orderBase" type="number" min="0" value="0"><span>NOK</span></span></label>
+                <label>Order line <span class="input-suffix"><input data-warehouse-rate="orderLine" data-bind="warehouse.rates.orderLine" type="number" min="0" value="0"><span>NOK</span></span></label>
+                <label>Parcel ≤35 kg <span class="input-suffix"><input data-warehouse-rate="parcel" data-bind="warehouse.rates.parcel" type="number" min="0" value="0"><span>NOK</span></span></label>
+                <label>Private surcharge <span class="input-suffix"><input data-warehouse-rate="privateSurcharge" data-bind="warehouse.rates.privateSurcharge" type="number" min="0" value="0"><span>NOK</span></span></label>
+                <label>WMS license <span class="input-suffix"><input data-warehouse-rate="wms" data-bind="warehouse.rates.wms" type="number" min="0" value="0"><span>NOK</span></span></label>
+              </div>
+            </details>
+          </section>
 
-                let posX = 100, posY = 150;
-                let sheetIndex = 0;
-
-                workbook.SheetNames.forEach(sheetName => {
-                    const worksheet = workbook.Sheets[sheetName];
-                    const jsonRows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: "" });
-                    
-                    createTableNode(sheetName, jsonRows, worksheet, posX, posY);
-                    posX += 420;
-                    if (++sheetIndex % 3 === 0) { posX = 100; posY += 550; }
-                });
-
-                autoDetectDependencies(workbook);
-            };
-            reader.readAsArrayBuffer(file);
-        }
-
-        function createTableNode(sheetName, rows, worksheet, x, y) {
-            const nodeId = `node-${sheetName.replace(/\s+/g, '_')}`;
-            let contentHTML = '';
-
-            const maxRows = Math.min(rows.length, 18);
-            for (let r = 0; r < maxRows; r++) {
-                const rowVals = rows[r];
-                if (!rowVals || rowVals.every(val => val === "")) continue;
-
-                const cellAddress = XLSX.utils.encode_cell({ r: r, c: 0 }); 
-                const cellVal = rowVals[0] !== undefined ? rowVals[0] : "";
-                
-                const inPortId = `port-in-${sheetName}-${r}`;
-                const outPortId = `port-out-${sheetName}-${r}`;
-                
-                cellPortMap[`${sheetName}!${cellAddress}`] = outPortId;
-
-                contentHTML += `
-                    <div class="row">
-                        <div class="port in" data-id="${inPortId}"></div>
-                        <span class="cell-label">Row ${r+1}</span>
-                        <div class="input-wrapper">
-                            <input type="text" value="${cellVal}" data-cell="${sheetName}!${cellAddress}" oninput="evaluateGraph()">
-                        </div>
-                        <div class="port out" data-id="${outPortId}"></div>
-                    </div>
-                `;
-            }
-
-            const node = document.createElement('div');
-            node.className = 'node';
-            node.style.left = `${x}px`;
-            node.style.top = `${y}px`;
-            node.innerHTML = `
-                <div class="node-header">
-                    <span>📊 ${sheetName}</span>
+          <div class="warehouse-output">
+            <section id="warehouse-currency-reference" class="currency-reference" aria-live="polite"></section>
+            <section class="warehouse-visual-panel" aria-labelledby="warehouse-preview-title">
+              <div class="warehouse-section-heading">
+                <div>
+                  <p class="eyebrow">Live isometric preview</p>
+                  <h3 id="warehouse-preview-title">Estimated storage footprint</h3>
                 </div>
-                <div class="node-content">${contentHTML}</div>
-            `;
-            canvas.appendChild(node);
-        }
+                <span id="warehouse-capacity-label" class="capacity-label"></span>
+              </div>
+              <div id="warehouse-preview" class="warehouse-preview" aria-live="polite"></div>
+              <div id="warehouse-storage-legend" class="storage-legend"></div>
+            </section>
 
-        function autoDetectDependencies(workbook) {
-            workbook.SheetNames.forEach(sheetName => {
-                const worksheet = workbook.Sheets[sheetName];
-                for (let cellKey in worksheet) {
-                    if (cellKey[0] === '!') continue;
-                    const cell = worksheet[cellKey];
-                    if (cell.f) { 
-                        const formula = cell.f;
-                        workbook.SheetNames.forEach(targetSheet => {
-                            if (formula.includes(targetSheet) || sheetName === targetSheet) {
-                                const matches = formula.match(/[A-Z]+\d+/g);
-                                if (matches) {
-                                    matches.forEach(matchCell => {
-                                        const sourceKey = `${targetSheet}!${matchCell}`;
-                                        const targetKey = `${sheetName}!${cellKey}`;
-                                        
-                                        const outPort = cellPortMap[sourceKey];
-                                        const targetInput = document.querySelector(`input[data-cell="${targetKey}"]`);
-                                        if (outPort && targetInput) {
-                                            const rowEl = targetInput.closest('.row');
-                                            const inPort = rowEl.querySelector('.port.in');
-                                            if (inPort) {
-                                                const inPortId = inPort.getAttribute('data-id');
-                                                const color = '#a6e22e';
-                                                inPort.style.backgroundColor = color;
-                                                document.querySelector(`[data-id="${outPort}"]`).style.backgroundColor = color;
-                                                
-                                                connections.push({
-                                                    from: outPort,
-                                                    to: inPortId,
-                                                    color: color,
-                                                    index: wireCounter++
-                                                });
-                                            }
-                                        }
-                                    });
-                                }
-                            }
-                        });
-                    }
-                }
-            });
-            renderWires();
-        }
+            <section class="warehouse-cost-panel" aria-labelledby="warehouse-cost-title">
+              <div class="warehouse-section-heading">
+                <div>
+                  <p class="eyebrow">Calculated estimate</p>
+                  <h3 id="warehouse-cost-title">Monthly cost breakdown</h3>
+                </div>
+                <strong id="warehouse-monthly-total" class="warehouse-total"></strong>
+              </div>
+              <div class="table-shell">
+                <table class="cost-table">
+                  <thead><tr><th>Cost item</th><th>Calculation in NOK</th><th>NOK / month</th><th id="warehouse-output-header">SEK / month</th></tr></thead>
+                  <tbody id="warehouse-cost-body"></tbody>
+                </table>
+              </div>
+              <p class="warehouse-footnote">Packaging is entered as a monthly estimate. API integration is excluded because no price was supplied. Freight assumes each listed parcel is one shipment up to 35 kg; private parcels add the quoted surcharge.</p>
+            </section>
+          </div>
+        </div>
+      </section>
 
-        function renderWires() {
-            svg.innerHTML = '';
-            connections.forEach(conn => {
-                const fromEl = document.querySelector(`[data-id="${conn.from}"]`);
-                const toEl = document.querySelector(`[data-id="${conn.to}"]`);
-                if (fromEl && toEl) drawCurve(fromEl, toEl, conn.color, conn.index);
-            });
+      <section id="wire-view" class="content-view hidden">
+        <div class="content-header">
+          <div>
+            <p class="eyebrow">Data lineage</p>
+            <h2>Wire view</h2>
+            <p class="content-subtitle">Select a node to trace incoming and outgoing data. Add custom relationships without changing workbook formulas.</p>
+          </div>
+          <div class="wire-header-tools">
+            <label>Detail
+              <select id="wire-detail-mode">
+                <option value="overview">Overview</option>
+                <option value="underhood">Under the hood</option>
+              </select>
+            </label>
+            <button id="wire-expand" class="button small" type="button">Expand view</button>
+            <div class="wire-legend" aria-label="Wire colors">
+              <span><i class="incoming"></i>Incoming</span>
+              <span><i class="outgoing"></i>Outgoing</span>
+              <span><i class="custom"></i>Custom</span>
+            </div>
+          </div>
+        </div>
 
-            if (isDrawingWire && activeStartPort) {
-                const rect = activeStartPort.getBoundingClientRect();
-                const startX = rect.left + rect.width / 2 - panOffsetX;
-                const startY = rect.top + rect.height / 2 - panOffsetY;
-                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-                const cp1x = startX + Math.abs(mouseX - startX) * 0.5;
-                const cp2x = mouseX - Math.abs(mouseX - startX) * 0.5;
-                path.setAttribute('d', `M ${startX} ${startY} C ${cp1x} ${startY}, ${cp2x} ${mouseY}, ${mouseX} ${mouseY}`);
-                path.setAttribute('class', 'wire');
-                path.setAttribute('stroke', '#66d9ef');
-                svg.appendChild(path);
-            }
-        }
+        <section id="flow-overview" class="flow-overview" aria-labelledby="flow-title">
+          <div class="flow-head">
+            <div>
+              <p class="eyebrow">Top overview</p>
+              <h3 id="flow-title">Factory to customer</h3>
+            </div>
+            <p class="flow-note">Edit values on the route; every view recalculates. Amounts in <strong class="output-currency-label">SEK</strong> unless marked.</p>
+            <div class="flow-mode" role="group" aria-label="Overview style">
+              <button type="button" data-flow-mode="route" aria-pressed="true">Route</button>
+              <button type="button" data-flow-mode="map" aria-pressed="false">Map</button>
+            </div>
+          </div>
+          <div id="flow-map" class="flow-map hidden">
+            <div class="map-panel map-world">
+              <div class="map-panel-head"><strong>Supply route</strong><span>Hover a wire or point for details · click a country to draw a comparison line</span></div>
+              <div id="map-world" class="map-canvas" aria-live="polite"></div>
+            </div>
+            <div class="map-panel map-norway">
+              <div class="map-panel-head"><strong>Norway</strong><span>Customs, warehouse and deliveries</span></div>
+              <div id="map-norway" class="map-canvas"></div>
+            </div>
+            <aside id="map-info" class="map-info" aria-live="polite"></aside>
+          </div>
+          <div class="flow-scroll">
+            <div class="flow-track">
+              <article class="flow-node factory">
+                <div class="flow-kind"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21V10l5 3V10l5 3V6l8 4v11z"/></svg>Manufacturer</div>
+                <input class="flow-title-input" data-bind="supplier.name" maxlength="80" aria-label="Manufacturer name">
+                <input class="flow-sub-input" data-bind="supplier.location" maxlength="80" aria-label="Manufacturer location">
+                <label class="flow-field" data-customs-info>Country <select data-bind="supplier.country" data-origin-select aria-label="Supplier country"></select></label>
+                <label class="flow-field">Discount <span class="input-suffix"><input type="number" min="0" max="100" step="0.1" data-bind="config.discount" data-scale="100"><span>%</span></span></label>
+                <dl id="flow-factory-stats" class="stat-list"></dl>
+              </article>
 
-        function drawCurve(fromEl, toEl, color, index) {
-            const r1 = fromEl.getBoundingClientRect();
-            const r2 = toEl.getBoundingClientRect();
-            const startX = r1.left + r1.width / 2 - panOffsetX;
-            const startY = r1.top + r1.height / 2 - panOffsetY;
-            const endX = r2.left + r2.width / 2 - panOffsetX;
-            const endY = r2.top + r2.height / 2 - panOffsetY;
+              <div class="flow-leg">
+                <div class="flow-arrow"><span>Ship to Norway</span></div>
+                <section class="flow-box" aria-label="Shipment and tolls">
+                  <h4>Shipment &amp; tolls</h4>
+                  <table class="flow-table">
+                    <tbody>
+                      <tr><th scope="row">Consolidated shipment</th><td><span class="amount-currency compact"><input type="number" min="0" step="1" data-bind="freight.consolidatedShipment" aria-label="Consolidated shipment amount"><select data-bind="freight.consolidatedCurrency" data-currency-select aria-label="Consolidated shipment currency"></select></span></td></tr>
+                      <tr><th scope="row">Split by</th><td><select data-bind="freight.allocation" aria-label="Split consolidated shipment by"><option value="value">Value</option><option value="quantity">Quantity</option><option value="lines">Lines</option></select></td></tr>
+                    </tbody>
+                    <tbody id="flow-kit-rows"></tbody>
+                    <tbody>
+                      <tr data-customs-info><th scope="row">Customs duty <button class="customs-info-button" type="button" data-customs-pin aria-label="Show customs and VAT rules for this origin">i</button></th><td><span class="input-suffix"><input type="number" min="0" max="100" step="0.1" data-bind="freight.dutyRate" data-scale="100" aria-label="Customs duty"><span>%</span></span></td></tr>
+                      <tr><th scope="row">Insurance</th><td><span class="input-suffix"><input type="number" min="0" max="100" step="0.1" data-bind="freight.insuranceRate" data-scale="100" aria-label="Insurance"><span>%</span></span></td></tr>
+                      <tr data-customs-info><th scope="row">Clearance &amp; broker</th><td><span class="amount-currency compact"><input type="number" min="0" step="1" data-bind="freight.clearanceFee" aria-label="Clearance and broker fees"><select data-bind="freight.clearanceCurrency" data-currency-select aria-label="Clearance fee currency"></select></span></td></tr>
+                      <tr class="derived" data-customs-info><th scope="row">Import VAT (deductible)</th><td id="flow-import-vat"></td></tr>
+                      <tr class="total"><th scope="row">Freight &amp; import total</th><td id="flow-inbound-total"></td></tr>
+                    </tbody>
+                  </table>
+                </section>
+              </div>
 
-            const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-            const cp1x = startX + Math.abs(endX - startX) * 0.5;
-            const cp2x = endX - Math.abs(endX - startX) * 0.5;
-            path.setAttribute('d', `M ${startX} ${startY} C ${cp1x} ${startY}, ${cp2x} ${endY}, ${endX} ${endY}`);
-            path.setAttribute('class', 'wire');
-            path.setAttribute('stroke', color);
-            path.setAttribute('data-index', index);
-            svg.appendChild(path);
-        }
+              <article class="flow-node border">
+                <div class="flow-kind"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h2v18H5zM8 4h11l-2 4 2 4H8z"/></svg>Norway</div>
+                <strong class="flow-title">Customs &amp; import</strong>
+                <span class="flow-sub">Landed in Norway</span>
+                <dl id="flow-norway-stats" class="stat-list"></dl>
+              </article>
 
-        function evaluateGraph() {
-            connections.forEach(conn => {
-                const fromPort = document.querySelector(`[data-id="${conn.from}"]`);
-                const toPort = document.querySelector(`[data-id="${conn.to}"]`);
-                if (fromPort && toPort) {
-                    const fromInp = fromPort.closest('.row').querySelector('input');
-                    const toInp = toPort.closest('.row').querySelector('input');
-                    if (fromInp && toInp) {
-                        toInp.value = fromInp.value;
-                    }
-                }
-            });
-        }
-    </script>
+              <div class="flow-leg">
+                <div class="flow-arrow"><span>Receive &amp; store</span></div>
+                <section class="flow-box" aria-label="Warehouse costs">
+                  <h4>Warehouse costs <small>NOK</small></h4>
+                  <table class="flow-table">
+                    <tbody>
+                      <tr><th scope="row">Shelf location / mo</th><td><input type="number" min="0" step="1" data-bind="warehouse.rates.shelf" aria-label="Shelf location rate in NOK per month"></td></tr>
+                      <tr><th scope="row">Drawer / mo</th><td><input type="number" min="0" step="1" data-bind="warehouse.rates.drawer" aria-label="Drawer location rate in NOK per month"></td></tr>
+                      <tr><th scope="row" id="flow-pallet-label">Pallet / mo</th><td><input id="flow-pallet-rate" type="number" min="0" step="1" data-bind="warehouse.rates.eu120" aria-labelledby="flow-pallet-label"></td></tr>
+                      <tr><th scope="row">Receipt + / line</th><td><div class="pair"><input type="number" min="0" step="1" data-bind="warehouse.rates.receiptBase" aria-label="Receipt base rate in NOK"><input type="number" min="0" step="1" data-bind="warehouse.rates.receiptLine" aria-label="Receipt per line rate in NOK"></div></td></tr>
+                      <tr><th scope="row">Order + / line</th><td><div class="pair"><input type="number" min="0" step="1" data-bind="warehouse.rates.orderBase" aria-label="Order base rate in NOK"><input type="number" min="0" step="1" data-bind="warehouse.rates.orderLine" aria-label="Order per line rate in NOK"></div></td></tr>
+                      <tr><th scope="row">EDI label</th><td><input type="number" min="0" step="1" data-bind="warehouse.rates.edi" aria-label="EDI label rate in NOK"></td></tr>
+                      <tr><th scope="row">Parcel ≤35 kg</th><td><input type="number" min="0" step="1" data-bind="warehouse.rates.parcel" aria-label="Parcel rate in NOK"></td></tr>
+                      <tr><th scope="row"><label class="inline-check"><input type="checkbox" data-bind="warehouse.includeWms">WMS / mo</label></th><td><input type="number" min="0" step="1" data-bind="warehouse.rates.wms" aria-label="WMS license rate in NOK per month"></td></tr>
+                      <tr><th scope="row">Orders / month</th><td><input type="number" min="0" step="1" data-bind="warehouse.orders" aria-label="Orders per month"></td></tr>
+                      <tr class="total"><th scope="row">Monthly total</th><td id="flow-warehouse-total"></td></tr>
+                    </tbody>
+                  </table>
+                </section>
+              </div>
+
+              <article class="flow-node warehouse">
+                <div class="flow-kind"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 9l10-6 10 6v12h-3v-9H5v9H2zM7 14h10v2H7zm0 4h10v3H7z"/></svg>Warehouse</div>
+                <input class="flow-title-input" data-bind="warehouse.site" maxlength="80" aria-label="Warehouse name">
+                <span class="flow-sub">Storage &amp; picking</span>
+                <dl id="flow-warehouse-stats" class="stat-list"></dl>
+              </article>
+
+              <div class="flow-leg">
+                <div class="flow-arrow"><span>Sell &amp; deliver</span></div>
+                <section class="flow-box" aria-label="Customer pricing">
+                  <h4>Customer pricing</h4>
+                  <table class="flow-table">
+                    <tbody>
+                      <tr><th scope="row">Price multiplier</th><td><span class="input-suffix"><input type="number" min="0" step="0.01" data-bind="config.multiplier" aria-label="Price multiplier"><span>×</span></span></td></tr>
+                      <tr><th scope="row">Freight margin</th><td><span class="input-suffix"><input type="number" min="0" max="99.9" step="0.1" data-bind="config.shippingMargin" data-scale="100" aria-label="Freight margin"><span>%</span></span></td></tr>
+                      <tr><th scope="row">VAT (MVA)</th><td><span class="input-suffix"><input type="number" min="0" max="100" step="0.1" data-bind="config.vatRate" data-scale="100" aria-label="VAT rate"><span>%</span></span></td></tr>
+                    </tbody>
+                    <tbody id="flow-per-item" class="locked">
+                      <tr class="lock-row"><th colspan="2">
+                        <button id="flow-lock" class="lock-toggle" type="button" aria-pressed="false">
+                          <svg class="icon-locked" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3h2v11H5V10zm2 0h6V7a3 3 0 0 0-6 0z"/></svg>
+                          <svg class="icon-unlocked" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 9.6-2l-1.8.9A3 3 0 0 0 9 7v3h10v11H5V10z"/></svg>
+                          <span class="lock-label">Locked</span>
+                        </button>
+                        <span>Per item, calculated</span>
+                      </th></tr>
+                      <tr><th scope="row">Shipment / unit sold</th><td><div class="override-cell"><input type="number" min="0" step="0.01" data-override="outboundPerUnit" readonly aria-label="Outbound shipment cost per unit sold"><small data-override-state="outboundPerUnit"></small></div></td></tr>
+                      <tr><th scope="row">Outtake / unit sold</th><td><div class="override-cell"><input type="number" min="0" step="0.01" data-override="outtakePerUnit" readonly aria-label="Outtake cost per unit sold"><small data-override-state="outtakePerUnit"></small></div></td></tr>
+                      <tr><th scope="row">Storage / unit / mo</th><td><div class="override-cell"><input type="number" min="0" step="0.01" data-override="storagePerUnitMonth" readonly aria-label="Storage cost per unit per month"><small data-override-state="storagePerUnitMonth"></small></div></td></tr>
+                      <tr class="reset-row"><td colspan="2"><button id="flow-reset-overrides" class="link-button" type="button">Reset to calculated values</button></td></tr>
+                    </tbody>
+                  </table>
+                </section>
+              </div>
+
+              <article class="flow-node customer">
+                <div class="flow-kind"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9zm-8 9c0-4 3.6-7 8-7s8 3 8 7z"/></svg>Customer</div>
+                <strong class="flow-title">Customer in Norway</strong>
+                <span class="flow-sub">Expected sales</span>
+                <dl id="flow-customer-stats" class="stat-list"></dl>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <div class="wire-layout">
+          <aside class="wire-controls">
+            <section class="wire-inspector" aria-live="polite">
+              <p class="eyebrow">Selected node</p>
+              <h3 id="wire-selected-title">Select a data point</h3>
+              <p id="wire-selected-detail" class="muted">Incoming wires turn blue and outgoing wires turn orange.</p>
+              <div id="wire-selected-links" class="wire-link-summary"></div>
+            </section>
+            <form id="wire-relation-form" class="wire-relation-form">
+              <p class="eyebrow">Add relationship</p>
+              <label>From <select id="wire-from"></select></label>
+              <label>To <select id="wire-to"></select></label>
+              <label>Label <input id="wire-label" maxlength="48" placeholder="e.g. drives capacity"></label>
+              <button class="button small primary" type="submit">Add wire</button>
+            </form>
+            <section>
+              <p class="eyebrow">Custom wires</p>
+              <div id="wire-custom-list" class="wire-custom-list"></div>
+            </section>
+          </aside>
+          <div id="wire-canvas" class="wire-canvas" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <section id="sheet-view" class="content-view hidden">
+        <div class="sheet-toolbar">
+          <div class="formula-cell" id="selected-address">A1</div>
+          <input id="formula-input" class="formula-input" aria-label="Selected cell value or formula" autocomplete="off" spellcheck="false">
+          <button id="save-cell" class="button small" type="button">Update cell</button>
+        </div>
+        <div class="range-toolbar">
+          <label>Target range <input id="target-range" value="A1:A10" spellcheck="false"></label>
+          <label class="range-formula">Formula or value <input id="range-formula" value="=A1" spellcheck="false"></label>
+          <button id="apply-range" class="button small" type="button">Apply with relative references</button>
+          <button id="clear-range" class="button small ghost" type="button">Clear</button>
+        </div>
+        <p class="toolbar-note">Enter a formula once and apply it to multiple rows or columns. Relative references move; references with <code>$</code> remain fixed. Click row numbers to select parts (Ctrl/⌘ or Shift for several) and act on them.</p>
+        <div id="sheet-actions" class="selection-bar hidden" aria-live="polite"></div>
+        <div class="sheet-layout">
+          <div id="sheet-grid" class="spreadsheet-shell"></div>
+          <aside id="dependency-panel" class="dependency-panel">
+            <p class="eyebrow">Cell links</p>
+            <h3>Dependencies</h3>
+            <p class="muted">Select a formula cell to see the cells it uses and the cells that use it.</p>
+          </aside>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <div id="chart-tooltip" class="chart-tooltip" role="tooltip" hidden></div>
+  <div id="customs-popover" class="customs-popover" role="dialog" aria-label="Customs and VAT rules" hidden></div>
+  <div id="toast" class="toast" role="alert" aria-live="assertive"></div>
+  <script src="app.js"></script>
 </body>
 </html>
