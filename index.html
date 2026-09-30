@@ -22,6 +22,7 @@
     </div>
     <div class="header-actions">
       <span id="save-state" class="save-state" aria-live="polite">No workbook loaded</span>
+      <button id="sidebar-toggle" class="button ghost" type="button" aria-expanded="true" aria-controls="app-sidebar">Hide settings</button>
       <button id="guide-toggle" class="button ghost" type="button" aria-expanded="false" disabled>Setup guide</button>
       <label class="button primary" for="workbook-file">Import workbook</label>
       <input id="workbook-file" type="file" accept=".xlsx,.xls,.xlsm,.xlsb,.ods,.csv">
@@ -34,8 +35,8 @@
     <span id="status-message">Import an Excel workbook to begin. Files stay in this browser.</span>
   </div>
 
-  <main class="workspace">
-    <aside class="sidebar" aria-label="Workbook controls">
+  <main id="workspace" class="workspace">
+    <aside id="app-sidebar" class="sidebar" aria-label="Workbook controls">
       <section class="panel upload-panel" id="empty-panel">
         <p class="eyebrow">Start here</p>
         <h2>Bring in the source sheets</h2>
@@ -415,6 +416,7 @@
                 <input id="warehouse-rates-file" type="file" accept=".json,application/json">
                 <span id="warehouse-rates-status" class="rate-save-status">Session only · export JSON or save an encrypted project to keep</span>
               </div>
+              <p class="rate-password-note"><strong>No password is required for the rates JSON.</strong> Passwords apply only to encrypted <code>.partslist</code> project files.</p>
               <p class="rate-security-note">Caesar-14 is reversible obfuscation, not access control. Use the password-encrypted secure project when the rates must be protected.</p>
               <div id="warehouse-rate-inputs" class="warehouse-fields rate-fields">
                 <label>EU pallet ≤120 cm <span class="input-suffix"><input data-warehouse-rate="eu120" data-bind="warehouse.rates.eu120" type="number" min="0" value="0"><span>NOK</span></span></label>

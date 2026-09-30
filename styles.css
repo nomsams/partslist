@@ -128,7 +128,10 @@ h3 { margin-bottom: 8px; font-size: 15px; }
   min-height: 0;
   display: grid;
   grid-template-columns: 340px minmax(0, 1fr);
+  transition: grid-template-columns .18s ease;
 }
+.workspace.sidebar-collapsed { grid-template-columns: minmax(0, 1fr); }
+.workspace.sidebar-collapsed .sidebar { display: none; }
 
 .sidebar {
   padding: 16px;
@@ -279,15 +282,24 @@ input:focus, select:focus { border-color: var(--green-700); box-shadow: 0 0 0 3p
 .feature-grid span { color: var(--muted); font-size: 12px; line-height: 1.4; }
 
 .content-view { height: auto; overflow: auto; padding: 22px; }
-#consolidated-view { display: flex; min-height: 0; flex-direction: column; overflow: hidden; }
+#consolidated-view { display: block; min-height: 0; overflow: auto; padding: 14px 16px 18px; }
 #consolidated-view > .content-header,
-#consolidated-view > .summary-cards { flex: 0 0 auto; }
+#consolidated-view > .kit-strip,
+#consolidated-view > .summary-cards,
+#consolidated-view > .table-toolbar,
+#consolidated-view > .selection-bar { position: sticky; left: 0; z-index: 1; }
+#consolidated-view .content-header { align-items: center; }
+#consolidated-view .content-header .eyebrow { display: none; }
+#consolidated-view .content-header h2 { margin-bottom: 2px; font-size: 20px; }
+#consolidated-view .content-subtitle { font-size: 11px; line-height: 1.35; }
+#consolidated-view .kit-strip { margin-top: 8px; }
+#consolidated-view .summary-cards { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+#consolidated-view .summary-card { min-width: 135px; display: flex; align-items: baseline; gap: 7px; flex: 1 1 155px; padding: 7px 9px; }
+#consolidated-view .summary-card span { font-size: 9px; }
+#consolidated-view .summary-card strong { margin-top: 0; font-size: 14px; }
 #consolidated-table {
-  flex: 1 1 0;
-  min-height: 180px;
-  overflow: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+  min-height: 0;
+  overflow: visible;
 }
 .content-header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
 .content-header h2 { margin-bottom: 4px; font-size: 24px; }
@@ -398,6 +410,7 @@ input:focus, select:focus { border-color: var(--green-700); box-shadow: 0 0 0 3p
 .rate-file-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 12px; }
 #warehouse-rates-file { display: none; }
 .rate-save-status { color: var(--muted); font-size: 10px; }
+.rate-password-note { padding: 8px 9px; border-radius: 6px; color: var(--green-800) !important; background: var(--green-100); }
 .rate-security-note { line-height: 1.45; }
 
 .warehouse-summary-cards { grid-template-columns: repeat(4, minmax(125px, 1fr)); }
@@ -624,11 +637,12 @@ table { width: 100%; border-collapse: separate; border-spacing: 0; }
   .header-actions { width: 100%; flex-wrap: wrap; }
   .setup-guide { top: 12px; right: 12px; width: calc(100vw - 24px); max-height: calc(100vh - 24px); }
   .workspace { display: block; }
+  .workspace.sidebar-collapsed .sidebar { display: none; }
   .sidebar { max-height: none; border-right: 0; border-bottom: 1px solid var(--line); }
   .main-panel { min-height: 600px; display: block; }
   .content-view { height: auto; min-height: 620px; }
   #consolidated-view { overflow: visible; }
-  #consolidated-table { min-height: 420px; max-height: 70vh; }
+  #consolidated-table { min-height: 0; max-height: none; }
   .welcome-view { min-height: 620px; }
   .feature-grid { grid-template-columns: 1fr; }
   .welcome-card h2 { font-size: 27px; }

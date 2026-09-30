@@ -32,12 +32,21 @@ test('non-technical users have guided setup, terminology help, and save-state fe
   assert.match(app, /function renderSaveState\(/);
 });
 
-test('the consolidated table has a bounded scroll area and 3PL rate import is discoverable', () => {
+test('the consolidated tab scrolls as one surface and 3PL rate import is discoverable', () => {
   assert.match(html, /aria-label="Scrollable consolidated parts table"/);
-  assert.match(css, /#consolidated-table\s*\{[^}]*overflow:\s*auto/s);
+  assert.match(css, /#consolidated-view\s*\{[^}]*overflow:\s*auto/s);
+  assert.match(css, /#consolidated-table\s*\{[^}]*overflow:\s*visible/s);
   assert.match(css, /grid-template-rows:\s*auto auto minmax\(0, 1fr\)/);
   assert.match(html, />Import 3PL rates JSON</);
   assert.match(html, /id="warehouse-rate-editor"[^>]*open/);
+});
+
+test('settings sidebar can be collapsed and warehouse rate files are password-free', () => {
+  assert.match(html, /id="sidebar-toggle"[^>]*aria-controls="app-sidebar"/);
+  assert.match(html, /id="app-sidebar"/);
+  assert.match(app, /function renderSidebarState\(/);
+  assert.match(css, /\.workspace\.sidebar-collapsed \.sidebar\s*\{\s*display:\s*none/);
+  assert.match(html, /No password is required for the rates JSON/);
 });
 
 test('isometric rack paints front uprights after shelves so the nearest support stays visible', () => {

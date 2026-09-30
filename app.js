@@ -186,6 +186,7 @@
     guideDismissed: false,
     projectDirty: false,
     projectSaveLabel: '',
+    sidebarCollapsed: false,
     warehousePreviewTransform: { scale: 1, x: 0, y: 0 },
     warehousePreviewDrag: null,
     secureDownloadUrl: null,
@@ -196,6 +197,9 @@
     file: el('workbook-file'),
     exportButton: el('export-button'),
     saveState: el('save-state'),
+    workspace: el('workspace'),
+    sidebar: el('app-sidebar'),
+    sidebarToggle: el('sidebar-toggle'),
     guideToggle: el('guide-toggle'),
     statusBar: el('status-bar'),
     statusMessage: el('status-message'),
@@ -352,6 +356,7 @@
     syncWarehouseRateInputs();
     bindEvents();
     renderSaveState();
+    renderSidebarState();
     if (!window.XLSX || !FormulaEngine || !Core) {
       setStatus('The spreadsheet libraries could not be loaded. Check the internet connection and reload.', 'error');
     }
@@ -368,6 +373,11 @@
       const [file] = event.target.files;
       if (file) importWorkbook(file);
       event.target.value = '';
+    });
+
+    dom.sidebarToggle.addEventListener('click', () => {
+      state.sidebarCollapsed = !state.sidebarCollapsed;
+      renderSidebarState();
     });
 
     ['dragenter', 'dragover'].forEach((name) => dom.dropZone.addEventListener(name, (event) => {
@@ -974,6 +984,13 @@
     dom.guideToggle.disabled = false;
     dom.saveState.textContent = state.projectDirty ? 'Unsaved changes' : state.projectSaveLabel || 'Workbook loaded';
     dom.saveState.className = `save-state ${state.projectDirty ? 'dirty' : 'saved'}`;
+  }
+
+  function renderSidebarState() {
+    dom.workspace.classList.toggle('sidebar-collapsed', state.sidebarCollapsed);
+    dom.sidebarToggle.setAttribute('aria-expanded', String(!state.sidebarCollapsed));
+    dom.sidebarToggle.textContent = state.sidebarCollapsed ? 'Show settings' : 'Hide settings';
+    dom.sidebar.setAttribute('aria-hidden', String(state.sidebarCollapsed));
   }
 
   function purgeLegacyLocalBusinessData() {
@@ -2872,7 +2889,7 @@
     const missingFreight = items.filter((item) => item.missingFreight).length;
     const sum = (field) => items.reduce((total, item) => total + (item[field] ?? 0), 0);
 
-    dom.consolidatedSummary.textContent = `${common.length} common and ${unique.length} unique parts from ${enabledSheetCount()} kits${state.excludedItems.length ? `, ${state.excludedItems.length} excluded` : ''}. Prices mirror the source sheets: currency conversion, discount, multiplier, freight and freight margin, plus consolidated shipment, import costs and VAT.`;
+    dom.consolidatedSummary.textContent = `${items.length} parts from ${enabledSheetCount()} source sheets${state.excludedItems.length ? ` · ${state.excludedItems.length} excluded` : ''}. Common parts are highlighted yellow.`;
     dom.summaryCards.replaceChildren(
       summaryCard('Common parts', common.length),
       summaryCard('Unique parts', unique.length),

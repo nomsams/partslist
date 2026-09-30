@@ -13,6 +13,7 @@ A browser-based workbook tool for consolidating parts lists from Excel files.
 - Lists parts found on multiple enabled sheets first, highlights them in yellow, and uses the maximum quantity found.
 - Lists unique parts underneath the common parts.
 - Leads the consolidated table with source sheets, part, description, quantity, amount in SEK, and amount in USD.
+- Makes the consolidated parts list the primary tab content: its compact overview scrolls away with the page, while the column header remains sticky. The left settings sidebar can be hidden and restored from the application header.
 - Applies configurable discount (30% by default), price multiplier (2×), freight, freight margin (15%), and daily currency conversion.
 - Replaces imported Google Finance currency formulas with the refreshed rate inside the browser calculation engine while preserving the original formulas in exported source sheets.
 - Sets freight per kit: keep the sheet's `Frakt` values, apply one amount per line, or split one amount across the whole kit. Kit freight has its own currency (SEK by default, matching the sheets).
@@ -65,4 +66,4 @@ Private warehouse and freight figures are deliberately not embedded in the publi
 
 Warehouse quote rates can be exported or imported as a Caesar-14 encoded JSON envelope, but they are not automatically written to browser storage. A local `warehouse-rates.private.json` file is loaded when present and is excluded by `.gitignore`. Caesar-14 is reversible obfuscation rather than access control; use the AES-GCM `.partslist` format when the data must require a password.
 
-To import a 3PL quote-rate file, open **Warehouse** and choose **Import 3PL rates JSON** in the page header or in the expanded **3PL quoted rates (NOK)** section. The importer expects a rates JSON file previously exported by PartsList; the original email text can instead be entered in the visible NOK fields.
+To import a 3PL quote-rate file, open **Warehouse** and choose **Import 3PL rates JSON** in the page header or in the expanded **3PL quoted rates (NOK)** section. The importer expects a rates JSON file previously exported by PartsList; the original email text can instead be entered in the visible NOK fields. Rate JSON files do not use a password; only encrypted `.partslist` project files require the password chosen during their export.
