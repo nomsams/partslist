@@ -5,8 +5,11 @@ A browser-based workbook tool for consolidating parts lists from Excel files.
 ## What it does
 
 - Imports `.xlsx`, `.xls`, `.xlsm`, `.xlsb`, `.ods`, and `.csv` files locally in the browser.
+- Includes a plain-language setup guide that checks sheet mappings, prices and currency rates, freight, warehouse assumptions, profitability completeness, and whether the latest changes have been exported. Each incomplete check links directly to the relevant screen.
+- Shows an always-visible saved/unsaved indicator. Business data is never silently saved to browser storage; users are directed to export an Excel workbook or password-encrypted project.
 - Preserves formulas for calculation and supports linked cells across sheets.
 - Detects multi-row headers and the first data row, including the workbook's `Rabatt 30%`, `Dubblering`, `Frakt`, and `Inkl Fraktmarginal` columns. All mappings remain editable.
+- Keeps successfully detected column mappings collapsed under an advanced disclosure, while sheets requiring attention open automatically with a clear warning.
 - Lists parts found on multiple enabled sheets first, highlights them in yellow, and uses the maximum quantity found.
 - Lists unique parts underneath the common parts.
 - Leads the consolidated table with source sheets, part, description, quantity, amount in SEK, and amount in USD.
@@ -61,3 +64,5 @@ Dashboard assumptions: expected sales come from an item override, then the item'
 Private warehouse and freight figures are deliberately not embedded in the public application source. Enter them locally, re-import a previously exported consolidated workbook, or unlock an encrypted project. Packaging must be entered as a monthly estimate; API integration is excluded until a price is available. Freight assumes one parcel per shipment up to 35 kg, with the entered surcharge added for private recipients.
 
 Warehouse quote rates can be exported or imported as a Caesar-14 encoded JSON envelope, but they are not automatically written to browser storage. A local `warehouse-rates.private.json` file is loaded when present and is excluded by `.gitignore`. Caesar-14 is reversible obfuscation rather than access control; use the AES-GCM `.partslist` format when the data must require a password.
+
+To import a 3PL quote-rate file, open **Warehouse** and choose **Import 3PL rates JSON** in the page header or in the expanded **3PL quoted rates (NOK)** section. The importer expects a rates JSON file previously exported by PartsList; the original email text can instead be entered in the visible NOK fields.

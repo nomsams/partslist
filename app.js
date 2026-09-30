@@ -183,6 +183,9 @@
     selectedWireNode: 'consolidated.quantity',
     wireMode: 'overview',
     wireExpanded: false,
+    guideDismissed: false,
+    projectDirty: false,
+    projectSaveLabel: '',
     warehousePreviewTransform: { scale: 1, x: 0, y: 0 },
     warehousePreviewDrag: null,
     secureDownloadUrl: null,
@@ -192,6 +195,8 @@
   const dom = {
     file: el('workbook-file'),
     exportButton: el('export-button'),
+    saveState: el('save-state'),
+    guideToggle: el('guide-toggle'),
     statusBar: el('status-bar'),
     statusMessage: el('status-message'),
     emptyPanel: el('empty-panel'),
@@ -213,6 +218,12 @@
     secureFile: el('secure-project-file'),
     secureDownload: el('secure-download'),
     tabs: el('view-tabs'),
+    setupGuide: el('setup-guide'),
+    setupGuideSummary: el('setup-guide-summary'),
+    setupProgress: document.querySelector('.setup-progress'),
+    setupProgressBar: el('setup-progress-bar'),
+    setupChecklist: el('setup-checklist'),
+    guideClose: el('guide-close'),
     welcome: el('welcome-view'),
     consolidatedView: el('consolidated-view'),
     consolidatedSummary: el('consolidated-summary'),
@@ -340,12 +351,19 @@
     await loadPrivateWarehouseRateFile();
     syncWarehouseRateInputs();
     bindEvents();
+    renderSaveState();
     if (!window.XLSX || !FormulaEngine || !Core) {
       setStatus('The spreadsheet libraries could not be loaded. Check the internet connection and reload.', 'error');
     }
   }
 
   function bindEvents() {
+    window.addEventListener('beforeunload', (event) => {
+      if (!state.projectDirty) return;
+      event.preventDefault();
+      event.returnValue = '';
+    });
+
     dom.file.addEventListener('change', (event) => {
       const [file] = event.target.files;
       if (file) importWorkbook(file);
@@ -377,12 +395,14 @@
       saveSettingsSoon();
       rebuildConsolidation();
       refreshRates(false);
+      renderMappings();
     });
     dom.outputCurrency.addEventListener('change', () => {
       state.config.outputCurrency = dom.outputCurrency.value;
       state.rates = {};
       saveSettingsSoon();
       rebuildConsolidation();
+      renderMappings();
       refreshRates(false);
     });
     dom.resetSettings.addEventListener('click', resetProjectSettings);
@@ -454,6 +474,9 @@
     }
     dom.refreshRates.addEventListener('click', () => refreshRates(true));
     dom.exportButton.addEventListener('click', exportWorkbook);
+    dom.guideToggle.addEventListener('click', () => toggleSetupGuide());
+    dom.guideClose.addEventListener('click', () => toggleSetupGuide(false));
+    dom.setupChecklist.addEventListener('click', handleSetupGuideAction);
 
     dom.saveCell.addEventListener('click', saveSelectedCell);
     dom.formulaInput.addEventListener('keydown', (event) => {
@@ -468,6 +491,7 @@
       if (file) importSecureProject(file);
       event.target.value = '';
     });
+    dom.secureDownload.addEventListener('click', () => markProjectSaved('Encrypted project downloaded'));
     dom.wireRelationForm.addEventListener('submit', addWireRelation);
     dom.wireDetailMode.addEventListener('change', () => {
       state.wireMode = dom.wireDetailMode.value === 'underhood' ? 'underhood' : 'overview';
@@ -922,8 +946,34 @@
   }
 
   function saveSettingsSoon() {
-    // Business data is intentionally not written to browser storage. It remains in
-    // memory until exported inside the workbook or an AES-GCM secure project.
+    // Business data is intentionally not written to browser storage. Track the
+    // unsaved state so users know when to export a workbook or secure project.
+    markProjectDirty();
+  }
+
+  function markProjectDirty() {
+    if (!state.workbook) return;
+    state.projectDirty = true;
+    state.projectSaveLabel = '';
+    renderSaveState();
+  }
+
+  function markProjectSaved(label) {
+    state.projectDirty = false;
+    state.projectSaveLabel = label || 'Saved';
+    renderSaveState();
+  }
+
+  function renderSaveState() {
+    if (!state.workbook) {
+      dom.saveState.textContent = 'No workbook loaded';
+      dom.saveState.className = 'save-state';
+      dom.guideToggle.disabled = true;
+      return;
+    }
+    dom.guideToggle.disabled = false;
+    dom.saveState.textContent = state.projectDirty ? 'Unsaved changes' : state.projectSaveLabel || 'Workbook loaded';
+    dom.saveState.className = `save-state ${state.projectDirty ? 'dirty' : 'saved'}`;
   }
 
   function purgeLegacyLocalBusinessData() {
@@ -1837,6 +1887,9 @@
       state.consolidatedFilter = 'all';
       state.pendingDisabledKits = null;
       state.importWarnings = [];
+      state.guideDismissed = false;
+      state.projectDirty = false;
+      state.projectSaveLabel = 'Workbook imported';
       const restoredWorkbook = hydrateExportedSettings(workbook);
 
       const engineSheets = {};
@@ -1890,6 +1943,8 @@
       setStatus(`Loaded ${file.name}. ${enabled} of ${workbook.SheetNames.length} sheets are included in consolidation.${restoredNote}${warningNote}`, state.importWarnings.length ? 'warning' : '');
       if (state.importWarnings.length) showToast(`Import warning: ${state.importWarnings.join(' ')}`);
       await refreshRates(false);
+      markProjectSaved(restoredWorkbook ? 'Workbook settings restored' : 'Workbook imported');
+      renderSetupGuide();
     } catch (error) {
       console.error(error);
       setStatus(`Could not import the workbook: ${error.message}`, 'error');
@@ -2121,8 +2176,11 @@
     dom.mappingList.replaceChildren();
     state.workbook.SheetNames.forEach((sheetName) => {
       const mapping = state.mappings[sheetName];
+      const mappingReady = mapping.part !== null
+        && mapping.quantity !== null
+        && (mapping.price !== null || mapping.discountedTotal !== null || mapping.sellingTotal !== null);
       const card = document.createElement('article');
-      card.className = `mapping-card${mapping.enabled ? '' : ' disabled'}`;
+      card.className = `mapping-card${mapping.enabled ? '' : ' disabled'}${mappingReady ? '' : ' needs-review'}`;
 
       const head = document.createElement('div');
       head.className = 'mapping-card-head';
@@ -2134,7 +2192,7 @@
       title.textContent = sheetName;
       const hint = document.createElement('span');
       hint.className = 'mapping-hint';
-      hint.textContent = `${state.matrices[sheetName].length} rows`;
+      hint.textContent = `${state.matrices[sheetName].length} rows · ${mappingReady ? 'Ready' : 'Needs review'}`;
       head.append(enabled, title, hint);
 
       const fields = document.createElement('div');
@@ -2149,11 +2207,19 @@
         saveSettingsSoon();
         rebuildConsolidation();
         refreshRates(false);
+        renderMappings();
       });
+
+      const details = document.createElement('details');
+      details.className = 'mapping-details';
+      details.open = mapping.enabled && !mappingReady;
+      const summary = document.createElement('summary');
+      summary.textContent = mappingReady ? 'Column mapping (advanced)' : 'Fix detected columns';
+      details.append(summary, fields);
 
       card.append(head);
       if (!isGeneratedSheet(state.workbook.Sheets[sheetName])) card.append(createKitFreightControl(sheetName));
-      card.append(fields);
+      card.append(details);
       dom.mappingList.append(card);
     });
   }
@@ -2174,7 +2240,9 @@
       replacement.append(createDataStartRowControl(sheetName, mapping));
       Object.keys(FIELD_LABELS).forEach((field) => replacement.append(createColumnControl(sheetName, field, mapping)));
       card.querySelector('.mapping-fields').replaceWith(replacement);
+      saveSettingsSoon();
       rebuildConsolidation();
+      renderMappings();
     });
     label.append(input);
     return label;
@@ -2190,7 +2258,9 @@
     input.value = String(mapping.dataStartRow + 1);
     input.addEventListener('change', () => {
       mapping.dataStartRow = clamp((toNumber(input.value) ?? mapping.headerRow + 2) - 1, mapping.headerRow + 1, Math.max(mapping.headerRow + 1, state.matrices[sheetName].length - 1));
+      saveSettingsSoon();
       rebuildConsolidation();
+      renderMappings();
     });
     label.append(input);
     return label;
@@ -2224,8 +2294,10 @@
     select.value = mapping[field] === null ? '' : String(mapping[field]);
     select.addEventListener('change', () => {
       mapping[field] = select.value === '' ? null : Number(select.value);
+      saveSettingsSoon();
       rebuildConsolidation();
       if (field === 'currency') refreshRates(false);
+      renderMappings();
     });
     label.append(select);
     return label;
@@ -2497,8 +2569,135 @@
 
   /* ---------- View refresh ---------- */
 
+  function toggleSetupGuide(force) {
+    if (!state.workbook) return;
+    const show = typeof force === 'boolean' ? force : state.guideDismissed;
+    state.guideDismissed = !show;
+    renderSetupGuide();
+  }
+
+  function setupGuideSteps() {
+    const enabledMappings = Object.values(state.mappings).filter((mapping) => mapping.enabled);
+    const mapped = enabledMappings.filter((mapping) => (
+      mapping.part !== null
+      && mapping.quantity !== null
+      && (mapping.price !== null || mapping.discountedTotal !== null || mapping.sellingTotal !== null)
+    )).length;
+    const mappingIssues = Math.max(0, enabledMappings.length - mapped);
+    const missingPricesOrRates = state.consolidated.filter((item) => item.convertedTotal === null).length;
+    const missingFreight = state.consolidated.filter((item) => item.missingFreight).length;
+    const warehouseConfigured = Object.values(state.warehouse.rates).some((value) => Number(value) > 0);
+    const warehouseFxReady = state.config.outputCurrency === 'NOK' || Number.isFinite(state.rates.NOK);
+    const profitability = calculateProfitability();
+    return [
+      {
+        complete: enabledMappings.length > 0 && mappingIssues === 0,
+        title: 'Confirm the parts sheets',
+        detail: !enabledMappings.length ? 'No parts sheets are enabled.' : mappingIssues ? `${mappingIssues} enabled sheet${mappingIssues === 1 ? '' : 's'} need a part, quantity and price column.` : `${mapped} parts sheet${mapped === 1 ? '' : 's'} mapped and included.`,
+        action: 'mapping',
+        actionLabel: 'Review sheets',
+      },
+      {
+        complete: state.consolidated.length > 0 && missingPricesOrRates === 0,
+        title: 'Check prices and currencies',
+        detail: missingPricesOrRates ? `${missingPricesOrRates} part${missingPricesOrRates === 1 ? '' : 's'} have a missing price or currency conversion.` : `${state.consolidated.length} consolidated parts have usable prices.`,
+        action: 'rates',
+        actionLabel: 'Check rates',
+      },
+      {
+        complete: state.consolidated.length > 0 && missingFreight === 0,
+        title: 'Confirm inbound freight',
+        detail: missingFreight ? `${missingFreight} part${missingFreight === 1 ? '' : 's'} still need freight data.` : 'Kit freight and shared shipment inputs are calculable.',
+        action: 'freight',
+        actionLabel: 'Review freight',
+      },
+      {
+        complete: warehouseConfigured && warehouseFxReady,
+        title: 'Review warehouse assumptions',
+        detail: !warehouseConfigured ? 'Warehouse quote rates have not been entered or imported.' : !warehouseFxReady ? `The NOK to ${state.config.outputCurrency} rate is missing.` : 'Warehouse quote rates and NOK conversion are ready.',
+        action: 'warehouse',
+        actionLabel: 'Open warehouse',
+      },
+      {
+        complete: profitability.complete,
+        title: 'Review the business result',
+        detail: profitability.complete ? 'Profit, margin, ROI and payback can be calculated.' : `The estimate is incomplete: ${profitability.missingReasons.join(' and ')}.`,
+        action: 'dashboard',
+        actionLabel: 'Open dashboard',
+      },
+      {
+        complete: !state.projectDirty,
+        title: 'Save a shareable copy',
+        detail: state.projectDirty ? 'Your latest changes have not been exported. Use an encrypted project when access needs a password.' : state.projectSaveLabel || 'The current workbook has been imported.',
+        action: 'save',
+        actionLabel: 'Save options',
+      },
+    ];
+  }
+
+  function renderSetupGuide() {
+    const available = Boolean(state.workbook);
+    dom.setupGuide.classList.toggle('hidden', !available || state.guideDismissed);
+    dom.guideToggle.disabled = !available;
+    dom.guideToggle.setAttribute('aria-expanded', String(available && !state.guideDismissed));
+    dom.guideToggle.textContent = available && !state.guideDismissed ? 'Hide guide' : 'Setup guide';
+    if (!available) return;
+    const steps = setupGuideSteps();
+    const complete = steps.filter((step) => step.complete).length;
+    const percent = Math.round(complete / steps.length * 100);
+    if (state.guideDismissed) dom.guideToggle.textContent = `Setup guide ${complete}/${steps.length}`;
+    dom.setupProgress.setAttribute('aria-valuenow', String(percent));
+    dom.setupProgressBar.style.width = `${percent}%`;
+    dom.setupGuideSummary.textContent = complete === steps.length
+      ? 'Everything needed for a complete estimate is ready. Review the result, then export the format you need.'
+      : `${complete} of ${steps.length} checks are complete. Work from top to bottom; advanced settings can stay unchanged.`;
+    const rows = steps.map((step, index) => {
+      const row = document.createElement('li');
+      row.className = `setup-step ${step.complete ? 'complete' : 'warning'}`;
+      const icon = document.createElement('span');
+      icon.className = 'setup-step-icon';
+      icon.textContent = step.complete ? '✓' : String(index + 1);
+      const copy = document.createElement('span');
+      copy.className = 'setup-step-copy';
+      const title = document.createElement('strong');
+      title.textContent = step.title;
+      const detail = document.createElement('span');
+      detail.textContent = step.detail;
+      copy.append(title, detail);
+      const action = document.createElement('button');
+      action.type = 'button';
+      action.className = `button small ${step.complete ? 'ghost' : ''}`;
+      action.dataset.guideAction = step.action;
+      action.textContent = step.actionLabel;
+      row.append(icon, copy, action);
+      return row;
+    });
+    dom.setupChecklist.replaceChildren(...rows);
+  }
+
+  function handleSetupGuideAction(event) {
+    const button = event.target.closest('[data-guide-action]');
+    if (!button) return;
+    const action = button.dataset.guideAction;
+    if (action === 'warehouse') showView(VIEW.warehouse);
+    else if (action === 'dashboard') showView(VIEW.dashboard);
+    else {
+      const target = {
+        mapping: document.getElementById('mapping-panel'),
+        rates: document.getElementById('workbook-panel'),
+        freight: document.getElementById('freight-panel'),
+        save: document.getElementById('secure-panel'),
+      }[action];
+      target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      target?.querySelector('button, input, select')?.focus({ preventScroll: true });
+    }
+    toggleSetupGuide(false);
+  }
+
   function refreshViews() {
     if (!state.workbook) return;
+    renderSaveState();
+    renderSetupGuide();
     renderKitBars();
     renderFreightSummary();
     updateGroupCounts();
@@ -4535,6 +4734,7 @@
     dom.refreshRates.disabled = false;
     applyLiveRatesToEngine();
     rebuildConsolidation();
+    if (force) markProjectDirty();
     const dates = [...new Set(Object.values(state.rateDates).filter(Boolean))].sort();
     dom.rateStatus.textContent = errors.length
       ? `Some rates could not be refreshed: ${errors.join(', ')}. Missing conversions remain blank.`
@@ -4833,6 +5033,7 @@
   }
 
   function afterWorkbookEdit(sheetName) {
+    markProjectDirty();
     rebuildDependencyIndex();
     rebuildConsolidation();
     if (state.activeView === sheetName) {
@@ -4871,6 +5072,7 @@
       const expression = parseUserInput(expressionText);
       state.hf.addNamedExpression(name, expression);
       state.variables.push({ name, expression: expressionText });
+      markProjectDirty();
       dom.variableForm.reset();
       renderVariables();
       renderSheetGrid();
@@ -4909,6 +5111,7 @@
     try {
       state.hf.removeNamedExpression(name);
       state.variables = state.variables.filter((variable) => variable.name !== name);
+      markProjectDirty();
       renderVariables();
       renderSheetGrid();
       rebuildConsolidation();
@@ -5147,6 +5350,7 @@
       setStatus(`Secure project unlocked: ${state.fileName}.`);
       showToast('Secure project imported and unlocked.');
       await refreshRates(false);
+      markProjectSaved('Encrypted project opened');
     } catch (error) {
       console.error(error);
       setStatus(`Could not open ${file.name}: ${error.message}`, 'error');
@@ -5257,6 +5461,7 @@
       if (state.workbook.Custprops) output.Custprops = { ...state.workbook.Custprops };
       const base = state.fileName.replace(/\.[^.]+$/, '').replace(/-consolidated$/i, '') || 'partslist';
       XLSX.writeFile(output, `${base}-consolidated.xlsx`, { bookType: 'xlsx', cellStyles: true, compression: true });
+      markProjectSaved('Excel workbook exported');
       showToast('Consolidated workbook exported with profitability, warehouse and settings sheets.');
     } catch (error) {
       console.error(error);

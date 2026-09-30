@@ -21,6 +21,8 @@
       </div>
     </div>
     <div class="header-actions">
+      <span id="save-state" class="save-state" aria-live="polite">No workbook loaded</span>
+      <button id="guide-toggle" class="button ghost" type="button" aria-expanded="false" disabled>Setup guide</button>
       <label class="button primary" for="workbook-file">Import workbook</label>
       <input id="workbook-file" type="file" accept=".xlsx,.xls,.xlsm,.xlsb,.ods,.csv">
       <button id="export-button" class="button" type="button" disabled>Export consolidated .xlsx</button>
@@ -45,7 +47,7 @@
       </section>
 
       <section id="workbook-controls" class="hidden">
-        <section class="panel">
+        <section id="workbook-panel" class="panel">
           <div class="section-heading">
             <div>
               <p class="eyebrow">Workbook</p>
@@ -84,7 +86,7 @@
           <button id="reset-settings" class="button small ghost full" type="button">Reset kit, freight &amp; group settings</button>
         </section>
 
-        <section class="panel">
+        <section id="freight-panel" class="panel">
           <div class="section-heading">
             <div>
               <p class="eyebrow">Inbound logistics</p>
@@ -129,7 +131,7 @@
           </details>
         </section>
 
-        <section class="panel">
+        <section id="mapping-panel" class="panel">
           <div class="section-heading">
             <div>
               <p class="eyebrow">Source mapping</p>
@@ -157,7 +159,7 @@
 
       </section>
 
-      <section class="panel secure-panel">
+      <section id="secure-panel" class="panel secure-panel">
         <div class="section-heading">
           <div>
             <p class="eyebrow">Local access control</p>
@@ -182,6 +184,29 @@
 
     <section class="main-panel">
       <nav id="view-tabs" class="view-tabs hidden" aria-label="Workbook views"></nav>
+
+      <section id="setup-guide" class="setup-guide hidden" aria-labelledby="setup-guide-title">
+        <header class="setup-guide-head">
+          <div>
+            <p class="eyebrow">Guided setup</p>
+            <h2 id="setup-guide-title">Get the workbook ready</h2>
+            <p id="setup-guide-summary">Follow the steps below. Advanced settings can be left unchanged unless you know they apply.</p>
+          </div>
+          <button id="guide-close" class="icon-button" type="button" aria-label="Hide setup guide">×</button>
+        </header>
+        <div class="setup-progress" role="progressbar" aria-label="Workbook setup progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="setup-progress-bar"></span></div>
+        <ol id="setup-checklist" class="setup-checklist"></ol>
+        <details class="plain-language-help">
+          <summary>What do these terms mean?</summary>
+          <dl>
+            <div><dt>Common part</dt><dd>A part appearing in more than one source sheet. The largest required quantity is used.</dd></div>
+            <div><dt>Landed cost</dt><dd>The purchase price plus freight, insurance, customs duty and clearance costs.</dd></div>
+            <div><dt>Margin</dt><dd>The amount left after costs. VAT is not counted as income or profit.</dd></div>
+            <div><dt>Shipment split</dt><dd>How one shared freight invoice is divided between parts: by purchase value, quantity or number of lines.</dd></div>
+            <div><dt>Stock turns</dt><dd>How many times the current stock quantity is expected to sell during one year.</dd></div>
+          </dl>
+        </details>
+      </section>
 
       <section id="welcome-view" class="welcome-view">
         <div class="welcome-card">
@@ -332,7 +357,10 @@
             <h2>Warehouse planner</h2>
             <p id="warehouse-data-note" class="content-subtitle"></p>
           </div>
-          <span class="quote-badge">3P quote · NOK/month</span>
+          <div class="warehouse-header-actions">
+            <span class="quote-badge">3P quote · NOK/month</span>
+            <label class="button small" for="warehouse-rates-file">Import 3PL rates JSON</label>
+          </div>
         </div>
 
         <div id="warehouse-summary-cards" class="summary-cards warehouse-summary-cards"></div>
@@ -378,12 +406,12 @@
             </div>
             <label class="warehouse-check"><input id="wh-wms" type="checkbox" data-bind="warehouse.includeWms"><span class="field-caption">Include WMS web license <span class="info-tip" tabindex="0" role="img" aria-label="Information: Adds the optional monthly warehouse-management-system license. It is off by default." data-tip="Adds the optional monthly WMS license. It is off by default.">i</span></span></label>
 
-            <details class="rate-editor">
-              <summary>Quoted rates</summary>
-              <p>Private rate values are not shipped in the app. Enter them here, import a prior consolidated workbook, or unlock an encrypted project.</p>
+            <details id="warehouse-rate-editor" class="rate-editor" open>
+              <summary>3PL quoted rates (NOK)</summary>
+              <p>Enter the Norwegian quote values below or import a previously exported PartsList rate file. This importer accepts the app's Caesar-14 encoded JSON rate file, not the original email text.</p>
               <div class="rate-file-actions">
-                <button id="warehouse-rates-export" class="button small" type="button">Export rates JSON</button>
-                <label class="button small ghost" for="warehouse-rates-file">Import rates JSON</label>
+                <button id="warehouse-rates-export" class="button small" type="button">Export 3PL rates JSON</button>
+                <label class="button small ghost" for="warehouse-rates-file">Import 3PL rates JSON</label>
                 <input id="warehouse-rates-file" type="file" accept=".json,application/json">
                 <span id="warehouse-rates-status" class="rate-save-status">Session only · export JSON or save an encrypted project to keep</span>
               </div>
