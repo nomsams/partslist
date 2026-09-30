@@ -26,7 +26,7 @@
       <button id="guide-toggle" class="button ghost" type="button" aria-expanded="false" disabled>Setup guide</button>
       <label class="button primary" for="workbook-file">Import workbook</label>
       <input id="workbook-file" type="file" accept=".xlsx,.xls,.xlsm,.xlsb,.ods,.csv">
-      <button id="export-button" class="button" type="button" disabled>Export consolidated .xlsx</button>
+      <button id="export-button" class="button" type="button" disabled title="Save source sheets, calculations, assumptions, variables and warehouse rates in one re-importable Excel file">Save project .xlsx</button>
     </div>
   </header>
 
@@ -369,46 +369,53 @@
         <div class="warehouse-layout">
           <section class="warehouse-control-panel" aria-labelledby="warehouse-assumptions-title">
             <div class="warehouse-section-heading">
-              <div>
-                <p class="eyebrow">Storage model</p>
-                <h3 id="warehouse-assumptions-title">Capacity assumptions</h3>
-              </div>
-              <span id="warehouse-pallet-share" class="badge">0% pallets</span>
+              <div><p class="eyebrow">Storage plan</p><h3 id="warehouse-assumptions-title">What will you use?</h3></div>
+              <span id="warehouse-pallet-share" class="badge">0 planned pallets</span>
             </div>
-            <div class="warehouse-fields two-column-fields">
-              <label>Shelf share <span class="input-suffix"><input id="wh-shelf-share" type="number" min="0" max="100" step="1" value="55"><span>%</span></span></label>
-              <label>Drawer share <span class="input-suffix"><input id="wh-drawer-share" type="number" min="0" max="100" step="1" value="25"><span>%</span></span></label>
-              <label>Bins per shelf <input id="wh-bins-per-shelf" type="number" min="1" max="12" step="1" value="4"></label>
-              <label>Shelf levels per rack <input id="wh-shelves-per-rack" type="number" min="1" max="8" step="1" value="4"></label>
-              <label>Units per bin <input id="wh-units-per-bin" type="number" min="1" step="1" value="5"></label>
-              <label>Units per shelf <input id="wh-units-shelf" type="number" value="20" readonly></label>
-              <label>Units per drawer <input id="wh-units-drawer" type="number" min="1" step="1" value="8"></label>
-              <label>Units per pallet <input id="wh-units-pallet" type="number" min="1" step="1" value="60"></label>
-              <label>Pallet type
-                <select id="wh-pallet-type"><option value="eu">EU pallet</option><option value="sea">Sea pallet</option></select>
-              </label>
-              <label>Pallet height
-                <select id="wh-pallet-height"><option value="120">Up to 120 cm</option><option value="220">Up to 220 cm</option></select>
-              </label>
+            <p class="warehouse-simple-copy">Select the storage types you expect to pay for. Shelf racks with bins are enabled by default.</p>
+            <div class="storage-type-grid">
+              <label class="storage-type-card"><input id="wh-shelf-enabled" type="checkbox" data-bind="warehouse.shelfEnabled" checked><span><strong>Shelf racks with bins</strong><small>Default · remaining stock is fitted here automatically</small></span></label>
+              <label class="storage-type-card"><input id="wh-drawer-enabled" type="checkbox" data-bind="warehouse.drawerEnabled"><span><strong>Drawer storage</strong><small>Uses the drawer capacity assumption</small></span></label>
+              <label class="storage-type-card"><input id="wh-pallet-enabled" type="checkbox" data-bind="warehouse.palletEnabled"><span><strong>Pallet storage</strong><small>Enter the exact number of pallet positions</small></span></label>
             </div>
+            <label class="planned-pallets-field"><span>Planned pallet positions <span class="value-source assumed">Assumed</span></span><input id="wh-planned-pallets" type="number" min="0" step="1" value="0" data-bind="warehouse.plannedPallets"></label>
             <p id="warehouse-share-warning" class="warehouse-warning" role="alert"></p>
 
-            <hr>
-            <p class="eyebrow">Monthly activity</p>
-            <div class="warehouse-fields two-column-fields">
-              <label><span class="field-caption">Receipts / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Number of inbound deliveries received by the warehouse each month." data-tip="Number of inbound deliveries received by the warehouse each month.">i</span></span><input id="wh-receipts" type="number" min="0" step="1" value="2"></label>
-              <label><span class="field-caption">Lines / receipt <span class="info-tip" tabindex="0" role="img" aria-label="Information: Average number of distinct item lines checked in for each receipt." data-tip="Average number of distinct item lines checked in for each receipt.">i</span></span><input id="wh-receipt-lines" type="number" min="0" step="1" value="8"></label>
-              <label><span class="field-caption">Orders / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Number of outbound orders the warehouse prepares each month." data-tip="Number of outbound orders the warehouse prepares each month.">i</span></span><input id="wh-orders" type="number" min="0" step="1" value="10"></label>
-              <label><span class="field-caption">Lines / order <span class="info-tip" tabindex="0" role="img" aria-label="Information: Average number of distinct item lines picked for each outbound order." data-tip="Average number of distinct item lines picked for each outbound order.">i</span></span><input id="wh-order-lines" type="number" min="0" step="1" value="5"></label>
-              <label><span class="field-caption">EDI labels / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Number of chargeable electronic shipping or logistics labels produced each month." data-tip="Number of chargeable electronic shipping or logistics labels produced each month.">i</span></span><input id="wh-edi-labels" type="number" min="0" step="1" value="10"></label>
-              <label><span class="field-caption">Business parcels / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Business deliveries up to 35 kilograms charged at the quoted parcel rate." data-tip="Business deliveries up to 35 kg charged at the quoted parcel rate.">i</span></span><input id="wh-business-parcels" type="number" min="0" step="1" value="8"></label>
-              <label><span class="field-caption">Private parcels / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Consumer deliveries charged at the parcel rate plus the private-recipient surcharge." data-tip="Consumer deliveries charged at the parcel rate plus the private-recipient surcharge.">i</span></span><input id="wh-private-parcels" type="number" min="0" step="1" value="2"></label>
-              <label><span class="field-caption">Packaging / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Estimated monthly packaging material cost, entered in Norwegian kroner." data-tip="Estimated monthly packaging material cost, entered in NOK.">i</span></span><span class="input-suffix"><input id="wh-packaging" type="number" min="0" step="1" value="0"><span>NOK</span></span></label>
-            </div>
-            <label class="warehouse-check"><input id="wh-wms" type="checkbox" data-bind="warehouse.includeWms"><span class="field-caption">Include WMS web license <span class="info-tip" tabindex="0" role="img" aria-label="Information: Adds the optional monthly warehouse-management-system license. It is off by default." data-tip="Adds the optional monthly WMS license. It is off by default.">i</span></span></label>
+            <details class="warehouse-assumption-details">
+              <summary>Capacity and fit assumptions <span class="value-source assumed">Assumed</span></summary>
+              <p>Planning estimates—not values from the workbook or the 3PL quote.</p>
+              <div class="warehouse-fields two-column-fields">
+                <label>Shelf share when drawers are used <span class="input-suffix"><input id="wh-shelf-share" type="number" min="0" max="100" step="1" value="55"><span>%</span></span></label>
+                <label>Drawer share when shelves are used <span class="input-suffix"><input id="wh-drawer-share" type="number" min="0" max="100" step="1" value="25"><span>%</span></span></label>
+                <label>Bins per shelf <input id="wh-bins-per-shelf" type="number" min="1" max="12" step="1" value="4"></label>
+                <label>Shelf levels per rack <input id="wh-shelves-per-rack" type="number" min="1" max="8" step="1" value="4"></label>
+                <label>Units per bin <input id="wh-units-per-bin" type="number" min="1" step="1" value="5"></label>
+                <label>Units per shelf <input id="wh-units-shelf" type="number" value="20" readonly></label>
+                <label>Units per drawer <input id="wh-units-drawer" type="number" min="1" step="1" value="8"></label>
+                <label>Units per pallet <input id="wh-units-pallet" type="number" min="1" step="1" value="60"></label>
+                <label>Pallet type <select id="wh-pallet-type"><option value="eu">EU pallet</option><option value="sea">Sea pallet</option></select></label>
+                <label>Pallet height <select id="wh-pallet-height"><option value="120">Up to 120 cm</option><option value="220">Up to 220 cm</option></select></label>
+              </div>
+            </details>
 
-            <details id="warehouse-rate-editor" class="rate-editor" open>
-              <summary>3PL quoted rates (NOK)</summary>
+            <details class="warehouse-assumption-details">
+              <summary>Monthly activity assumptions <span class="value-source assumed">Assumed</span></summary>
+              <p>Replace these examples with expected monthly receipts, orders and parcels.</p>
+              <div class="warehouse-fields two-column-fields">
+                <label><span class="field-caption">Receipts / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Number of inbound deliveries received by the warehouse each month." data-tip="Number of inbound deliveries received by the warehouse each month.">i</span></span><input id="wh-receipts" type="number" min="0" step="1" value="2"></label>
+                <label><span class="field-caption">Lines / receipt <span class="info-tip" tabindex="0" role="img" aria-label="Information: Average number of distinct item lines checked in for each receipt." data-tip="Average number of distinct item lines checked in for each receipt.">i</span></span><input id="wh-receipt-lines" type="number" min="0" step="1" value="8"></label>
+                <label><span class="field-caption">Orders / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Number of outbound orders the warehouse prepares each month." data-tip="Number of outbound orders the warehouse prepares each month.">i</span></span><input id="wh-orders" type="number" min="0" step="1" value="10"></label>
+                <label><span class="field-caption">Lines / order <span class="info-tip" tabindex="0" role="img" aria-label="Information: Average number of distinct item lines picked for each outbound order." data-tip="Average number of distinct item lines picked for each outbound order.">i</span></span><input id="wh-order-lines" type="number" min="0" step="1" value="5"></label>
+                <label><span class="field-caption">EDI labels / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Number of chargeable electronic shipping or logistics labels produced each month." data-tip="Number of chargeable electronic shipping or logistics labels produced each month.">i</span></span><input id="wh-edi-labels" type="number" min="0" step="1" value="10"></label>
+                <label><span class="field-caption">Business parcels / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Business deliveries up to 35 kilograms charged at the quoted parcel rate." data-tip="Business deliveries up to 35 kg charged at the quoted parcel rate.">i</span></span><input id="wh-business-parcels" type="number" min="0" step="1" value="8"></label>
+                <label><span class="field-caption">Private parcels / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Consumer deliveries charged at the parcel rate plus the private-recipient surcharge." data-tip="Consumer deliveries charged at the parcel rate plus the private-recipient surcharge.">i</span></span><input id="wh-private-parcels" type="number" min="0" step="1" value="2"></label>
+                <label><span class="field-caption">Packaging / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Estimated monthly packaging material cost, entered in Norwegian kroner." data-tip="Estimated monthly packaging material cost, entered in NOK.">i</span></span><span class="input-suffix"><input id="wh-packaging" type="number" min="0" step="1" value="0"><span>NOK</span></span></label>
+              </div>
+              <label class="warehouse-check"><input id="wh-wms" type="checkbox" data-bind="warehouse.includeWms"><span class="field-caption">Include WMS web license <span class="info-tip" tabindex="0" role="img" aria-label="Information: Adds the optional monthly warehouse-management-system license. It is off by default." data-tip="Adds the optional monthly WMS license. It is off by default.">i</span></span></label>
+            </details>
+
+            <details id="warehouse-rate-editor" class="rate-editor">
+              <summary>3PL quoted rates (NOK) <span class="value-source quoted">From quote</span></summary>
               <p>Enter the Norwegian quote values below or import a previously exported PartsList rate file. This importer accepts the app's Caesar-14 encoded JSON rate file, not the original email text.</p>
               <div class="rate-file-actions">
                 <button id="warehouse-rates-export" class="button small" type="button">Export 3PL rates JSON</button>

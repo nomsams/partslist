@@ -38,7 +38,7 @@ test('the consolidated tab scrolls as one surface and 3PL rate import is discove
   assert.match(css, /#consolidated-table\s*\{[^}]*overflow:\s*visible/s);
   assert.match(css, /grid-template-rows:\s*auto auto minmax\(0, 1fr\)/);
   assert.match(html, />Import 3PL rates JSON</);
-  assert.match(html, /id="warehouse-rate-editor"[^>]*open/);
+  assert.match(html, /id="warehouse-rate-editor"/);
 });
 
 test('settings sidebar can be collapsed and warehouse rate files are password-free', () => {
@@ -55,4 +55,27 @@ test('isometric rack paints front uprights after shelves so the nearest support 
   const frontUprights = warehouseRenderer.indexOf("'rack-upright rack-upright-front'");
   assert.ok(shelfLoop >= 0 && frontUprights > shelfLoop, 'Front rack uprights must be painted after the shelves');
   assert.match(warehouseRenderer, /post <= rackBays/);
+});
+
+test('warehouse storage types are explicit and shelves are the default', () => {
+  assert.match(html, /id="wh-shelf-enabled"[^>]*checked/);
+  assert.match(html, /id="wh-drawer-enabled"/);
+  assert.match(html, /id="wh-pallet-enabled"/);
+  assert.match(html, /id="wh-planned-pallets"/);
+  assert.match(app, /plannedPallets:\s*0/);
+  assert.match(app, /Core\.planWarehouseStorage\(/);
+});
+
+test('normal Excel export is a re-importable whole-project workbook', () => {
+  assert.match(html, />Save project \.xlsx</);
+  assert.match(app, /function buildProjectDataSheet\(/);
+  assert.match(app, /mappings,\s*\n\s*variables:/);
+  assert.match(app, /wireRelations: state\.wireRelations/);
+  assert.match(app, /rates: \{ \.\.\.state\.warehouse\.rates \}/);
+  assert.match(app, /-partslist-project\.xlsx/);
+});
+
+test('routine status text does not consume a permanent row', () => {
+  assert.match(css, /\.status-bar:not\(\.busy\):not\(\.error\):not\(\.warning\)\s*\{\s*display:\s*none/);
+  assert.match(css, /\.app-header\s*\{[^}]*min-height:\s*54px/s);
 });

@@ -19,6 +19,10 @@
   const PRINTABLE_ASCII_RANGE = 95;
   const CURRENCIES = ['SEK', 'EUR', 'USD', 'GBP', 'NOK', 'DKK', 'CHF', 'CAD', 'AUD', 'JPY', 'CNY', 'PLN'];
   const WAREHOUSE_DEFAULTS = Object.freeze({
+    shelfEnabled: true,
+    drawerEnabled: false,
+    palletEnabled: false,
+    plannedPallets: 0,
     shelfShare: 55,
     drawerShare: 25,
     binsPerShelf: 4,
@@ -175,6 +179,9 @@
     consolidatedSearch: '',
     consolidatedFilter: 'all',
     pendingDisabledKits: null,
+    pendingMappings: null,
+    pendingVariables: null,
+    pendingWireRelations: null,
     importWarnings: [],
     wireRelations: [],
     wireNodePositions: { overview: {}, underhood: {} },
@@ -251,6 +258,10 @@
     warehouseRatesStatus: el('warehouse-rates-status'),
     whShelfShare: el('wh-shelf-share'),
     whDrawerShare: el('wh-drawer-share'),
+    whShelfEnabled: el('wh-shelf-enabled'),
+    whDrawerEnabled: el('wh-drawer-enabled'),
+    whPalletEnabled: el('wh-pallet-enabled'),
+    whPlannedPallets: el('wh-planned-pallets'),
     whBinsPerShelf: el('wh-bins-per-shelf'),
     whShelvesPerRack: el('wh-shelves-per-rack'),
     whUnitsPerBin: el('wh-units-per-bin'),
@@ -693,6 +704,7 @@
   function onBoundChange(path) {
     if (path.startsWith('warehouse.rates.')) persistWarehouseRates();
     if (path.startsWith('warehouse.')) state.warehouse.unitsPerShelf = state.warehouse.binsPerShelf * state.warehouse.unitsPerBin;
+    if (path === 'warehouse.plannedPallets') state.warehouse.plannedPallets = Math.max(0, Math.round(state.warehouse.plannedPallets || 0));
     saveSettingsSoon();
     if (/Currency$/.test(path)) {
       rebuildConsolidation();
@@ -809,12 +821,16 @@
   /* ---------- Settings persistence (local + workbook + secure project) ---------- */
 
   function collectSettings() {
-    const warehouse = { ...state.warehouse };
-    delete warehouse.rates;
+    const warehouse = { ...state.warehouse, rates: { ...state.warehouse.rates } };
     delete warehouse.shareMessage;
+    const mappings = {};
+    Object.entries(state.mappings).forEach(([sheetName, mapping]) => {
+      if (isGeneratedSheet(state.workbook?.Sheets[sheetName])) return;
+      mappings[sheetName] = { ...mapping };
+    });
     return {
       format: 'partslist-settings',
-      version: 1,
+      version: 2,
       config: {
         discount: state.config.discount,
         multiplier: state.config.multiplier,
@@ -832,6 +848,9 @@
       supplier: { ...state.supplier },
       flowOverrides: { ...state.flowOverrides },
       wireNodePositions: Core.sanitizeWirePositions(state.wireNodePositions),
+      wireRelations: state.wireRelations.filter(isValidWireRelation).map((edge) => ({ ...edge })),
+      mappings,
+      variables: state.variables.map((variable) => ({ name: variable.name, expression: variable.expression })),
       warehouse,
       disabledKits: state.workbook ? state.workbook.SheetNames.filter((name) => isSourceKit(name) && !state.mappings[name].enabled) : [],
     };
@@ -944,9 +963,42 @@
     state.warehouse.binsPerShelf = clamp(Math.round(state.warehouse.binsPerShelf) || 1, 1, 12);
     state.warehouse.shelvesPerRack = clamp(Math.round(state.warehouse.shelvesPerRack) || 1, 1, 8);
     state.warehouse.unitsPerShelf = state.warehouse.binsPerShelf * state.warehouse.unitsPerBin;
+    Object.keys(WAREHOUSE_RATE_DEFAULTS).forEach((key) => {
+      if (settings.warehouse?.rates && key in settings.warehouse.rates) {
+        state.warehouse.rates[key] = finiteOr(settings.warehouse.rates[key], state.warehouse.rates[key], 0);
+      }
+    });
 
     state.pendingDisabledKits = Array.isArray(settings.disabledKits) ? settings.disabledKits.filter((name) => typeof name === 'string') : null;
+    state.pendingMappings = settings.mappings && typeof settings.mappings === 'object' ? settings.mappings : null;
+    state.pendingVariables = Array.isArray(settings.variables) ? settings.variables : null;
+    state.pendingWireRelations = Array.isArray(settings.wireRelations) ? settings.wireRelations.filter(isValidWireRelation) : null;
     return true;
+  }
+
+  function applyPendingMappings() {
+    if (!state.pendingMappings || !state.workbook) return;
+    const numericFields = ['headerRow', 'dataStartRow', ...Object.keys(FIELD_LABELS)];
+    Object.entries(state.pendingMappings).forEach(([sheetName, saved]) => {
+      const mapping = state.mappings[sheetName];
+      const matrix = state.matrices[sheetName];
+      if (!mapping || !matrix || !saved || typeof saved !== 'object') return;
+      if (typeof saved.enabled === 'boolean') mapping.enabled = saved.enabled;
+      numericFields.forEach((field) => {
+        if (saved[field] === null && field in FIELD_LABELS) mapping[field] = null;
+        else if (Number.isInteger(saved[field]) && saved[field] >= 0) mapping[field] = saved[field];
+      });
+      mapping.headerRow = clamp(mapping.headerRow, 0, Math.max(0, matrix.length - 1));
+      mapping.dataStartRow = clamp(mapping.dataStartRow, mapping.headerRow + 1, Math.max(mapping.headerRow + 1, matrix.length - 1));
+    });
+    state.pendingMappings = null;
+  }
+
+  function restorePendingWorkbookState() {
+    if (state.pendingVariables) restoreVariables(state.pendingVariables);
+    if (state.pendingWireRelations) state.wireRelations = state.pendingWireRelations.map((edge) => ({ ...edge }));
+    state.pendingVariables = null;
+    state.pendingWireRelations = null;
   }
 
   function applyPendingDisabledKits() {
@@ -1163,17 +1215,21 @@
     const warehouse = state.warehouse;
     const rates = warehouse.rates;
     const inventoryUnits = state.consolidated.reduce((sum, item) => sum + Math.max(0, item.maxQuantity || 0), 0);
-    const shelfShare = clamp(warehouse.shelfShare, 0, 100) / 100;
-    const drawerShare = clamp(warehouse.drawerShare, 0, 100) / 100;
-    const palletShare = Math.max(0, 1 - shelfShare - drawerShare);
     const unitsPerShelf = Math.max(1, warehouse.binsPerShelf * warehouse.unitsPerBin);
     warehouse.unitsPerShelf = unitsPerShelf;
-    const shelfUnits = inventoryUnits * shelfShare;
-    const drawerUnits = inventoryUnits * drawerShare;
-    const palletUnits = inventoryUnits * palletShare;
-    const shelfLocations = Core.requiredLocations(shelfUnits, unitsPerShelf);
-    const drawerLocations = Core.requiredLocations(drawerUnits, warehouse.unitsPerDrawer);
-    const pallets = Core.requiredLocations(palletUnits, warehouse.unitsPerPallet);
+    const storage = Core.planWarehouseStorage({
+      inventoryUnits,
+      shelfEnabled: warehouse.shelfEnabled,
+      drawerEnabled: warehouse.drawerEnabled,
+      palletEnabled: warehouse.palletEnabled,
+      plannedPallets: warehouse.plannedPallets,
+      shelfShare: warehouse.shelfShare,
+      drawerShare: warehouse.drawerShare,
+      unitsPerShelf,
+      unitsPerDrawer: warehouse.unitsPerDrawer,
+      unitsPerPallet: warehouse.unitsPerPallet,
+    });
+    const { shelfEnabled, drawerEnabled, palletEnabled, shelfUnits, drawerUnits, palletUnits, shelfShare, drawerShare, palletShare, shelfLocations, drawerLocations, pallets } = storage;
     const racks = shelfLocations > 0 ? Math.ceil(shelfLocations / warehouse.shelvesPerRack) : 0;
     const totalBins = shelfLocations * warehouse.binsPerShelf;
     const palletRateKey = `${warehouse.palletType}${warehouse.palletHeight}`;
@@ -1206,9 +1262,7 @@
     costs.forEach((item) => { item.converted = nokToOutput === null ? null : item.value * nokToOutput; });
     const monthlyNok = costs.reduce((sum, item) => sum + item.value, 0);
     const monthlyTotal = nokToOutput === null ? null : monthlyNok * nokToOutput;
-    const capacity = shelfLocations * unitsPerShelf
-      + drawerLocations * warehouse.unitsPerDrawer
-      + pallets * warehouse.unitsPerPallet;
+    const { capacity, capacityShortfall } = storage;
 
     return {
       storageNok: storageShelf + storageDrawer + storagePallet,
@@ -1223,6 +1277,9 @@
       shelfShare,
       drawerShare,
       palletShare,
+      shelfEnabled,
+      drawerEnabled,
+      palletEnabled,
       shelfUnits,
       drawerUnits,
       palletUnits,
@@ -1236,6 +1293,7 @@
       nokToOutput,
       outputCurrency,
       capacity,
+      capacityShortfall,
       costs,
       monthlyNok,
       monthlyTotal,
@@ -1248,10 +1306,17 @@
     if (!dom.warehouseView) return;
     const model = calculateWarehouseModel();
     const locationCount = model.shelfLocations + model.drawerLocations + model.pallets;
-    dom.warehouseDataNote.textContent = `${model.distinctParts} consolidated part numbers and ${formatNumber(model.inventoryUnits, 2)} units from the imported maximum quantities.`;
-    dom.warehousePalletShare.textContent = `${formatNumber(model.palletShare * 100, 0)}% pallets`;
+    dom.warehouseDataNote.textContent = `${model.distinctParts} part numbers · ${formatNumber(model.inventoryUnits, 2)} units from workbook quantities. Storage choices and activity values marked “Assumed” are planning inputs.`;
+    dom.warehousePalletShare.textContent = `${model.pallets} planned pallet${model.pallets === 1 ? '' : 's'}`;
     dom.whUnitsShelf.value = String(model.unitsPerShelf);
-    dom.warehouseShareWarning.textContent = state.warehouse.shareMessage || '';
+    dom.whPlannedPallets.disabled = !state.warehouse.palletEnabled;
+    dom.whPalletType.disabled = !state.warehouse.palletEnabled;
+    dom.whPalletHeight.disabled = !state.warehouse.palletEnabled;
+    dom.whShelfShare.disabled = !state.warehouse.shelfEnabled || !state.warehouse.drawerEnabled;
+    dom.whDrawerShare.disabled = !state.warehouse.shelfEnabled || !state.warehouse.drawerEnabled;
+    dom.warehouseShareWarning.textContent = model.capacityShortfall > 0
+      ? `Selected storage is short by ${formatNumber(model.capacityShortfall, 0)} units. Enable shelf or drawer storage, or add pallet positions.`
+      : state.warehouse.shareMessage || '';
     dom.warehouseCapacityLabel.textContent = `${formatNumber(model.capacity, 0)} unit capacity`;
     dom.warehouseSummaryCards.replaceChildren(
       summaryCard('Inventory units', formatNumber(model.inventoryUnits, 2)),
@@ -1909,6 +1974,9 @@
       state.consolidatedSearch = '';
       state.consolidatedFilter = 'all';
       state.pendingDisabledKits = null;
+      state.pendingMappings = null;
+      state.pendingVariables = null;
+      state.pendingWireRelations = null;
       state.importWarnings = [];
       state.guideDismissed = false;
       state.projectDirty = false;
@@ -1923,6 +1991,7 @@
         state.mappings[sheetName] = detectMapping(matrix);
         if (isGeneratedSheet(workbook.Sheets[sheetName])) state.mappings[sheetName].enabled = false;
       });
+      applyPendingMappings();
       applyPendingDisabledKits();
 
       state.hf = FormulaEngine.buildFromSheets(engineSheets, {
@@ -1938,6 +2007,7 @@
       state.sheetIds = {};
       workbook.SheetNames.forEach((name) => { state.sheetIds[name] = state.hf.getSheetId(name); });
       importNamedExpressions(workbook);
+      restorePendingWorkbookState();
       rebuildDependencyIndex();
 
       dom.workbookName.textContent = file.name;
@@ -1977,7 +2047,7 @@
 
   function isGeneratedSheet(sheet) {
     const marker = String(sheet?.A1?.v ?? '').trim().toLowerCase();
-    return ['consolidated parts', 'warehouse cost estimate', 'assumption', 'profitability estimate', SETTINGS_SHEET_MARKER].includes(marker);
+    return ['consolidated parts', 'warehouse cost estimate', 'assumption', 'profitability estimate', 'partslist project data', SETTINGS_SHEET_MARKER].includes(marker);
   }
 
   function readSettingsSheet(workbook) {
@@ -2016,6 +2086,8 @@
       const drawerShare = toNumber(sheet.B8?.v);
       if (Number.isFinite(shelfShare) && shelfShare >= 0 && shelfShare <= 1) state.warehouse.shelfShare = Math.round(shelfShare * 10000) / 100;
       if (Number.isFinite(drawerShare) && drawerShare >= 0 && drawerShare <= 1) state.warehouse.drawerShare = Math.round(drawerShare * 10000) / 100;
+      if (Number.isFinite(shelfShare)) state.warehouse.shelfEnabled = shelfShare > 0;
+      if (Number.isFinite(drawerShare)) state.warehouse.drawerEnabled = drawerShare > 0;
       assignNumber(state.warehouse, 'binsPerShelf', 'B10', 1);
       assignNumber(state.warehouse, 'shelvesPerRack', 'B11', 1);
       assignNumber(state.warehouse, 'unitsPerBin', 'B12', 1);
@@ -2034,6 +2106,11 @@
         businessParcels: 'B34', privateParcels: 'B35', packaging: 'B36',
       };
       Object.entries(activityCells).forEach(([key, address]) => assignNumber(state.warehouse, key, address));
+      const exportedPallets = toNumber(sheet.B25?.v);
+      if (Number.isFinite(exportedPallets) && exportedPallets >= 0) {
+        state.warehouse.plannedPallets = Math.round(exportedPallets);
+        state.warehouse.palletEnabled = exportedPallets > 0;
+      }
       state.warehouse.includeWms = sheet.B37?.v === true || String(sheet.B37?.v ?? '').toUpperCase() === 'TRUE';
     }
 
@@ -5384,6 +5461,10 @@
   function syncControlsFromState(active = null) {
     dom.sourceCurrency.value = state.config.sourceCurrency;
     dom.outputCurrency.value = state.config.outputCurrency;
+    writeInputValue(dom.whShelfEnabled, state.warehouse.shelfEnabled);
+    writeInputValue(dom.whDrawerEnabled, state.warehouse.drawerEnabled);
+    writeInputValue(dom.whPalletEnabled, state.warehouse.palletEnabled);
+    if (dom.whPlannedPallets !== active) writeInputValue(dom.whPlannedPallets, state.warehouse.plannedPallets);
     const bindings = [
       [dom.whShelfShare, 'shelfShare'], [dom.whDrawerShare, 'drawerShare'],
       [dom.whBinsPerShelf, 'binsPerShelf'], [dom.whShelvesPerRack, 'shelvesPerRack'],
@@ -5465,6 +5546,7 @@
       const profitabilityName = claim('Profitability');
       const warehousingName = claim('Warehousing');
       const assumptionsName = claim('Assumptions');
+      const projectDataName = claim('Project data');
       const settingsName = claim('PartsList settings');
       const output = XLSX.utils.book_new();
       const consolidated = buildConsolidatedSheet(assumptionsName);
@@ -5472,6 +5554,7 @@
       XLSX.utils.book_append_sheet(output, buildProfitabilitySheet(consolidatedName, assumptionsName, consolidated.layout), profitabilityName);
       XLSX.utils.book_append_sheet(output, buildWarehousingSheet(), warehousingName);
       XLSX.utils.book_append_sheet(output, buildAssumptionsSheet(), assumptionsName);
+      XLSX.utils.book_append_sheet(output, buildProjectDataSheet(), projectDataName);
       sourceNames.forEach((sheetName) => {
         XLSX.utils.book_append_sheet(output, state.workbook.Sheets[sheetName], sheetName);
       });
@@ -5482,10 +5565,10 @@
       if (state.workbook.Workbook?.Names) output.Workbook.Names = state.workbook.Workbook.Names;
       if (state.workbook.Props) output.Props = { ...state.workbook.Props };
       if (state.workbook.Custprops) output.Custprops = { ...state.workbook.Custprops };
-      const base = state.fileName.replace(/\.[^.]+$/, '').replace(/-consolidated$/i, '') || 'partslist';
-      XLSX.writeFile(output, `${base}-consolidated.xlsx`, { bookType: 'xlsx', cellStyles: true, compression: true });
-      markProjectSaved('Excel workbook exported');
-      showToast('Consolidated workbook exported with profitability, warehouse and settings sheets.');
+      const base = state.fileName.replace(/\.[^.]+$/, '').replace(/-(?:consolidated|partslist-project)$/i, '') || 'partslist';
+      XLSX.writeFile(output, `${base}-partslist-project.xlsx`, { bookType: 'xlsx', cellStyles: true, compression: true });
+      markProjectSaved('Project workbook exported');
+      showToast('Project workbook saved. Re-import it to restore source sheets, variables, mappings, warehouse rates and assumptions.');
     } catch (error) {
       console.error(error);
       showToast(error.message || 'The workbook could not be exported.', true);
@@ -5756,11 +5839,57 @@
     const chunks = json.match(/[\s\S]{1,30000}/g) || ['{}'];
     const rows = [
       ['PartsList settings'],
-      ['Machine-readable settings (kit freight, freight & import, VAT, sales groups, item overrides). Re-import this workbook into PartsList to restore them.'],
+      ['Machine-readable project state. Re-import this workbook into PartsList to restore mappings, variables, warehouse rates, assumptions, groups, item overrides and custom wires.'],
       ...chunks.map((chunk) => [chunk]),
     ];
     const sheet = XLSX.utils.aoa_to_sheet(rows);
     sheet['!cols'] = [{ wch: 120 }];
+    return sheet;
+  }
+
+  function buildProjectDataSheet() {
+    const rateLabels = {
+      eu120: 'EU pallet ≤120 cm / month', eu220: 'EU pallet ≤220 cm / month', sea120: 'Sea pallet ≤120 cm / month', sea220: 'Sea pallet ≤220 cm / month',
+      shelf: 'Shelf location / month', drawer: 'Drawer location / month', edi: 'EDI label', receiptBase: 'Receipt base', receiptLine: 'Receipt per item line',
+      orderBase: 'Order base', orderLine: 'Order per item line', parcel: 'Parcel ≤35 kg', privateSurcharge: 'Private-person surcharge', wms: 'WMS license / month',
+    };
+    const rows = [
+      ['PartsList project data'],
+      ['Readable copy of project variables, warehouse quote rates and planning inputs. Re-import the full workbook to restore the complete project state.'],
+      [],
+      ['Named variables', 'Value or formula', 'Source'],
+      ...(state.variables.length ? state.variables.map((variable) => [variable.name, variable.expression, 'User / workbook']) : [['(none)', '', '']]),
+      [],
+      ['Warehouse quote rates', 'NOK', 'Source'],
+      ...Object.entries(rateLabels).map(([key, label]) => [label, state.warehouse.rates[key], '3PL quote']),
+      [],
+      ['Storage plan', 'Value', 'Source'],
+      ['Shelf racks with bins', state.warehouse.shelfEnabled, 'Selected'],
+      ['Drawer storage', state.warehouse.drawerEnabled, 'Selected'],
+      ['Pallet storage', state.warehouse.palletEnabled, 'Selected'],
+      ['Planned pallet positions', state.warehouse.plannedPallets, 'Assumed'],
+      ['Bins per shelf', state.warehouse.binsPerShelf, 'Assumed'],
+      ['Shelf levels per rack', state.warehouse.shelvesPerRack, 'Assumed'],
+      ['Units per bin', state.warehouse.unitsPerBin, 'Assumed'],
+      ['Units per drawer', state.warehouse.unitsPerDrawer, 'Assumed'],
+      ['Units per pallet', state.warehouse.unitsPerPallet, 'Assumed'],
+      ['Pallet type', state.warehouse.palletType === 'eu' ? 'EU' : 'Sea', 'Selected'],
+      ['Pallet height class (cm)', Number(state.warehouse.palletHeight), 'Selected'],
+      [],
+      ['Monthly activity', 'Value', 'Source'],
+      ['Receipts', state.warehouse.receipts, 'Assumed'],
+      ['Lines per receipt', state.warehouse.receiptLines, 'Assumed'],
+      ['Orders', state.warehouse.orders, 'Assumed'],
+      ['Lines per order', state.warehouse.orderLines, 'Assumed'],
+      ['EDI labels', state.warehouse.ediLabels, 'Assumed'],
+      ['Business parcels', state.warehouse.businessParcels, 'Assumed'],
+      ['Private parcels', state.warehouse.privateParcels, 'Assumed'],
+      ['Packaging / month (NOK)', state.warehouse.packaging, 'Assumed'],
+      ['Include WMS license', state.warehouse.includeWms, 'Selected'],
+    ];
+    const sheet = XLSX.utils.aoa_to_sheet(rows);
+    sheet['!cols'] = [{ wch: 38 }, { wch: 24 }, { wch: 18 }];
+    sheet['!freeze'] = { xSplit: 0, ySplit: 3, topLeftCell: 'A4', activePane: 'bottomLeft', state: 'frozen' };
     return sheet;
   }
 
@@ -5776,9 +5905,9 @@
       ['Inventory & storage assumption', 'Value', '', 'Quoted rate', 'NOK', `${model.outputCurrency} reference`, 'Currency reference', 'Value'],
       ['Inventory units', model.inventoryUnits, '', 'EU pallet ≤120 cm / month', rates.eu120, formulaCell('IF($H$5="","",E5*$H$5)', convertedRate(rates.eu120)), 'NOK to output', model.nokToOutput],
       ['Distinct part numbers', model.distinctParts, '', 'EU pallet ≤220 cm / month', rates.eu220, formulaCell('IF($H$5="","",E6*$H$5)', convertedRate(rates.eu220)), 'Rate date', state.rateDates.NOK || ''],
-      ['Shelf share', warehouse.shelfShare / 100, '', 'Sea pallet ≤120 cm / month', rates.sea120, formulaCell('IF($H$5="","",E7*$H$5)', convertedRate(rates.sea120)), 'Output currency', model.outputCurrency],
-      ['Drawer share', warehouse.drawerShare / 100, '', 'Sea pallet ≤220 cm / month', rates.sea220, formulaCell('IF($H$5="","",E8*$H$5)', convertedRate(rates.sea220))],
-      ['Pallet share', formulaCell('1-SUM(B7:B8)', model.palletShare), '', 'Shelf location / month', rates.shelf, formulaCell('IF($H$5="","",E9*$H$5)', convertedRate(rates.shelf))],
+      ['Shelf share', model.shelfShare, '', 'Sea pallet ≤120 cm / month', rates.sea120, formulaCell('IF($H$5="","",E7*$H$5)', convertedRate(rates.sea120)), 'Output currency', model.outputCurrency],
+      ['Drawer share', model.drawerShare, '', 'Sea pallet ≤220 cm / month', rates.sea220, formulaCell('IF($H$5="","",E8*$H$5)', convertedRate(rates.sea220))],
+      ['Pallet share', model.palletShare, '', 'Shelf location / month', rates.shelf, formulaCell('IF($H$5="","",E9*$H$5)', convertedRate(rates.shelf))],
       ['Bins per shelf', warehouse.binsPerShelf, '', 'Drawer location / month', rates.drawer, formulaCell('IF($H$5="","",E10*$H$5)', convertedRate(rates.drawer))],
       ['Shelf levels per rack', warehouse.shelvesPerRack, '', 'EDI label', rates.edi, formulaCell('IF($H$5="","",E11*$H$5)', convertedRate(rates.edi))],
       ['Units per bin', warehouse.unitsPerBin, '', 'Receipt base', rates.receiptBase, formulaCell('IF($H$5="","",E12*$H$5)', convertedRate(rates.receiptBase))],
@@ -5794,7 +5923,7 @@
       ['Racks required', formulaCell('IF(B21=0,0,ROUNDUP(B21/B11,0))', model.racks)],
       ['Total bins', formulaCell('B21*B10', model.totalBins)],
       ['Drawer locations', formulaCell('IF(B5=0,0,ROUNDUP(B5*B8/B14,0))', model.drawerLocations)],
-      ['Pallets', formulaCell('IF(B5=0,0,ROUNDUP(B5*B9/B15,0))', model.pallets)],
+      ['Pallets', model.pallets],
       ['Total unit capacity', formulaCell('B21*B13+B24*B14+B25*B15', model.capacity)],
       [],
       ['Monthly operating assumption', 'Value', '', 'Monthly cost breakdown', 'NOK', model.outputCurrency],

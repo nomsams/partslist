@@ -6,6 +6,7 @@ const {
   clampWirePosition,
   importBounds,
   normalizeCountryCode,
+  planWarehouseStorage,
   projectScenario,
   requiredLocations,
   sanitizeWirePositions,
@@ -77,6 +78,23 @@ test('zero warehouse units require zero locations', () => {
   assert.equal(requiredLocations(0, 8), 0);
   assert.equal(requiredLocations(1, 8), 1);
   assert.equal(requiredLocations(17, 8), 3);
+});
+
+test('warehouse storage plan uses shelves by default and exact planned pallet counts', () => {
+  const shelves = planWarehouseStorage({ inventoryUnits: 100, unitsPerShelf: 20, unitsPerDrawer: 8, unitsPerPallet: 60 });
+  assert.equal(shelves.shelfLocations, 5);
+  assert.equal(shelves.drawerLocations, 0);
+  assert.equal(shelves.pallets, 0);
+  assert.equal(shelves.capacityShortfall, 0);
+
+  const mixed = planWarehouseStorage({ inventoryUnits: 100, shelfEnabled: true, palletEnabled: true, plannedPallets: 1, unitsPerShelf: 20, unitsPerDrawer: 8, unitsPerPallet: 60 });
+  assert.equal(mixed.pallets, 1);
+  assert.equal(mixed.shelfLocations, 2);
+  assert.equal(mixed.capacity, 100);
+
+  const short = planWarehouseStorage({ inventoryUnits: 100, shelfEnabled: false, palletEnabled: true, plannedPallets: 1, unitsPerPallet: 60 });
+  assert.equal(short.pallets, 1);
+  assert.equal(short.capacityShortfall, 40);
 });
 
 test('scenario projection separates sales, landed purchase, inbound freight, and warehouse changes', () => {

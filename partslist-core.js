@@ -93,6 +93,49 @@
     return amount > 0 ? Math.ceil(amount / perLocation) : 0;
   }
 
+  function planWarehouseStorage(options = {}) {
+    const inventoryUnits = Math.max(0, Number(options.inventoryUnits) || 0);
+    const shelfEnabled = options.shelfEnabled !== false;
+    const drawerEnabled = options.drawerEnabled === true;
+    const palletEnabled = options.palletEnabled === true;
+    const unitsPerShelf = Math.max(1, Number(options.unitsPerShelf) || 1);
+    const unitsPerDrawer = Math.max(1, Number(options.unitsPerDrawer) || 1);
+    const unitsPerPallet = Math.max(1, Number(options.unitsPerPallet) || 1);
+    const pallets = palletEnabled ? Math.max(0, Math.round(Number(options.plannedPallets) || 0)) : 0;
+    const palletCapacity = pallets * unitsPerPallet;
+    const palletUnits = Math.min(inventoryUnits, palletCapacity);
+    const remainingUnits = Math.max(0, inventoryUnits - palletCapacity);
+    let shelfWeight = shelfEnabled ? 1 : 0;
+    let drawerWeight = drawerEnabled ? 1 : 0;
+    if (shelfEnabled && drawerEnabled) {
+      shelfWeight = Math.max(0, Number(options.shelfShare) || 0);
+      drawerWeight = Math.max(0, Number(options.drawerShare) || 0);
+      if (shelfWeight + drawerWeight === 0) shelfWeight = drawerWeight = 1;
+    }
+    const activeWeight = shelfWeight + drawerWeight;
+    const shelfUnits = activeWeight ? remainingUnits * shelfWeight / activeWeight : 0;
+    const drawerUnits = activeWeight ? remainingUnits * drawerWeight / activeWeight : 0;
+    const shelfLocations = requiredLocations(shelfUnits, unitsPerShelf);
+    const drawerLocations = requiredLocations(drawerUnits, unitsPerDrawer);
+    const capacity = shelfLocations * unitsPerShelf + drawerLocations * unitsPerDrawer + palletCapacity;
+    return {
+      shelfEnabled,
+      drawerEnabled,
+      palletEnabled,
+      shelfUnits,
+      drawerUnits,
+      palletUnits,
+      shelfShare: inventoryUnits ? shelfUnits / inventoryUnits : 0,
+      drawerShare: inventoryUnits ? drawerUnits / inventoryUnits : 0,
+      palletShare: inventoryUnits ? palletUnits / inventoryUnits : 0,
+      shelfLocations,
+      drawerLocations,
+      pallets,
+      capacity,
+      capacityShortfall: Math.max(0, inventoryUnits - capacity),
+    };
+  }
+
   function projectScenario(model, inventoryItems = [], changes = {}) {
     const factor = (delta) => Math.max(0, 1 + (Number(delta) || 0) / 100);
     const salesFactor = factor(changes.salesDelta);
@@ -137,6 +180,7 @@
     clampWirePosition,
     importBounds,
     normalizeCountryCode,
+    planWarehouseStorage,
     projectScenario,
     requiredLocations,
     sanitizeWirePositions,

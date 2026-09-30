@@ -44,12 +44,12 @@ h3 { margin-bottom: 8px; font-size: 15px; }
 .hidden { display: none !important; }
 
 .app-header {
-  min-height: 72px;
+  min-height: 54px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
-  padding: 12px 24px;
+  gap: 16px;
+  padding: 7px 16px;
   color: #fff;
   background: var(--green-950);
   border-bottom: 1px solid rgba(255,255,255,.13);
@@ -61,11 +61,11 @@ h3 { margin-bottom: 8px; font-size: 15px; }
 }
 
 .brand { gap: 12px; min-width: 0; }
-.brand p { margin: 0; color: #bcd0c3; font-size: 12px; }
+.brand p { margin: 0; color: #bcd0c3; font-size: 11px; }
 
 .brand-mark {
-  width: 38px;
-  height: 38px;
+  width: 32px;
+  height: 32px;
   display: inline-grid;
   place-items: center;
   flex: 0 0 auto;
@@ -76,7 +76,8 @@ h3 { margin-bottom: 8px; font-size: 15px; }
   letter-spacing: -.04em;
 }
 
-.header-actions { gap: 9px; }
+.header-actions { gap: 6px; }
+.app-header .button { min-height: 31px; padding: 5px 10px; font-size: 12px; }
 .save-state { min-width: max-content; padding: 5px 9px; border: 1px solid rgba(255,255,255,.24); border-radius: 999px; color: #dce9df; font-size: 11px; font-weight: 700; }
 .save-state.dirty { color: #2d2104; background: #ffe8a3; border-color: #f0c95b; }
 .save-state.saved { color: #e5f6e9; background: rgba(92,169,111,.2); border-color: rgba(163,218,175,.45); }
@@ -108,15 +109,16 @@ h3 { margin-bottom: 8px; font-size: 15px; }
 .button.full { width: 100%; margin-top: 12px; }
 
 .status-bar {
-  min-height: 35px;
+  min-height: 27px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 24px;
+  padding: 4px 16px;
   color: #dce9df;
   background: var(--green-800);
-  font-size: 12px;
+  font-size: 11px;
 }
+.status-bar:not(.busy):not(.error):not(.warning) { display: none; }
 
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #9bc9a7; }
 .status-bar.busy .status-dot { background: #ffd969; animation: pulse 1s infinite alternate; }
@@ -339,6 +341,22 @@ input:focus, select:focus { border-color: var(--green-700); box-shadow: 0 0 0 3p
 .warehouse-header-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; align-items: center; }
 .warehouse-section-heading h3 { margin-bottom: 0; font-size: 17px; }
 .warehouse-control-panel hr { margin: 18px 0; border: 0; border-top: 1px solid var(--line); }
+.warehouse-simple-copy { margin: 8px 0 12px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.storage-type-grid { display: grid; gap: 7px; }
+.storage-type-card { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 9px; align-items: start; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fafcfa; cursor: pointer; }
+.storage-type-card:has(input:checked) { border-color: #83a991; background: var(--green-100); }
+.storage-type-card input { width: 16px; min-height: 16px; margin-top: 2px; }
+.storage-type-card strong, .storage-type-card small { display: block; }
+.storage-type-card strong { font-size: 12px; }
+.storage-type-card small { margin-top: 2px; color: var(--muted); font-size: 10px; line-height: 1.35; }
+.planned-pallets-field { display: grid; grid-template-columns: minmax(0, 1fr) 95px; gap: 10px; align-items: center; margin-top: 10px; color: var(--muted); font-size: 11px; font-weight: 700; }
+.planned-pallets-field input { min-height: 32px; }
+.value-source { display: inline-flex; align-items: center; margin-left: 5px; padding: 2px 5px; border-radius: 999px; font-size: 9px; font-weight: 800; letter-spacing: .03em; text-transform: uppercase; }
+.value-source.assumed { color: #775015; background: #fff0c7; }
+.value-source.quoted { color: #315d42; background: #dfeee3; }
+.warehouse-assumption-details { margin-top: 10px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.warehouse-assumption-details summary { color: var(--green-800); font-size: 12px; font-weight: 750; cursor: pointer; }
+.warehouse-assumption-details > p { margin: 8px 0 0; color: var(--muted); font-size: 10px; line-height: 1.4; }
 
 .warehouse-fields { display: grid; gap: 10px; margin-top: 14px; }
 .two-column-fields, .rate-fields { grid-template-columns: 1fr 1fr; }
