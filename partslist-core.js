@@ -10,6 +10,21 @@
     return /^\d{3}$/.test(candidate) ? candidate : fallback;
   }
 
+  // ISO 3166-1 numeric codes of the EU member states.
+  const EU_MEMBERS = Object.freeze(['040', '056', '100', '191', '196', '203', '208', '233', '246', '250', '276', '300', '348', '372', '380', '428', '440', '442', '470', '528', '616', '620', '642', '703', '705', '724', '752']);
+
+  // How goods travelling from an origin country are treated on arrival in the warehouse country:
+  // 'domestic' (no border), 'intraeu' (EU internal market: no duty, no import declaration; acquisition VAT is
+  // reverse-charged), or 'import' (customs clearance, duty and import VAT).
+  function customsTreatment(origin, destination) {
+    const from = normalizeCountryCode(origin, '');
+    const to = normalizeCountryCode(destination, '');
+    if (!from || !to) return 'import';
+    if (from === to) return 'domestic';
+    if (EU_MEMBERS.includes(from) && EU_MEMBERS.includes(to)) return 'intraeu';
+    return 'import';
+  }
+
   function importBounds(endRow, endColumn, maxRows, maxColumns) {
     const rowLimit = Math.max(1, Math.trunc(maxRows));
     const columnLimit = Math.max(1, Math.trunc(maxColumns));
@@ -177,7 +192,9 @@
   return {
     assessProfitabilityCompleteness,
     allocationShares,
+    EU_MEMBERS,
     clampWirePosition,
+    customsTreatment,
     importBounds,
     normalizeCountryCode,
     planWarehouseStorage,

@@ -3,7 +3,9 @@ const assert = require('node:assert/strict');
 const {
   assessProfitabilityCompleteness,
   allocationShares,
+  EU_MEMBERS,
   clampWirePosition,
+  customsTreatment,
   importBounds,
   normalizeCountryCode,
   planWarehouseStorage,
@@ -116,4 +118,20 @@ test('scenario projection separates sales, landed purchase, inbound freight, and
   assert.equal(scenario.fixed, 120);
   assert.equal(scenario.net, 108);
   assert.equal(scenario.investment, 700);
+});
+
+test('customs treatment depends on the origin and the warehouse country', () => {
+  // Sweden as the warehouse: Bulgaria is the EU internal market, the USA and Switzerland are real imports.
+  assert.equal(customsTreatment('100', '752'), 'intraeu');
+  assert.equal(customsTreatment('840', '752'), 'import');
+  assert.equal(customsTreatment('756', '752'), 'import');
+  assert.equal(customsTreatment('752', '752'), 'domestic');
+  // Norway is outside the EU customs union: every foreign origin is an import, including EU countries.
+  assert.equal(customsTreatment('100', '578'), 'import');
+  assert.equal(customsTreatment('756', '578'), 'import');
+  assert.equal(customsTreatment('578', '578'), 'domestic');
+  // Unknown or malformed codes are treated conservatively as imports.
+  assert.equal(customsTreatment('SE', '752'), 'import');
+  assert.equal(customsTreatment('', ''), 'import');
+  assert.ok(EU_MEMBERS.includes('752') && !EU_MEMBERS.includes('578') && !EU_MEMBERS.includes('756'));
 });

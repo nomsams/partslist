@@ -14,11 +14,13 @@
   const RATE_SOURCE = 'https://api.frankfurter.dev/v2';
   const WAREHOUSE_RATE_STORAGE_KEY = 'partslist.warehouse-rates.caesar14.v1';
   const WAREHOUSE_RATE_PRIVATE_FILE = 'warehouse-rates.private.json';
+  const UI_PREFERENCES_KEY = 'partslist.ui-preferences';
   const CAESAR_SHIFT = 14;
   const PRINTABLE_ASCII_START = 32;
   const PRINTABLE_ASCII_RANGE = 95;
   const CURRENCIES = ['SEK', 'EUR', 'USD', 'GBP', 'NOK', 'DKK', 'CHF', 'CAD', 'AUD', 'JPY', 'CNY', 'PLN'];
   const WAREHOUSE_DEFAULTS = Object.freeze({
+    country: '578',
     shelfEnabled: true,
     drawerEnabled: false,
     palletEnabled: false,
@@ -59,13 +61,16 @@
     horizonMonths: 24,
     customerPaysOutbound: false,
   });
-  const KIT_DEFAULTS = Object.freeze({ shippingMode: 'sheet', shippingAmount: 1, shippingCurrency: 'SEK' });
+  const KIT_DEFAULTS = Object.freeze({
+    shippingMode: 'sheet', shippingAmount: 1, shippingCurrency: 'SEK', manufacturer: '', originCountry: '840', defaultCurrency: null, discountRate: null, dutyRate: null,
+  });
   const KIT_SHIPPING_MODES = { sheet: 'Sheet values', perLine: 'Per line', kitTotal: 'Whole kit' };
   const SUPPLIER_DEFAULTS = Object.freeze({ name: 'TEI Rock Drills', location: 'Montrose, Colorado', country: '840', countryName: 'United States', lat: 38.478, lon: -107.876 });
   // ISO 3166-1 numeric codes, matching the world-atlas country ids.
-  const EU_MEMBERS = new Set(['040', '056', '100', '191', '196', '203', '208', '233', '246', '250', '276', '300', '348', '372', '380', '428', '440', '442', '470', '528', '616', '620', '642', '703', '705', '724', '752']);
+  const EU_MEMBERS = new Set(Core.EU_MEMBERS);
   const EFTA_MEMBERS = new Set(['352', '438', '756']);
   const ORIGIN_PRESETS = Object.freeze({
+    578: { name: 'Norway', place: 'Oslo', lat: 59.913, lon: 10.752 },
     840: { name: 'United States', place: 'Montrose, Colorado', lat: 38.478, lon: -107.876 },
     756: { name: 'Switzerland', place: 'Zürich', lat: 47.377, lon: 8.54 },
     100: { name: 'Bulgaria', place: 'Sofia', lat: 42.698, lon: 23.322 },
@@ -77,10 +82,21 @@
     156: { name: 'China', place: 'Shanghai', lat: 31.23, lon: 121.474 },
     392: { name: 'Japan', place: 'Tokyo', lat: 35.676, lon: 139.65 },
   });
+  const DESTINATIONS = Object.freeze({
+    578: {
+      name: 'Norway', localName: 'Norge', vat: 0.25, arrival: [11.1, 60.2], warehouse: [10.95, 59.7],
+      bounds: [2.5, 57.6, 32, 71.4],
+      customers: [['Bergen', 60.391, 5.322], ['Ålesund', 62.472, 6.155], ['Stavanger', 58.97, 5.733], ['Kristiansand', 58.146, 7.996], ['Trondheim', 63.431, 10.395], ['Bodø', 67.28, 14.405], ['Tromsø', 69.649, 18.955]],
+    },
+    752: {
+      name: 'Sweden', localName: 'Sverige', vat: 0.25, arrival: [11.973, 57.708], warehouse: [18.069, 59.329],
+      bounds: [10.5, 54.3, 24.8, 69.4],
+      customers: [['Malmö', 55.605, 13.003], ['Göteborg', 57.708, 11.974], ['Örebro', 59.275, 15.214], ['Stockholm', 59.329, 18.069], ['Sundsvall', 62.391, 17.306], ['Umeå', 63.826, 20.263], ['Luleå', 65.584, 22.154]],
+    },
+  });
+  // Currencies that name one country unambiguously; used only to pre-fill the origin of an added kit.
+  const CURRENCY_HOME_COUNTRY = Object.freeze({ USD: '840', CHF: '756', GBP: '826', JPY: '392', CNY: '156', CAD: '124', NOK: '578', SEK: '752' });
   const MAP_DATA_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-50m.json';
-  const NORWAY_ARRIVAL = [11.1, 60.2];
-  const NORWAY_WAREHOUSE = [10.95, 59.7];
-  const NORWAY_CUSTOMERS = [['Bergen', 60.391, 5.322], ['Ålesund', 62.472, 6.155], ['Stavanger', 58.97, 5.733], ['Kristiansand', 58.146, 7.996], ['Trondheim', 63.431, 10.395], ['Bodø', 67.28, 14.405], ['Tromsø', 69.649, 18.955]];
   const FLOW_OVERRIDE_KEYS = ['outboundPerUnit', 'outtakePerUnit', 'storagePerUnitMonth'];
   // Validated categorical order (dataviz reference palette); groups take slots in creation order.
   const GROUP_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
@@ -118,19 +134,99 @@
     currency: 'Currency',
   };
 
+  // ---------- Language ----------
+  // The interface is written in English; the Swedish pack (i18n-sv.js) translates what is rendered.
+  // Each original string is remembered per text node and attribute, so switching back is lossless and
+  // anything the app rewrites later (status messages, tooltips, table cells) is translated again.
+  const I18n = window.PartsListI18n;
+  const TRANSLATED_ATTRIBUTES = ['title', 'placeholder', 'aria-label', 'data-tip', 'alt'];
+  const ATTRIBUTE_SELECTOR = TRANSLATED_ATTRIBUTES.map((name) => `[${name}]`).join(',');
+  const SKIP_TRANSLATION = 'script, style, textarea, [translate="no"]';
+  const textRecords = new WeakMap();
+  const attributeRecords = new WeakMap();
+
+  function translateUi(text) {
+    return state.language === 'sv' && I18n ? I18n.translate('sv', text) : text;
+  }
+
+  function localizeTextNode(node) {
+    if (!node.nodeValue || node.parentElement?.closest(SKIP_TRANSLATION)) return;
+    let record = textRecords.get(node);
+    // Text the app wrote itself becomes the new source; text we wrote matches record.shown.
+    if (!record || node.nodeValue !== record.shown) record = { source: node.nodeValue, shown: node.nodeValue };
+    const shown = translateUi(record.source);
+    if (shown !== node.nodeValue) node.nodeValue = shown;
+    record.shown = shown;
+    textRecords.set(node, record);
+  }
+
+  function localizeAttribute(element, attribute) {
+    if (!element.hasAttribute(attribute) || element.closest(SKIP_TRANSLATION)) return;
+    let records = attributeRecords.get(element);
+    if (!records) { records = {}; attributeRecords.set(element, records); }
+    const current = element.getAttribute(attribute);
+    let record = records[attribute];
+    if (!record || current !== record.shown) record = { source: current, shown: current };
+    const shown = translateUi(record.source);
+    if (shown !== current) element.setAttribute(attribute, shown);
+    record.shown = shown;
+    records[attribute] = record;
+  }
+
+  function localizeSubtree(root) {
+    if (!root) return;
+    if (root.nodeType === Node.TEXT_NODE) {
+      localizeTextNode(root);
+      return;
+    }
+    if (root.nodeType !== Node.ELEMENT_NODE || root.closest(SKIP_TRANSLATION)) return;
+    [root, ...root.querySelectorAll(ATTRIBUTE_SELECTOR)].forEach((element) => {
+      TRANSLATED_ATTRIBUTES.forEach((attribute) => localizeAttribute(element, attribute));
+    });
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) localizeTextNode(walker.currentNode);
+  }
+
+  function observeLanguage() {
+    const observer = new MutationObserver((mutations) => {
+      mutations.forEach((mutation) => {
+        if (mutation.type === 'childList') mutation.addedNodes.forEach(localizeSubtree);
+        else if (mutation.type === 'characterData') localizeTextNode(mutation.target);
+        else if (mutation.type === 'attributes') localizeAttribute(mutation.target, mutation.attributeName);
+      });
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: TRANSLATED_ATTRIBUTES });
+  }
+
+  function setLanguage(language, rerender = true) {
+    state.language = language === 'en' ? 'en' : 'sv';
+    document.documentElement.lang = state.language;
+    document.title = translateUi('PartsList Workbook');
+    dom.languageSelect.querySelectorAll('[data-language]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.language === state.language)));
+    localizeSubtree(document.body);
+    populateOriginSelects();
+    populateCustomerSelects();
+    if (rerender && state.workbook) {
+      renderMappings();
+      renderTabs();
+      refreshViews();
+    }
+  }
+
   const HEADER_TERMS = {
-    part: ['part number', 'part no', 'part #', 'part', 'sku', 'item code', 'item number', 'item no', 'article number', 'article', 'component', 'product code', 'product'],
-    description: ['part description', 'item description', 'description', 'details', 'name'],
-    quantity: ['maximum quantity', 'max quantity', 'quantity', 'qty', 'amount', 'count', 'pcs', 'pieces', 'units'],
-    price: ['unit price', 'unit cost', 'purchase price', 'price each', 'price', 'cost each', 'cost'],
+    part: ['part number', 'part no', 'part #', 'part', 'sku', 'item code', 'item number', 'item no', 'article number', 'article', 'component', 'product code', 'product', 'artikelnummer', 'artikelnr', 'reservdelsnummer', 'teilenummer', 'artikel nr', 'numero de piece', 'référence'],
+    description: ['part description', 'item description', 'description', 'details', 'name', 'beskrivning', 'beteckning', 'bezeichnung', 'benämning', 'наименование'],
+    quantity: ['maximum quantity', 'max quantity', 'quantity', 'qty', 'amount', 'count', 'pcs', 'pieces', 'units', 'antal', 'mängd', 'menge', 'quantite', 'quantité', 'количество'],
+    price: ['unit price', 'unit cost', 'purchase price', 'price each', 'price', 'cost each', 'cost', 'styckpris', 'inköpspris', 'pris', 'einzelpreis', 'preis', 'prix unitaire', 'цена'],
     discountedTotal: ['rabatt 30', 'rabatt', 'discounted total', 'after discount', 'discount'],
     sellingTotal: ['dubblering', 'price after multiplier', 'selling total', 'sales total'],
     shipping: ['frakt', 'shipping cost', 'shipment cost', 'freight cost', 'delivery cost', 'transport cost', 'shipping', 'shipment', 'freight', 'delivery', 'transport'],
     shippingWithMargin: ['inkl fraktmarginal', 'fraktmarginal', 'shipping incl margin', 'freight incl margin', 'shipping with margin'],
-    currency: ['currency code', 'currency', 'curr', 'ccy'],
+    currency: ['currency code', 'currency', 'curr', 'ccy', 'valuta', 'währung', 'devise', 'валута'],
   };
 
   const state = {
+    language: 'sv',
     workbook: null,
     fileName: '',
     matrices: {},
@@ -159,6 +255,7 @@
       rates: { ...WAREHOUSE_RATE_DEFAULTS },
     },
     freight: { ...FREIGHT_DEFAULTS },
+    customer: { country: '578' },
     kits: {},
     groups: [],
     items: {},
@@ -202,6 +299,12 @@
   const el = (id) => document.getElementById(id);
   const dom = {
     file: el('workbook-file'),
+    addKitFile: el('add-kit-file'),
+    addKitLabel: el('add-kit-label'),
+    languageSelect: el('language-select'),
+    sidebarBody: el('sidebar-body'),
+    sidebarCollapse: el('sidebar-collapse'),
+    sidebarExpand: el('sidebar-expand'),
     exportButton: el('export-button'),
     saveState: el('save-state'),
     workspace: el('workspace'),
@@ -216,6 +319,7 @@
     sheetCount: el('sheet-count'),
     sourceCurrency: el('source-currency'),
     outputCurrency: el('output-currency'),
+    warehouseCountry: el('warehouse-country'),
     refreshRates: el('refresh-rates'),
     rateStatus: el('rate-status'),
     mappingList: el('mapping-list'),
@@ -338,6 +442,12 @@
     flowImportVat: el('flow-import-vat'),
     flowInboundTotal: el('flow-inbound-total'),
     flowNorwayStats: el('flow-norway-stats'),
+    flowShipDestination: el('flow-ship-destination'),
+    flowDestinationName: el('flow-destination-name'),
+    flowLandedDestination: el('flow-landed-destination'),
+    flowCustomerDestination: el('flow-customer-destination'),
+    flowCustomerNote: el('flow-customer-note'),
+    destinationMapTitle: el('destination-map-title'),
     flowPalletLabel: el('flow-pallet-label'),
     flowPalletRate: el('flow-pallet-rate'),
     flowWarehouseTotal: el('flow-warehouse-total'),
@@ -352,22 +462,29 @@
     mapWorld: el('map-world'),
     mapNorway: el('map-norway'),
     mapInfo: el('map-info'),
+    flowNote: el('flow-note'),
   };
 
   initialize();
 
   async function initialize() {
     purgeLegacyLocalBusinessData();
+    loadUiPreferences();
+    // Translate and render the panel state before any network wait so the page never flashes the wrong language.
+    setLanguage(state.language, false);
+    renderSidebarState();
     populateCurrencySelect(dom.sourceCurrency, state.config.sourceCurrency);
     populateCurrencySelect(dom.outputCurrency, state.config.outputCurrency);
     document.querySelectorAll('[data-currency-select]').forEach((select) => populateCurrencySelect(select, getPath(select.dataset.bind)));
     populateOriginSelects();
+    populateCustomerSelects();
     syncBoundInputs();
     await loadPrivateWarehouseRateFile();
     syncWarehouseRateInputs();
     bindEvents();
+    observeLanguage();
+    setLanguage(state.language, false);
     renderSaveState();
-    renderSidebarState();
     if (!window.XLSX || !FormulaEngine || !Core) {
       setStatus('The spreadsheet libraries could not be loaded. Check the internet connection and reload.', 'error');
     }
@@ -385,11 +502,30 @@
       if (file) importWorkbook(file);
       event.target.value = '';
     });
-
-    dom.sidebarToggle.addEventListener('click', () => {
-      state.sidebarCollapsed = !state.sidebarCollapsed;
-      renderSidebarState();
+    dom.addKitFile.addEventListener('change', async (event) => {
+      const files = [...event.target.files];
+      if (files.length) await addKitWorkbooks(files);
+      event.target.value = '';
     });
+    dom.languageSelect.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-language]');
+      if (!button || button.dataset.language === state.language) return;
+      setLanguage(button.dataset.language);
+      saveUiPreferences();
+      saveSettingsSoon();
+    });
+    // File inputs are opened through <label> buttons, so make those reachable from the keyboard too.
+    document.querySelectorAll('label.button[for][role="button"]').forEach((label) => label.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      document.getElementById(label.htmlFor)?.click();
+    }));
+
+    [dom.sidebarToggle, dom.sidebarCollapse, dom.sidebarExpand].forEach((button) => button.addEventListener('click', () => {
+      state.sidebarCollapsed = !state.sidebarCollapsed;
+      saveUiPreferences();
+      renderSidebarState();
+    }));
 
     ['dragenter', 'dragover'].forEach((name) => dom.dropZone.addEventListener(name, (event) => {
       event.preventDefault();
@@ -711,6 +847,12 @@
       refreshRates(false);
       return;
     }
+    if (path === 'customer.country') {
+      state.customer.country = DESTINATIONS[state.customer.country] ? state.customer.country : '578';
+      state.config.vatRate = customerConfig().vat;
+      rebuildConsolidation();
+      return;
+    }
     if (path === 'supplier.country') {
       setSupplierOrigin(state.supplier.country);
       return;
@@ -720,6 +862,7 @@
       return;
     }
     if (path.startsWith('warehouse.') || path.startsWith('supplier.') || path.startsWith('sales.')) {
+      if (path === 'warehouse.country') renderMappings();
       if (path === 'sales.defaultValue' || path === 'sales.defaultMode') rebuildConsolidation();
       else refreshViews();
       return;
@@ -735,19 +878,51 @@
     document.querySelectorAll('[data-kit-bind]').forEach((input) => {
       const kit = kitSettings(input.dataset.kitBind);
       if (input !== active) writeInputValue(input, kit[input.dataset.kitField]);
+      if (input.dataset.kitField === 'discountRate') input.placeholder = `global ${formatPercent(state.config.discount)}`;
+      if (input.dataset.kitField === 'dutyRate') input.placeholder = `global ${formatPercent(state.freight.dutyRate)}`;
       if (input.dataset.kitField === 'shippingAmount') {
         input.disabled = kit.shippingMode === 'sheet';
         input.placeholder = kit.shippingMode === 'sheet' ? 'sheet' : '0';
       }
     });
-    document.querySelectorAll('.output-currency-label').forEach((node) => { node.textContent = state.config.outputCurrency; });
+    dom.flowNote.textContent = `Edit values on the route; every view recalculates. Amounts in ${state.config.outputCurrency} unless marked.`;
     syncControlsFromState(active);
   }
 
   /* ---------- Kits (source sheets) ---------- */
 
+  // A new kit starts as a kit from the project's supplier (TEI Rock Drills, USA by default). Discount, source
+  // currency and duty stay empty, which means "use the project-wide value", so changing the sidebar still works.
+  function newKitSettings(sheetName) {
+    return {
+      ...KIT_DEFAULTS,
+      manufacturer: state.supplier.name || sheetName,
+      originCountry: state.supplier.country || KIT_DEFAULTS.originCountry,
+      shippingCurrency: state.config.outputCurrency,
+    };
+  }
+
+  function kitDiscount(kit) {
+    return Number.isFinite(kit.discountRate) ? kit.discountRate : state.config.discount;
+  }
+
+  function kitCurrency(kit) {
+    return kit.defaultCurrency || state.config.sourceCurrency;
+  }
+
+  const TREATMENT_LABELS = { domestic: 'Domestic', intraeu: 'Intra-EU (no duty)', import: 'Import (customs clearance)' };
+
+  function kitRouteSummary(kit) {
+    const treatment = Core.customsTreatment(kit.originCountry, state.warehouse.country);
+    return [`${originName(kit.originCountry)} → ${destinationConfig().name}`, TREATMENT_LABELS[treatment], `${kitCurrency(kit)} source prices`].join(' · ');
+  }
+
+  function updateKitRouteSummaries() {
+    document.querySelectorAll('[data-kit-route]').forEach((node) => { node.textContent = kitRouteSummary(kitSettings(node.dataset.kitRoute)); });
+  }
+
   function kitSettings(sheetName) {
-    if (!state.kits[sheetName]) state.kits[sheetName] = { ...KIT_DEFAULTS };
+    if (!state.kits[sheetName]) state.kits[sheetName] = newKitSettings(sheetName);
     return state.kits[sheetName];
   }
 
@@ -762,12 +937,28 @@
       kit.shippingMode = KIT_SHIPPING_MODES[input.value] ? input.value : 'sheet';
     } else if (field === 'shippingCurrency') {
       kit.shippingCurrency = CURRENCIES.includes(input.value) ? input.value : KIT_DEFAULTS.shippingCurrency;
+    } else if (field === 'manufacturer') {
+      kit.manufacturer = String(input.value || '').trim().slice(0, 80) || input.dataset.kitBind;
+    } else if (field === 'originCountry') {
+      kit.originCountry = Core.normalizeCountryCode(input.value, KIT_DEFAULTS.originCountry);
+    } else if (field === 'defaultCurrency') {
+      kit.defaultCurrency = CURRENCIES.includes(input.value) ? input.value : null;
+    } else if (field === 'discountRate' || field === 'dutyRate') {
+      if (input.value.trim() === '') {
+        kit[field] = null;
+      } else {
+        const value = readNumberInput(input);
+        if (value === undefined) return;
+        kit[field] = clamp(value, 0, 1);
+      }
     } else {
       return;
     }
     saveSettingsSoon();
     rebuildConsolidation();
-    if (field === 'shippingCurrency') refreshRates(false);
+    if (['shippingCurrency', 'defaultCurrency'].includes(field)) refreshRates(false);
+    if (field === 'originCountry') renderMaps();
+    updateKitRouteSummaries();
   }
 
   function isSourceKit(sheetName) {
@@ -789,7 +980,45 @@
   function createKitFreightControl(sheetName) {
     const kit = kitSettings(sheetName);
     const wrapper = document.createElement('div');
-    wrapper.className = 'kit-freight-control';
+    wrapper.className = 'kit-freight-control kit-profile-control';
+    const profileCaption = document.createElement('span');
+    profileCaption.className = 'kit-freight-caption';
+    profileCaption.textContent = 'Kit profile & route';
+    const manufacturer = document.createElement('input');
+    manufacturer.dataset.kitBind = sheetName;
+    manufacturer.dataset.kitField = 'manufacturer';
+    manufacturer.value = kit.manufacturer || sheetName;
+    manufacturer.placeholder = 'Manufacturer';
+    manufacturer.setAttribute('aria-label', `${sheetName} manufacturer`);
+    const origin = document.createElement('select');
+    origin.dataset.kitBind = sheetName;
+    origin.dataset.kitField = 'originCountry';
+    origin.setAttribute('aria-label', `${sheetName} origin country`);
+    populateOriginSelect(origin, kit.originCountry);
+    const sourceCurrency = document.createElement('select');
+    sourceCurrency.dataset.kitBind = sheetName;
+    sourceCurrency.dataset.kitField = 'defaultCurrency';
+    sourceCurrency.setAttribute('aria-label', `${sheetName} default source currency`);
+    sourceCurrency.append(new Option('Default', ''), ...CURRENCIES.map((code) => new Option(code, code)));
+    sourceCurrency.value = kit.defaultCurrency || '';
+    const percentField = (field, caption) => {
+      const label = document.createElement('label');
+      label.className = 'kit-discount-field';
+      label.textContent = caption;
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.min = '0';
+      input.max = '100';
+      input.step = '0.1';
+      input.dataset.scale = '100';
+      input.dataset.kitBind = sheetName;
+      input.dataset.kitField = field;
+      writeInputValue(input, kit[field]);
+      label.append(input);
+      return label;
+    };
+    const discount = percentField('discountRate', 'Discount %');
+    const duty = percentField('dutyRate', 'Duty %');
     const caption = document.createElement('span');
     caption.className = 'kit-freight-caption';
     caption.textContent = 'Kit freight';
@@ -814,7 +1043,11 @@
     populateCurrencySelect(currency, kit.shippingCurrency);
     const help = document.createElement('small');
     help.textContent = 'Sheet values use the Frakt column per line. Per line applies one amount to every line; Whole kit splits one amount across the kit’s stocked lines.';
-    wrapper.append(caption, mode, amount, currency, help);
+    const route = document.createElement('small');
+    route.className = 'kit-route-summary';
+    route.dataset.kitRoute = sheetName;
+    route.textContent = kitRouteSummary(kit);
+    wrapper.append(profileCaption, manufacturer, origin, sourceCurrency, discount, duty, caption, mode, amount, currency, help, route);
     return wrapper;
   }
 
@@ -830,7 +1063,8 @@
     });
     return {
       format: 'partslist-settings',
-      version: 2,
+      version: 3,
+      language: state.language,
       config: {
         discount: state.config.discount,
         multiplier: state.config.multiplier,
@@ -846,6 +1080,7 @@
       sales: { ...state.sales },
       scenario: { ...state.scenario },
       supplier: { ...state.supplier },
+      customer: { ...state.customer },
       flowOverrides: { ...state.flowOverrides },
       wireNodePositions: Core.sanitizeWirePositions(state.wireNodePositions),
       wireRelations: state.wireRelations.filter(isValidWireRelation).map((edge) => ({ ...edge })),
@@ -861,6 +1096,11 @@
     return Number.isFinite(number) ? clamp(number, min, max) : fallback;
   }
 
+  function nullableFraction(value) {
+    const number = nullableNumber(value, 0);
+    return number === null ? null : Math.min(1, number);
+  }
+
   function nullableNumber(value, min = 0) {
     if (value === null || value === undefined || value === '') return null;
     const number = typeof value === 'number' ? value : toNumber(value);
@@ -869,6 +1109,7 @@
 
   function applySettings(settings) {
     if (!settings || typeof settings !== 'object' || settings.format !== 'partslist-settings') return false;
+    if (settings.language === 'en' || settings.language === 'sv') state.language = settings.language;
     const config = settings.config || {};
     state.config.discount = finiteOr(config.discount, state.config.discount, 0, 1);
     state.config.multiplier = finiteOr(config.multiplier, state.config.multiplier, 0);
@@ -895,6 +1136,11 @@
         shippingMode: KIT_SHIPPING_MODES[kit.shippingMode] ? kit.shippingMode : 'sheet',
         shippingAmount: finiteOr(kit.shippingAmount, KIT_DEFAULTS.shippingAmount, 0),
         shippingCurrency: CURRENCIES.includes(kit.shippingCurrency) ? kit.shippingCurrency : KIT_DEFAULTS.shippingCurrency,
+        manufacturer: typeof kit.manufacturer === 'string' ? kit.manufacturer.trim().slice(0, 80) || name : name,
+        originCountry: Core.normalizeCountryCode(kit.originCountry, state.supplier.country),
+        defaultCurrency: CURRENCIES.includes(kit.defaultCurrency) ? kit.defaultCurrency : null,
+        discountRate: nullableFraction(kit.discountRate),
+        dutyRate: nullableFraction(kit.dutyRate),
       };
     });
 
@@ -937,6 +1183,7 @@
       inboundDelta: finiteOr(scenario.inboundDelta, 0, -100, 500),
       warehouseDelta: finiteOr(scenario.warehouseDelta, 0, -100, 500),
     };
+    state.customer = { country: DESTINATIONS[settings.customer?.country] ? settings.customer.country : '578' };
     const supplier = settings.supplier || {};
     const country = Core.normalizeCountryCode(supplier.country, SUPPLIER_DEFAULTS.country);
     state.supplier = {
@@ -959,6 +1206,7 @@
       else if (typeof warehouse[key] === 'string') state.warehouse[key] = warehouse[key].slice(0, 80);
     });
     state.warehouse.palletType = state.warehouse.palletType === 'sea' ? 'sea' : 'eu';
+    state.warehouse.country = DESTINATIONS[state.warehouse.country] ? state.warehouse.country : WAREHOUSE_DEFAULTS.country;
     state.warehouse.palletHeight = state.warehouse.palletHeight === '220' ? '220' : '120';
     state.warehouse.binsPerShelf = clamp(Math.round(state.warehouse.binsPerShelf) || 1, 1, 12);
     state.warehouse.shelvesPerRack = clamp(Math.round(state.warehouse.shelvesPerRack) || 1, 1, 8);
@@ -1039,10 +1287,34 @@
   }
 
   function renderSidebarState() {
-    dom.workspace.classList.toggle('sidebar-collapsed', state.sidebarCollapsed);
-    dom.sidebarToggle.setAttribute('aria-expanded', String(!state.sidebarCollapsed));
-    dom.sidebarToggle.textContent = state.sidebarCollapsed ? 'Show settings' : 'Hide settings';
-    dom.sidebar.setAttribute('aria-hidden', String(state.sidebarCollapsed));
+    const collapsed = state.sidebarCollapsed;
+    const label = collapsed ? 'Show settings' : 'Hide settings';
+    dom.workspace.classList.toggle('sidebar-collapsed', collapsed);
+    dom.sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
+    dom.sidebarToggle.setAttribute('aria-label', label);
+    dom.sidebarToggle.title = label;
+    dom.sidebarCollapse.setAttribute('aria-expanded', String(!collapsed));
+    dom.sidebarExpand.setAttribute('aria-expanded', String(!collapsed));
+    dom.sidebarBody.toggleAttribute('inert', collapsed);
+    dom.sidebarBody.setAttribute('aria-hidden', String(collapsed));
+    // Move focus to the control that is still visible so keyboard users are not left on a hidden button.
+    if (document.activeElement === dom.sidebarCollapse && collapsed) dom.sidebarExpand.focus();
+    else if (document.activeElement === dom.sidebarExpand && !collapsed) dom.sidebarCollapse.focus();
+  }
+
+  // Only harmless, non-business interface choices are remembered in the browser.
+  function loadUiPreferences() {
+    try {
+      const stored = JSON.parse(localStorage.getItem(UI_PREFERENCES_KEY) || 'null');
+      if (stored?.language === 'en' || stored?.language === 'sv') state.language = stored.language;
+      if (typeof stored?.sidebarCollapsed === 'boolean') state.sidebarCollapsed = stored.sidebarCollapsed;
+    } catch { /* Preferences are optional. */ }
+  }
+
+  function saveUiPreferences() {
+    try {
+      localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify({ language: state.language, sidebarCollapsed: state.sidebarCollapsed }));
+    } catch { /* Preferences are optional. */ }
   }
 
   function purgeLegacyLocalBusinessData() {
@@ -1060,7 +1332,7 @@
 
   function resetProjectSettings() {
     if (!state.workbook) return;
-    if (!window.confirm('Reset kit freight, freight & import, VAT, sales groups, item overrides and sales assumptions to their defaults? Warehouse quote rates are kept.')) return;
+    if (!window.confirm(translateUi('Reset kit freight, freight & import, VAT, sales groups, item overrides and sales assumptions to their defaults? Warehouse quote rates are kept.'))) return;
     state.config.vatRate = 0.25;
     state.freight = { ...FREIGHT_DEFAULTS };
     state.kits = {};
@@ -1069,6 +1341,7 @@
     state.sales = { ...SALES_DEFAULTS };
     state.scenario = { salesDelta: 0, purchaseDelta: 0, inboundDelta: 0, warehouseDelta: 0 };
     state.supplier = { ...SUPPLIER_DEFAULTS };
+    state.customer = { country: '578' };
     FLOW_OVERRIDE_KEYS.forEach((key) => { state.flowOverrides[key] = null; });
     state.selectedKeys.clear();
     renderMappings();
@@ -1306,7 +1579,8 @@
     if (!dom.warehouseView) return;
     const model = calculateWarehouseModel();
     const locationCount = model.shelfLocations + model.drawerLocations + model.pallets;
-    dom.warehouseDataNote.textContent = `${model.distinctParts} part numbers · ${formatNumber(model.inventoryUnits, 2)} units from workbook quantities. Storage choices and activity values marked “Assumed” are planning inputs.`;
+    const quoteScope = state.warehouse.country === '752' ? ' The current NOK rates come from the Norwegian 3PL quote; replace them with Swedish warehouse rates before making a decision.' : '';
+    dom.warehouseDataNote.textContent = `${model.distinctParts} part numbers · ${formatNumber(model.inventoryUnits, 2)} units from workbook quantities. Storage choices and activity values marked “Assumed” are planning inputs.${quoteScope}`;
     dom.warehousePalletShare.textContent = `${model.pallets} planned pallet${model.pallets === 1 ? '' : 's'}`;
     dom.whUnitsShelf.value = String(model.unitsPerShelf);
     dom.whPlannedPallets.disabled = !state.warehouse.palletEnabled;
@@ -1501,7 +1775,7 @@
       { id: 'consolidated.shipping', label: 'Freight margin', meta: `${formatPercent(state.config.shippingMargin)} margin`, detail: 'Freight and import costs plus margin', category: 'calculation', x: 265, y: 400 },
       { id: 'consolidated.total', label: 'Line total', meta: `${state.config.outputCurrency} excl. VAT`, detail: 'Sales price + freight incl. margin', category: 'calculation', x: 265, y: 473 },
       { id: 'consolidated.freight', label: 'Freight & tolls', meta: `Kit + ${formatMoney(toOutput(state.freight.consolidatedShipment, state.freight.consolidatedCurrency), state.config.outputCurrency)} shipment`, detail: `Duty ${formatPercent(state.freight.dutyRate)}, insurance ${formatPercent(state.freight.insuranceRate)}, clearance fees`, category: 'assumption', x: 265, y: 546 },
-      { id: 'consolidated.vat', label: 'VAT (MVA)', meta: formatPercent(state.config.vatRate), detail: 'Added to customer prices; import VAT is deductible', category: 'assumption', x: 265, y: 619 },
+      { id: 'consolidated.vat', label: 'VAT', meta: formatPercent(state.config.vatRate), detail: 'Added to customer prices; import VAT is deductible', category: 'assumption', x: 265, y: 619 },
       { id: 'sales.groups', label: 'Sales groups', meta: `${state.groups.length} group${state.groups.length === 1 ? '' : 's'}`, detail: 'Expected sales and multiplier per group', category: 'assumption', x: 515, y: 473 },
       { id: 'sales.expected', label: 'Expected sales', meta: `${formatNumber(state.consolidated.reduce((sum, item) => sum + (item.salesPerYear || 0), 0), 0)} units / yr`, detail: 'Group, item or default sales assumption', category: 'calculation', x: 515, y: 546 },
       { id: 'output.dashboard', label: 'Profitability dashboard', meta: 'Net profit + payback', detail: 'Revenue, landed cost and warehouse costs', category: 'output', x: 765, y: 495 },
@@ -1590,7 +1864,7 @@
       { id: 'formula.usdAmount', label: 'Amount in USD', meta: 'Quantity × unit price', detail: 'Source line amount normalized to USD', category: 'calculation', x: 510, y: 105 },
       { id: 'formula.usdSek', label: 'USD → SEK', meta: formatMoney(state.rates.USD, 'SEK'), detail: 'Live daily reference rate', category: 'assumption', x: 510, y: 183 },
       { id: 'formula.sekAmount', label: 'Amount in SEK', meta: 'USD amount × live rate', detail: 'Converted line amount before discount', category: 'calculation', x: 510, y: 261 },
-      { id: 'formula.discount', label: '30% discount', meta: formatPercent(state.config.discount), detail: 'Configurable discount applied to SEK amount', category: 'assumption', x: 510, y: 339 },
+      { id: 'formula.discount', label: `${formatPercent(state.config.discount)} discount`, meta: formatPercent(state.config.discount), detail: 'Configurable discount applied to SEK amount', category: 'assumption', x: 510, y: 339 },
       { id: 'formula.multiplier', label: 'Price multiplier', meta: `${formatNumber(state.config.multiplier, 2)}×`, detail: 'Applied after discount', category: 'assumption', x: 510, y: 417 },
       { id: 'formula.sales', label: 'Sales amount SEK', meta: 'Discounted × multiplier', detail: 'Calculated sales amount', category: 'calculation', x: 510, y: 495 },
       { id: 'formula.shippingMargin', label: 'Shipping margin', meta: formatPercent(state.config.shippingMargin), detail: 'Applied to the mapped shipping cost', category: 'assumption', x: 510, y: 573 },
@@ -1598,8 +1872,8 @@
       { id: 'formula.kitFreight', label: 'Kit freight', meta: 'Per kit: sheet / per line / whole kit', detail: 'Kit freight setting applied to the pricing row', category: 'calculation', x: 510, y: 729 },
       { id: 'formula.consFreight', label: 'Consolidated shipment share', meta: `${formatMoney(toOutput(state.freight.consolidatedShipment, state.freight.consolidatedCurrency), state.config.outputCurrency)} by ${state.freight.allocation}`, detail: 'One shipment for the whole consolidated order, split across lines', category: 'assumption', x: 510, y: 807 },
       { id: 'formula.importCosts', label: 'Duty, insurance & fees', meta: `${formatPercent(state.freight.dutyRate)} duty · ${formatPercent(state.freight.insuranceRate)} ins.`, detail: 'Duty on purchase + freight + insurance, plus clearance fees', category: 'assumption', x: 510, y: 885 },
-      { id: 'formula.vat', label: 'VAT (MVA)', meta: formatPercent(state.config.vatRate), detail: 'Line total incl. VAT for the customer', category: 'assumption', x: 510, y: 963 },
-      { id: 'formula.landed', label: 'Landed cost', meta: 'Purchase + freight & import', detail: 'Cost of the stock delivered to Norway', category: 'calculation', x: 510, y: 1041 },
+      { id: 'formula.vat', label: 'VAT', meta: formatPercent(state.config.vatRate), detail: 'Line total incl. VAT for the customer', category: 'assumption', x: 510, y: 963 },
+      { id: 'formula.landed', label: 'Landed cost', meta: 'Purchase + freight & import', detail: `Cost of the stock delivered to ${destinationConfig().name}`, category: 'calculation', x: 510, y: 1041 },
       { id: 'sales.groups', label: 'Sales groups', meta: `${state.groups.length} groups · ${Object.keys(state.items).length} item overrides`, detail: 'Group sales volumes and multipliers', category: 'assumption', x: 755, y: 804 },
       { id: 'sales.expected', label: 'Expected sales / yr', meta: `${formatNumber(state.consolidated.reduce((sum, item) => sum + (item.salesPerYear || 0), 0), 0)} units`, detail: 'Item override → group → default assumption', category: 'calculation', x: 755, y: 882 },
       { id: 'dashboard.net', label: 'Net profit / yr', meta: 'Revenue − landed cost − logistics', detail: 'Profitability dashboard result', category: 'calculation', x: 755, y: 960 },
@@ -1913,7 +2187,75 @@
     return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
   }
 
-  async function importWorkbook(file) {
+  function uniqueWorkbookSheetName(workbook, requested) {
+    const base = String(requested || 'Kit').replace(/[\\/?*\[\]:]/g, ' ').trim().slice(0, 31) || 'Kit';
+    if (!workbook.SheetNames.includes(base)) return base;
+    for (let index = 2; index < 1000; index += 1) {
+      const suffix = ` (${index})`;
+      const candidate = `${base.slice(0, 31 - suffix.length)}${suffix}`;
+      if (!workbook.SheetNames.includes(candidate)) return candidate;
+    }
+    return `Kit ${Date.now()}`.slice(0, 31);
+  }
+
+  async function readWorkbookFile(file) {
+    const data = await file.arrayBuffer();
+    return XLSX.read(data, {
+      type: 'array', cellFormula: true, cellStyles: true, cellNF: true, cellDates: true, bookDeps: true, xlfn: true,
+    });
+  }
+
+  async function addKitWorkbooks(files) {
+    if (!state.workbook) {
+      await importWorkbook(files[0]);
+      if (files.length > 1) await addKitWorkbooks(files.slice(1));
+      return;
+    }
+    setStatus(`Adding ${files.length} workbook${files.length === 1 ? '' : 's'}…`, 'busy');
+    try {
+      const merged = XLSX.utils.book_new();
+      state.workbook.SheetNames.forEach((name) => {
+        if (!isGeneratedSheet(state.workbook.Sheets[name])) XLSX.utils.book_append_sheet(merged, state.workbook.Sheets[name], uniqueWorkbookSheetName(merged, name));
+      });
+      let added = 0;
+      for (const file of files) {
+        const incoming = await readWorkbookFile(file);
+        const fileBase = String(file.name).replace(/\.[^.]+$/, '');
+        incoming.SheetNames.forEach((name) => {
+          if (isGeneratedSheet(incoming.Sheets[name])) return;
+          const fallback = `${fileBase} - ${name}`;
+          const targetName = merged.SheetNames.includes(name) ? uniqueWorkbookSheetName(merged, fallback) : uniqueWorkbookSheetName(merged, name);
+          XLSX.utils.book_append_sheet(merged, incoming.Sheets[name], targetName);
+          // The manufacturer and country of an added kit are not known; start from the file name and let the user set them.
+          const headerText = (XLSX.utils.sheet_to_json(incoming.Sheets[name], { header: 1, defval: '', range: 0 }).slice(0, 12) || []).flat().join(' ');
+          const guessed = CURRENCY_HOME_COUNTRY[currencyFromText(headerText)];
+          state.kits[targetName] = {
+            ...newKitSettings(targetName),
+            manufacturer: fileBase.slice(0, 80) || targetName,
+            originCountry: guessed || state.supplier.country,
+            shippingMode: 'kitTotal',
+            shippingAmount: 0,
+          };
+          added += 1;
+        });
+      }
+      if (!added) throw new Error('No source sheets were found in the selected workbook.');
+      const settingsName = uniqueWorkbookSheetName(merged, 'PartsList settings');
+      XLSX.utils.book_append_sheet(merged, buildSettingsSheet(), settingsName);
+      merged.Workbook = merged.Workbook || {};
+      merged.Workbook.Sheets = merged.SheetNames.map((name) => ({ Hidden: name === settingsName ? 1 : 0 }));
+      const bytes = XLSX.write(merged, { type: 'array', bookType: 'xlsx', cellStyles: true, bookSST: true });
+      const projectName = state.fileName || 'partslist-project.xlsx';
+      const mergedFile = new File([bytes], projectName, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      await importWorkbook(mergedFile, { addedKits: added, displayName: projectName });
+    } catch (error) {
+      console.error(error);
+      setStatus(`Could not add kits: ${error.message}`, 'error');
+      showToast(error.message || 'Kit import failed.', true);
+    }
+  }
+
+  async function importWorkbook(file, options = {}) {
     if (!window.XLSX || !FormulaEngine) {
       showToast('Spreadsheet libraries are unavailable.', true);
       return;
@@ -1921,16 +2263,7 @@
 
     setStatus(`Reading ${file.name}…`, 'busy');
     try {
-      const data = await file.arrayBuffer();
-      const workbook = XLSX.read(data, {
-        type: 'array',
-        cellFormula: true,
-        cellStyles: true,
-        cellNF: true,
-        cellDates: true,
-        bookDeps: true,
-        xlfn: true,
-      });
+      const workbook = await readWorkbookFile(file);
 
       if (!workbook.SheetNames.length) throw new Error('The workbook contains no sheets.');
 
@@ -1940,7 +2273,7 @@
       dom.secureDownload.classList.add('hidden');
 
       state.workbook = workbook;
-      state.fileName = file.name;
+      state.fileName = options.displayName || file.name;
       state.matrices = {};
       state.mappings = {};
       state.variables = [];
@@ -1966,6 +2299,7 @@
       state.sales = { ...SALES_DEFAULTS };
       state.scenario = { salesDelta: 0, purchaseDelta: 0, inboundDelta: 0, warehouseDelta: 0 };
       state.supplier = { ...SUPPLIER_DEFAULTS };
+      state.customer = { country: '578' };
       FLOW_OVERRIDE_KEYS.forEach((key) => { state.flowOverrides[key] = null; });
       state.flowUnlocked = false;
       state.selectedKeys = new Set();
@@ -2010,13 +2344,14 @@
       restorePendingWorkbookState();
       rebuildDependencyIndex();
 
-      dom.workbookName.textContent = file.name;
+      dom.workbookName.textContent = state.fileName;
       dom.sheetCount.textContent = `${workbook.SheetNames.length} sheet${workbook.SheetNames.length === 1 ? '' : 's'}`;
       dom.emptyPanel.classList.add('hidden');
       dom.controls.classList.remove('hidden');
       dom.tabs.classList.remove('hidden');
       dom.welcome.classList.add('hidden');
       dom.exportButton.disabled = false;
+      dom.addKitLabel.classList.remove('hidden');
 
       dom.consolidatedSearch.value = '';
       syncControlsFromState();
@@ -2033,10 +2368,13 @@
       const enabled = Object.values(state.mappings).filter((mapping) => mapping.enabled).length;
       const restoredNote = restoredWorkbook ? ' Saved settings were restored from the workbook.' : '';
       const warningNote = state.importWarnings.length ? ` Warning: ${state.importWarnings.join(' ')}` : '';
-      setStatus(`Loaded ${file.name}. ${enabled} of ${workbook.SheetNames.length} sheets are included in consolidation.${restoredNote}${warningNote}`, state.importWarnings.length ? 'warning' : '');
+      const addedNote = options.addedKits ? ` Added ${options.addedKits} new kit sheet${options.addedKits === 1 ? '' : 's'}.` : '';
+      setStatus(`Loaded ${state.fileName}. ${enabled} of ${workbook.SheetNames.length} sheets are included in consolidation.${addedNote}${restoredNote}${warningNote}`, state.importWarnings.length ? 'warning' : '');
+      if (options.addedKits) showToast(`${options.addedKits} new kit sheet${options.addedKits === 1 ? '' : 's'} added. Review each kit's manufacturer, route, currency and discount.`);
       if (state.importWarnings.length) showToast(`Import warning: ${state.importWarnings.join(' ')}`);
       await refreshRates(false);
       markProjectSaved(restoredWorkbook ? 'Workbook settings restored' : 'Workbook imported');
+      setLanguage(state.language, false);
       renderSetupGuide();
     } catch (error) {
       console.error(error);
@@ -2387,7 +2725,8 @@
         .join(' / ');
       const option = document.createElement('option');
       option.value = String(index);
-      option.textContent = `${columnName(index)} — ${displayValue(header) || '(blank)'}`;
+      option.textContent = `${columnName(index)} — ${displayValue(header) || translateUi('(blank)')}`;
+      option.translate = false;
       option.selected = mapping[field] === index;
       select.append(option);
     });
@@ -2411,6 +2750,7 @@
     state.workbook.SheetNames.forEach((sheetName) => {
       const mapping = state.mappings[sheetName];
       if (!mapping.enabled || mapping.part === null || mapping.quantity === null) return;
+      const kit = kitSettings(sheetName);
       const matrix = state.matrices[sheetName];
       const priceHeader = matrix
         .slice(mapping.headerRow, mapping.dataStartRow)
@@ -2430,7 +2770,10 @@
         if (!key) continue;
 
         const currencyValue = mapping.currency === null ? null : readCalculatedValue(sheetName, row, mapping.currency);
+        // Order: a currency column in the sheet, the kit's own setting, a currency named in the price header,
+        // then the project default.
         const currency = normalizeCurrency(currencyValue)
+          || kit.defaultCurrency
           || currencyFromText(priceHeader)
           || state.config.sourceCurrency;
 
@@ -2445,6 +2788,10 @@
           shipping: mapping.shipping === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.shipping)),
           sourceShippingWithMargin: mapping.shippingWithMargin === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.shippingWithMargin)),
           currency,
+          discountRate: kitDiscount(kit),
+          dutyRate: kit.dutyRate,
+          manufacturer: kit.manufacturer,
+          originCountry: kit.originCountry,
           sheetName,
           row,
         };
@@ -2543,7 +2890,8 @@
     const convertedTotal = convertedUnit !== null ? convertedUnit * maxQuantity : null;
     const usdToOutput = state.config.outputCurrency === 'USD' ? 1 : state.rates.USD ?? null;
     const amountUsd = convertedTotal !== null && usdToOutput !== null ? convertedTotal / usdToOutput : null;
-    const discountedTotal = convertedTotal !== null ? convertedTotal * (1 - state.config.discount) : null;
+    const discount = Number.isFinite(representative.discountRate) ? representative.discountRate : state.config.discount;
+    const discountedTotal = convertedTotal !== null ? convertedTotal * (1 - discount) : null;
     const sellingTotal = discountedTotal !== null ? discountedTotal * multiplier : null;
     const salesOverridden = Number.isFinite(override.salesPerYear);
 
@@ -2562,7 +2910,7 @@
       convertedUnit,
       convertedTotal,
       amountUsd,
-      discount: state.config.discount,
+      discount,
       discountedTotal,
       multiplier,
       multiplierOverridden: multiplier !== state.config.multiplier,
@@ -2575,6 +2923,9 @@
       salesOverridden,
       excluded: override.excluded === true,
       pricingSource: representative.sheetName,
+      manufacturer: representative.manufacturer,
+      originCountry: representative.originCountry,
+      kitDutyRate: representative.dutyRate,
       pricingRow: representative.row + 1,
       occurrenceCount: occurrences.length,
     };
@@ -2588,19 +2939,25 @@
     const shipment = allocateShipment ? toOutput(freight.consolidatedShipment, freight.consolidatedCurrency) : 0;
     const clearance = allocateShipment ? toOutput(freight.clearanceFee, freight.clearanceCurrency) : 0;
     const shares = Core.allocationShares(items, freight.allocation);
+    const treatments = items.map((item) => Core.customsTreatment(item.originCountry, state.warehouse.country));
+    // Clearance and broker fees belong to import declarations only, so they are shared among imported lines.
+    const importShares = Core.allocationShares(items.map((item, index) => (treatments[index] === 'import' ? item : { maxQuantity: 0, discountedTotal: 0 })), freight.allocation);
 
     items.forEach((item, index) => {
       const share = allocateShipment ? shares[index] : 0;
+      const isImport = treatments[index] === 'import';
+      item.routeTreatment = treatments[index];
       const purchase = item.discountedTotal;
       item.allocationShare = share;
       item.consolidatedFreight = shipment === null ? null : shipment * share;
-      item.clearance = clearance === null ? null : clearance * share;
+      item.clearance = clearance === null ? null : (isImport && allocateShipment ? clearance * importShares[index] : 0);
       item.insurance = purchase === null ? null : purchase * freight.insuranceRate;
       item.missingFreight = item.kitFreight === null || (allocateShipment && (shipment === null || clearance === null));
       const costComponents = [purchase, item.kitFreight, item.consolidatedFreight, item.insurance, item.clearance];
       const costsComplete = costComponents.every((value) => value !== null && Number.isFinite(value));
       const customsValue = costsComplete ? purchase + item.kitFreight + item.consolidatedFreight + item.insurance : null;
-      item.duty = customsValue === null ? null : customsValue * freight.dutyRate;
+      item.dutyRate = isImport ? (Number.isFinite(item.kitDutyRate) ? item.kitDutyRate : freight.dutyRate) : 0;
+      item.duty = customsValue === null ? null : customsValue * item.dutyRate;
       item.importCosts = costsComplete ? item.insurance + item.duty + item.clearance : null;
       item.freightAndImport = costsComplete ? item.kitFreight + item.consolidatedFreight + item.importCosts : null;
       item.shippingMargin = margin;
@@ -2609,7 +2966,7 @@
       item.vat = item.lineTotal === null ? null : item.lineTotal * vatRate;
       item.lineTotalInclVat = item.lineTotal === null ? null : item.lineTotal + item.vat;
       item.landedCost = purchase === null || item.freightAndImport === null ? null : purchase + item.freightAndImport;
-      item.importVat = customsValue === null || item.duty === null ? null : (customsValue + item.duty) * vatRate;
+      item.importVat = customsValue === null || item.duty === null ? null : (isImport ? (customsValue + item.duty) * vatRate : 0);
       item.unitSalesPrice = item.lineTotal !== null && item.maxQuantity > 0 ? item.lineTotal / item.maxQuantity : null;
       item.unitLandedCost = item.landedCost !== null && item.maxQuantity > 0 ? item.landedCost / item.maxQuantity : null;
       // Legacy names used by the warehouse sheet and older exports.
@@ -2622,6 +2979,7 @@
   function buildKitSummaries(kitOccurrences) {
     const summaries = [];
     kitOccurrences.forEach((occurrences, sheetName) => {
+      const kit = kitSettings(sheetName);
       let list = 0;
       let purchase = 0;
       let sales = 0;
@@ -2633,7 +2991,7 @@
           missing += 1;
         } else {
           const lineList = occurrence.price * fx * occurrence.quantity;
-          const linePurchase = lineList * (1 - state.config.discount);
+          const linePurchase = lineList * (1 - kitDiscount(kit));
           list += lineList;
           purchase += linePurchase;
           sales += linePurchase * effectiveMultiplier(occurrence.key);
@@ -2651,6 +3009,10 @@
         salesInclFreight: sales + freight / (1 - state.config.shippingMargin),
         missing,
         mode: kitSettings(sheetName).shippingMode,
+        manufacturer: kit.manufacturer,
+        originCountry: kit.originCountry,
+        currency: kitCurrency(kit),
+        discountRate: kitDiscount(kit),
       });
     });
     return summaries;
@@ -2802,6 +3164,8 @@
     renderFreightSummary();
     updateGroupCounts();
     populateOriginSelects();
+    populateCustomerSelects();
+    updateKitRouteSummaries();
     renderCustomsGuides();
     if (state.activeView === VIEW.consolidated) renderConsolidated();
     else if (state.activeView === VIEW.dashboard) renderDashboard();
@@ -2835,6 +3199,7 @@
         if (enabled) {
           const name = document.createElement('strong');
           name.textContent = sheetName;
+          name.translate = false;
           const meta = document.createElement('small');
           meta.textContent = summary ? `${summary.lines} lines` : '';
           const remove = document.createElement('button');
@@ -2900,12 +3265,14 @@
     const o = state.config.outputCurrency;
     const money = (field) => (item) => formatNullableNumber(item[field], 2);
     return [
-      { label: 'Source sheets', value: (item) => item.sources.join(', ') },
-      { label: 'Part', value: (item) => item.part, className: 'part-cell' },
-      { label: 'Description', value: (item) => item.description },
+      { label: 'Source sheets', data: true, value: (item) => item.sources.join(', ') },
+      { label: 'Part', data: true, value: (item) => item.part, className: 'part-cell' },
+      { label: 'Description', data: true, value: (item) => item.description },
       { label: 'Quantity', number: true, value: (item) => formatNumber(item.maxQuantity, 2), overridden: (item) => item.quantityOverridden, note: (item) => (item.quantityOverridden ? `Stock quantity override. Source maximum: ${formatNumber(item.sourceMaxQuantity, 2)}` : '') },
       { label: `Amount in ${o}`, number: true, value: money('convertedTotal'), required: true },
       { label: 'Amount in USD', number: true, value: money('amountUsd'), required: true },
+      { label: 'Manufacturer', data: true, value: (item) => item.manufacturer || item.pricingSource },
+      { label: 'Country of origin', value: (item) => originName(item.originCountry) },
       { label: 'Match', value: (item) => (item.common ? 'Common' : 'Unique') },
       { label: 'Sales group', group: true },
       { label: 'Expected sales / yr', number: true, value: (item) => formatNumber(item.salesPerYear, 2), overridden: (item) => item.salesOverridden, note: (item) => (item.salesOverridden ? 'Item sales override' : item.groupName ? `From group ${item.groupName}` : 'Default sales assumption') },
@@ -3036,8 +3403,11 @@
     if (!items.length) return;
     const groupRow = tbody.insertRow();
     groupRow.className = 'group-row';
+    const groupSelectCell = groupRow.insertCell();
+    groupSelectCell.className = 'select-cell';
+    groupSelectCell.setAttribute('aria-hidden', 'true');
     const groupCell = groupRow.insertCell();
-    groupCell.colSpan = columns.length + 1;
+    groupCell.colSpan = columns.length;
     groupCell.textContent = `${label} — ${items.length}`;
 
     items.forEach((item) => {
@@ -3060,6 +3430,7 @@
             chip.className = 'group-chip';
             chip.style.setProperty('--group-color', item.groupColor);
             chip.textContent = item.groupName;
+            chip.translate = false;
             cell.append(chip);
           } else {
             cell.textContent = '—';
@@ -3069,6 +3440,7 @@
         }
         const value = column.value(item);
         cell.textContent = value;
+        if (column.data) cell.translate = false;
         if (column.className) cell.classList.add(column.className);
         if (column.number) cell.classList.add('number');
         if (column.strong) cell.classList.add('strong-cell');
@@ -3584,7 +3956,7 @@
 
   function formatCompact(value) {
     if (!Number.isFinite(value)) return '—';
-    return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: Math.abs(value) >= 1e6 ? 2 : 1 }).format(value);
+    return numberFormat({ notation: 'compact', maximumFractionDigits: Math.abs(value) >= 1e6 ? 2 : 1 }).format(value);
   }
 
   function kpiTile(label, value, detail, options = {}) {
@@ -3933,6 +4305,7 @@
       chip.className = 'group-chip';
       chip.style.setProperty('--group-color', group.color);
       chip.textContent = group.name;
+      chip.translate = false;
       nameCell.append(chip);
       [formatNumber(group.items, 0), formatNumber(group.units, 0), formatNumber(group.sales, 1), formatWhole(group.revenue), formatWhole(group.gross), formatWhole(group.net), group.revenue > 0 ? formatPercent(group.gross / group.revenue) : '—']
         .forEach((value) => { const cell = row.insertCell(); cell.textContent = value; cell.className = 'number'; });
@@ -3951,14 +4324,19 @@
     model.rows.forEach((row) => {
       const tr = body.insertRow();
       if (row.item.common) tr.className = 'common';
-      tr.insertCell().textContent = row.item.part;
-      tr.insertCell().textContent = row.item.description;
+      const partCell = tr.insertCell();
+      partCell.textContent = row.item.part;
+      partCell.translate = false;
+      const descriptionCell = tr.insertCell();
+      descriptionCell.textContent = row.item.description;
+      descriptionCell.translate = false;
       const groupCell = tr.insertCell();
       if (row.item.groupId) {
         const chip = document.createElement('span');
         chip.className = 'group-chip';
         chip.style.setProperty('--group-color', row.item.groupColor);
         chip.textContent = row.item.groupName;
+        chip.translate = false;
         groupCell.append(chip);
       } else {
         groupCell.textContent = '—';
@@ -4028,6 +4406,17 @@
     const warehouse = model.warehouse;
     const items = state.consolidated;
     const sum = (field) => items.reduce((total, item) => total + (item[field] ?? 0), 0);
+    const destination = destinationConfig();
+    dom.flowShipDestination.textContent = `Ship to ${destination.name}`;
+    dom.flowDestinationName.textContent = destination.name;
+    dom.flowLandedDestination.textContent = `Landed in ${destination.name}`;
+    const customer = customerConfig();
+    dom.flowCustomerDestination.textContent = `Customer in ${customer.name}`;
+    dom.destinationMapTitle.textContent = isCrossBorderSale() ? `${destination.name} → ${customer.name}` : destination.name;
+    dom.flowCustomerNote.textContent = isCrossBorderSale()
+      ? `Sales from a ${destination.name} warehouse to customers in ${customer.name} cross a border. Export documents and the customer-side VAT are not calculated yet.`
+      : '';
+    dom.flowCustomerNote.classList.toggle('hidden', !isCrossBorderSale());
     setStats(dom.flowFactoryStats, [
       ['List value', formatWhole(sum('convertedTotal'))],
       ['After discount', formatWhole(sum('discountedTotal'))],
@@ -4075,7 +4464,10 @@
 
   function renderFlowKitRows() {
     const kits = state.workbook.SheetNames.filter((name) => state.mappings[name]?.enabled && isSourceKit(name));
-    const signature = kits.join('\u0000');
+    const signature = kits.map((name) => {
+      const kit = kitSettings(name);
+      return `${name}|${kit.manufacturer}|${kit.originCountry}`;
+    }).join('\u0000');
     if (dom.flowKitRows.dataset.signature !== signature) {
       dom.flowKitRows.dataset.signature = signature;
       dom.flowKitRows.replaceChildren(...kits.map((sheetName) => {
@@ -4083,7 +4475,8 @@
         row.className = 'stack';
         const th = document.createElement('th');
         th.scope = 'row';
-        th.textContent = `${sheetName} kit freight`;
+        const kit = kitSettings(sheetName);
+        th.textContent = `${kit.manufacturer || sheetName} · ${originName(kit.originCountry)}`;
         const td = document.createElement('td');
         const wrap = document.createElement('div');
         wrap.className = 'kit-inline';
@@ -4123,7 +4516,34 @@
   /* ---------- Customs & VAT guide ---------- */
 
   function originName(id = state.supplier.country) {
-    return ORIGIN_PRESETS[id]?.name || state.map.names?.get(id) || state.supplier.countryName || 'Selected country';
+    const english = ORIGIN_PRESETS[id]?.name || state.map.names?.get(id) || state.supplier.countryName || 'Selected country';
+    return I18n && state.language === 'sv' ? I18n.countryName('sv', id, english) : english;
+  }
+
+  function destinationConfig() {
+    return DESTINATIONS[state.warehouse.country] || DESTINATIONS[WAREHOUSE_DEFAULTS.country];
+  }
+
+  // The country the goods are sold into. It is separate from the warehouse country: a warehouse in one
+  // country can serve customers in another.
+  function customerConfig() {
+    return DESTINATIONS[state.customer.country] || DESTINATIONS['578'];
+  }
+
+  function isCrossBorderSale() {
+    return state.customer.country !== state.warehouse.country;
+  }
+
+  function populateCustomerSelects() {
+    const ids = Object.keys(DESTINATIONS);
+    document.querySelectorAll('[data-customer-select]').forEach((select) => {
+      const signature = `${state.language}|${ids.join(',')}`;
+      if (select.dataset.signature !== signature) {
+        select.dataset.signature = signature;
+        select.replaceChildren(...ids.map((id) => new Option(originName(id), id)));
+      }
+      if (select !== document.activeElement) select.value = state.customer.country;
+    });
   }
 
   function originAgreement(id) {
@@ -4135,6 +4555,10 @@
   }
 
   const AGREEMENT_TEXT = {
+    intraeu: {
+      badge: 'Intra-EU movement',
+      duty: 'Goods moving from another EU member state to Sweden are not imported at an external EU border, so no customs duty or import declaration is normally made in Sweden. Swedish acquisition VAT is instead handled in the VAT return.',
+    },
     eu: {
       badge: 'EU · EEA agreement',
       duty: 'Free trade through the EEA agreement. Dutiable goods (such as clothing or food) are 0% only when the shipment carries valid proof of origin: an EUR.1 certificate or a valid invoice declaration showing the goods were made in the EU.',
@@ -4165,13 +4589,26 @@
   ];
 
   function buildCustomsGuide(countryId = state.supplier.country, { compact = false } = {}) {
-    const agreement = originAgreement(countryId);
-    const info = AGREEMENT_TEXT[agreement];
+    const destination = destinationConfig();
+    let agreement = originAgreement(countryId);
+    let info = AGREEMENT_TEXT[agreement];
+    if (state.warehouse.country === '752') {
+      if (countryId === '752') info = { badge: 'Domestic', duty: 'Goods bought and warehoused in Sweden do not cross a customs border, so no customs duty or import VAT applies.' };
+      else if (EU_MEMBERS.has(countryId)) { agreement = 'intraeu'; info = AGREEMENT_TEXT.intraeu; }
+      else if (countryId === '578' || EFTA_MEMBERS.has(countryId)) {
+        agreement = 'efta';
+        info = { badge: 'Non-EU import · preferential origin may apply', duty: 'Imports from Norway or Switzerland require EU customs clearance. Preferential duty can apply when the goods meet the relevant origin rules and valid proof of origin accompanies the shipment; otherwise the EU Common Customs Tariff applies.' };
+      } else if (countryId === '840') {
+        info = { badge: 'Non-EU import', duty: 'Imports from the United States require EU customs clearance. Duty depends on the commodity code and origin under the EU Common Customs Tariff.' };
+      } else {
+        info = { badge: 'Non-EU import', duty: 'Imports into Sweden from outside the EU require customs clearance. Duty depends on the commodity code, customs value, origin and any applicable trade agreement.' };
+      }
+    }
     const fragment = document.createDocumentFragment();
     const head = document.createElement('div');
     head.className = 'guide-head';
     const title = document.createElement('strong');
-    title.textContent = `Importing from ${originName(countryId)}`;
+    title.textContent = `${originName(countryId)} → ${destination.name}`;
     const badge = document.createElement('span');
     badge.className = `guide-badge ${agreement}`;
     badge.textContent = info.badge;
@@ -4188,11 +4625,16 @@
       block.append(h, p);
       return block;
     };
-    fragment.append(section('Customs duty', `${info.duty} In Norway most industrial and technical goods are duty-free wherever they are made; Tolletaten mainly charges duty on clothing, textiles and food. Rock-drill spare parts are machinery parts, which normally fall in the duty-free group — confirm the HS code with your forwarder.`));
-    if (agreement !== 'norway') {
-      const importVat = state.consolidated.reduce((sum, item) => sum + (item.importVat ?? 0), 0);
-      fragment.append(section('Import VAT (MVA)', `Normally 25% (15% on food), calculated on the purchase value plus freight and any duty — about ${formatWhole(importVat)} for this order. Through a Norwegian VAT-registered company nothing is paid at the border: the import VAT is reported as both input and output VAT in the ordinary MVA-melding to Skatteetaten, so cash flow is unaffected.`));
-      const strategies = CUSTOMS_STRATEGIES.filter((strategy) => strategy.origins.includes(agreement));
+    const norwayDetail = ' In Norway most industrial and technical goods are duty-free wherever they are made; confirm the HS code and proof-of-origin requirements with the forwarder.';
+    fragment.append(section('Customs duty', `${info.duty}${state.warehouse.country === '578' ? norwayDetail : ' Confirm the CN/HS commodity code, customs value and origin documentation with the customs representative.'}`));
+    if (countryId !== state.warehouse.country && agreement !== 'intraeu') {
+      const fromCountry = state.consolidated.filter((item) => item.originCountry === countryId);
+      const importVat = (fromCountry.length ? fromCountry : state.consolidated).reduce((sum, item) => sum + (item.importVat ?? 0), 0);
+      const vatText = state.warehouse.country === '752'
+        ? `Swedish import VAT is normally reported to Skatteverket by a VAT-registered importer and is calculated from the customs value plus duty and certain ancillary costs — about ${formatWhole(importVat)} for this scenario.`
+        : `Normally 25% (15% on food), calculated on the purchase value plus freight and any duty — about ${formatWhole(importVat)} for this order. A Norwegian VAT-registered importer normally reports import VAT in the MVA return.`;
+      fragment.append(section('Import VAT', vatText));
+      const strategies = state.warehouse.country === '578' ? CUSTOMS_STRATEGIES.filter((strategy) => strategy.origins.includes(agreement)) : [];
       const list = document.createElement(compact ? 'ul' : 'div');
       list.className = compact ? 'guide-list' : 'guide-strategies';
       strategies.forEach((strategy) => {
@@ -4212,29 +4654,54 @@
           list.append(details);
         }
       });
-      const h = document.createElement('h5');
-      h.textContent = 'Avoid unnecessary cost and border stops';
-      fragment.append(h, list);
+      if (strategies.length) {
+        const h = document.createElement('h5');
+        h.textContent = 'Avoid unnecessary cost and border stops';
+        fragment.append(h, list);
+      }
     }
+    return fragment;
+  }
+
+  // The countries the enabled kits come from (or the project supplier when no kit is set up yet).
+  function guideOrigins() {
+    const origins = [...new Set(enabledKitRoutes().map((route) => route.originCountry))];
+    return origins.length ? origins : [state.supplier.country];
+  }
+
+  function buildGuidesForOrigins(options) {
+    const fragment = document.createDocumentFragment();
+    guideOrigins().forEach((countryId, index) => {
+      const section = document.createElement('div');
+      section.className = 'customs-guide-origin';
+      if (index) section.classList.add('separated');
+      section.append(buildCustomsGuide(countryId, options));
+      fragment.append(section);
+    });
     return fragment;
   }
 
   function renderCustomsGuides() {
     const sidebar = el('sidebar-customs-guide');
-    if (sidebar?.closest('details')?.open) sidebar.replaceChildren(buildCustomsGuide(state.supplier.country));
-    if (!dom.customsPopover.hidden) dom.customsPopover.querySelector('.customs-popover-body')?.replaceChildren(buildCustomsGuide(state.supplier.country, { compact: true }));
+    if (sidebar?.closest('details')?.open) sidebar.replaceChildren(buildGuidesForOrigins({}));
+    if (!dom.customsPopover.hidden) dom.customsPopover.querySelector('.customs-popover-body')?.replaceChildren(buildGuidesForOrigins({ compact: true }));
   }
 
   function populateOriginSelects() {
     const ids = [...new Set([...Object.keys(ORIGIN_PRESETS), state.supplier.country])].sort((a, b) => originName(a).localeCompare(originName(b)));
     document.querySelectorAll('[data-origin-select]').forEach((select) => {
-      const signature = ids.join(',');
-      if (select.dataset.signature !== signature) {
-        select.dataset.signature = signature;
-        select.replaceChildren(...ids.map((id) => new Option(originName(id), id)));
-      }
-      if (select !== document.activeElement) select.value = state.supplier.country;
+      populateOriginSelect(select, state.supplier.country, ids);
     });
+  }
+
+  function populateOriginSelect(select, selected, providedIds = null) {
+    const ids = providedIds || [...new Set([...Object.keys(ORIGIN_PRESETS), selected])].sort((a, b) => originName(a).localeCompare(originName(b)));
+    const signature = ids.join(',');
+    if (select.dataset.signature !== signature) {
+      select.dataset.signature = signature;
+      select.replaceChildren(...ids.map((id) => new Option(originName(id), id)));
+    }
+    if (select !== document.activeElement) select.value = selected;
   }
 
   function setSupplierOrigin(countryId, { name, lat, lon } = {}) {
@@ -4313,7 +4780,7 @@
     const head = document.createElement('div');
     head.className = 'customs-popover-head';
     const title = document.createElement('span');
-    title.textContent = 'Customs & VAT in Norway';
+    title.textContent = `Customs & VAT in ${destinationConfig().name}`;
     const close = document.createElement('button');
     close.type = 'button';
     close.className = 'icon-button';
@@ -4323,7 +4790,7 @@
     head.append(title, close);
     const body = document.createElement('div');
     body.className = 'customs-popover-body customs-guide';
-    body.append(buildCustomsGuide(state.supplier.country, { compact: true }));
+    body.append(buildGuidesForOrigins({ compact: true }));
     popover.replaceChildren(head, body);
     popover.hidden = false;
     const rect = anchor.getBoundingClientRect();
@@ -4386,6 +4853,8 @@
         state.map.names.set(id, name);
         return { id, name, rings, bbox: [lonMin, latMin, lonMax, latMax] };
       }).filter((feature) => feature.rings.length && feature.bbox[3] > -60);
+      // The map's own English country names get their translations before the map is first drawn.
+      I18n?.addPairs('sv', state.map.features.map((feature) => [feature.name, I18n.countryName('sv', feature.id, feature.name)]));
       state.map.error = null;
     } catch (error) {
       console.warn('Map data could not be loaded.', error);
@@ -4473,16 +4942,46 @@
     renderMapInfo();
   }
 
+  // Kits from the same manufacturer and country share one route, e.g. four TEI kits from the USA.
+  function enabledKitRoutes() {
+    if (!state.workbook) return [];
+    const routes = new Map();
+    state.workbook.SheetNames.filter((name) => state.mappings[name]?.enabled && isSourceKit(name)).forEach((sheetName) => {
+      const kit = kitSettings(sheetName);
+      const manufacturer = kit.manufacturer || sheetName;
+      const key = `${manufacturer}|${kit.originCountry}`;
+      if (!routes.has(key)) {
+        routes.set(key, {
+          key,
+          manufacturer,
+          originCountry: kit.originCountry,
+          origin: ORIGIN_PRESETS[kit.originCountry] || ORIGIN_PRESETS[SUPPLIER_DEFAULTS.country],
+          sheetNames: [],
+          kits: [],
+          color: GROUP_COLORS[routes.size % GROUP_COLORS.length],
+        });
+      }
+      const route = routes.get(key);
+      route.sheetNames.push(sheetName);
+      route.kits.push(kit);
+    });
+    return [...routes.values()];
+  }
+
   function renderWorldMap() {
     const container = dom.mapWorld;
     if (!state.map.features) {
       container.innerHTML = `<p class="map-status">${escapeMarkup(state.map.error || 'Loading map outlines…')}</p>`;
       return;
     }
-    const supplier = [state.supplier.lon, state.supplier.lat];
+    const destination = destinationConfig();
+    const kitRoutes = enabledKitRoutes();
+    const routeOrigins = kitRoutes.length
+      ? kitRoutes.map(({ origin }) => [origin.lon, origin.lat])
+      : [[state.supplier.lon, state.supplier.lat]];
     const compareFeature = state.map.compare ? state.map.features.find((feature) => feature.id === state.map.compare) : null;
     const compare = compareFeature ? compareFeature.centroid || (compareFeature.centroid = featureCentroid(compareFeature)) : null;
-    const points = [supplier, NORWAY_ARRIVAL, ...(compare ? [compare] : [])];
+    const points = [...routeOrigins, destination.arrival, ...(compare ? [compare] : [])];
     const lons = points.map(([lon]) => lon);
     const lats = points.map(([, lat]) => lat);
     let bounds = [Math.min(...lons) - 22, Math.max(-50, Math.min(...lats) - 14), Math.max(...lons) + 18, Math.min(80, Math.max(72, Math.max(...lats) + 8))];
@@ -4492,14 +4991,12 @@
     }
     const width = Math.max(300, container.clientWidth || 520);
     const projection = createProjection(bounds, width, 330);
-    const layerKey = `${width}|${bounds.join(',')}|${state.supplier.country}|${state.map.compare}`;
+    const layerKey = `${width}|${bounds.join(',')}|${kitRoutes.map(({ originCountry }) => originCountry).join(',')}|${state.warehouse.country}|${state.map.compare}`;
     if (state.map.worldKey !== layerKey) {
       state.map.worldKey = layerKey;
-      state.map.worldLayer = countryLayer(projection, { supplier: state.supplier.country, compare: state.map.compare });
+      state.map.worldLayer = countryLayer(projection, { supplier: kitRoutes[0]?.originCountry || state.supplier.country, compare: state.map.compare });
     }
-    const from = projection.project(supplier);
-    const to = projection.project(NORWAY_ARRIVAL);
-    const route = arcPath(from, to);
+    const to = projection.project(destination.arrival);
     const parts = [
       `<rect class="map-sea" width="${width}" height="${projection.height}"/>`,
       `<g class="map-countries">${state.map.worldLayer}</g>`,
@@ -4509,13 +5006,27 @@
       parts.push(`<path class="map-route-hit" d="${compareArc.d}" data-map-target="compare"/><path class="map-route compare" d="${compareArc.d}"/>${mapArrows(compareArc, [0.5], 'map-arrow compare')}`);
       parts.push(mapPoint(projection.project(compare), 'compare', originName(state.map.compare), 'compare', 'middle'));
     }
-    parts.push(`<path class="map-route-hit" d="${route.d}" data-map-target="route" tabindex="0" role="button" aria-label="Freight and tolls from ${escapeMarkup(originName())} to Norway"/><path class="map-route" d="${route.d}"/>${mapArrows(route, [0.3, 0.55, 0.8], 'map-arrow')}`);
-    const [labelX, labelY] = route.at(0.5);
-    parts.push(`<text class="map-route-label" x="${labelX.toFixed(1)}" y="${(labelY - 9).toFixed(1)}" text-anchor="middle">Freight &amp; tolls</text>`);
-    parts.push(mapPoint(from, 'supplier', state.supplier.name || originName(), 'supplier', from[0] > width * 0.7 ? 'end' : 'start'));
-    parts.push(mapPoint(to, 'customs', 'Norway customs', 'customs', 'end'));
-    container.innerHTML = `<svg width="${width}" height="${projection.height}" viewBox="0 0 ${width} ${projection.height}" role="img" aria-label="Map of the supply route from ${escapeMarkup(originName())} to Norway">${parts.join('')}</svg>
-      <div class="map-legend"><span><i class="eu"></i>EU / EEA</span><span><i class="efta"></i>EFTA</span><span><i class="usa"></i>USA · no broad FTA</span><span><i class="other"></i>Other</span><span><i class="norway"></i>Norway</span></div>`;
+    const displayedRoutes = kitRoutes.length ? kitRoutes : [{
+      key: 'supplier',
+      manufacturer: state.supplier.name,
+      originCountry: state.supplier.country,
+      origin: { lon: state.supplier.lon, lat: state.supplier.lat, name: originName() },
+      sheetNames: [],
+      kits: [],
+      color: GROUP_COLORS[0],
+    }];
+    displayedRoutes.forEach(({ key, manufacturer, originCountry, origin, color }, index) => {
+      const from = projection.project([origin.lon, origin.lat]);
+      const route = arcPath(from, to, 0.16 + (index % 3) * 0.045);
+      const target = `kit:${key}`;
+      parts.push(`<path class="map-route-hit" d="${route.d}" data-map-target="${escapeMarkup(target)}" tabindex="0" role="button" aria-label="${escapeMarkup(`${manufacturer}: ${originName(originCountry)} to ${destination.name}`)}"/><path class="map-route kit-route" style="stroke:${color}" d="${route.d}"/>${mapArrows(route, [0.32, 0.58, 0.82], 'map-arrow kit-arrow').replaceAll('class="map-arrow kit-arrow"', `class="map-arrow kit-arrow" style="fill:${color}"`)}`);
+      const [labelX, labelY] = route.at(0.5);
+      parts.push(`<text class="map-route-label" style="fill:${color}" x="${labelX.toFixed(1)}" y="${(labelY - 7 - index * 2).toFixed(1)}" text-anchor="middle">${escapeMarkup(manufacturer)}</text>`);
+      parts.push(mapPoint(from, target, manufacturer, 'supplier', from[0] > width * 0.7 ? 'end' : 'start'));
+    });
+    parts.push(mapPoint(to, 'customs', `${destination.name} customs`, 'customs', 'end'));
+    container.innerHTML = `<svg width="${width}" height="${projection.height}" viewBox="0 0 ${width} ${projection.height}" role="img" aria-label="Supply routes to ${escapeMarkup(destination.name)}">${parts.join('')}</svg>
+      <div class="map-legend">${displayedRoutes.map(({ manufacturer, originCountry, color }) => `<span><i style="background:${color}"></i>${escapeMarkup(`${manufacturer} · ${originName(originCountry)}`)}</span>`).join('')}<span><i class="eu"></i>EU / EEA</span><span><i class="efta"></i>EFTA</span><span><i class="usa"></i>USA</span></div>`;
   }
 
   function featureCentroid(feature) {
@@ -4530,19 +5041,24 @@
       container.innerHTML = '';
       return;
     }
+    const destination = destinationConfig();
+    const customer = customerConfig();
+    const bounds = isCrossBorderSale()
+      ? [Math.min(destination.bounds[0], customer.bounds[0]), Math.min(destination.bounds[1], customer.bounds[1]), Math.max(destination.bounds[2], customer.bounds[2]), Math.max(destination.bounds[3], customer.bounds[3])]
+      : destination.bounds;
     const width = Math.max(220, container.clientWidth || 260);
-    const projection = createProjection([2.5, 57.6, 32, 71.4], width, 330);
-    const key = `${width}`;
+    const projection = createProjection(bounds, width, 330);
+    const key = `${width}|${state.warehouse.country}|${state.customer.country}`;
     if (state.map.norwayKey !== key) {
       state.map.norwayKey = key;
       state.map.norwayLayer = countryLayer(projection);
     }
-    const arrival = projection.project(NORWAY_ARRIVAL);
-    const warehouse = projection.project(NORWAY_WAREHOUSE);
+    const arrival = projection.project(destination.arrival);
+    const warehouse = projection.project(destination.warehouse);
     const parts = [`<rect class="map-sea" width="${width}" height="${projection.height}"/>`, `<g class="map-countries">${state.map.norwayLayer}</g>`];
     const inbound = arcPath([4, projection.height - 6], arrival, 0.1);
     parts.push(`<path class="map-route-hit" d="${inbound.d}" data-map-target="route"/><path class="map-route" d="${inbound.d}"/>${mapArrows(inbound, [0.55], 'map-arrow')}`);
-    NORWAY_CUSTOMERS.forEach(([name, lat, lon]) => {
+    customer.customers.forEach(([name, lat, lon]) => {
       const point = projection.project([lon, lat]);
       const arc = arcPath(warehouse, point, 0.12);
       parts.push(`<path class="map-route-hit" d="${arc.d}" data-map-target="delivery"/><path class="map-route delivery" d="${arc.d}"/>${mapArrows(arc, [0.92], 'map-arrow delivery')}`);
@@ -4552,11 +5068,12 @@
     parts.push(`<path class="map-route-hit" d="${receive.d}" data-map-target="warehouse"/><path class="map-route receive" d="${receive.d}"/>`);
     parts.push(mapPoint(arrival, 'customs', 'Customs', 'customs', 'start'));
     parts.push(mapPoint(warehouse, 'warehouse', state.warehouse.site || 'Warehouse', 'warehouse', 'start'));
-    container.innerHTML = `<svg width="${width}" height="${projection.height}" viewBox="0 0 ${width} ${projection.height}" role="img" aria-label="Map of Norway with customs, warehouse and delivery routes">${parts.join('')}</svg>`;
+    container.innerHTML = `<svg width="${width}" height="${projection.height}" viewBox="0 0 ${width} ${projection.height}" role="img" aria-label="Map of ${escapeMarkup(destination.name)} with customs, warehouse and delivery routes">${parts.join('')}</svg>`;
   }
 
   function renderMapInfo() {
     const target = state.map.hover || state.map.pinned || 'overview';
+    const destination = destinationConfig();
     const model = calculateProfitability();
     const items = state.consolidated;
     const sum = (field) => items.reduce((total, item) => total + (item[field] ?? 0), 0);
@@ -4588,11 +5105,29 @@
       nodes.push(wrap);
     };
 
-    if (target === 'supplier') {
+    if (typeof target === 'string' && target.startsWith('kit:')) {
+      const route = enabledKitRoutes().find((candidate) => candidate.key === target.slice(4));
+      if (route) {
+        const unique = (values) => [...new Set(values)].join(', ');
+        const lines = state.consolidated.filter((item) => route.sheetNames.includes(item.pricingSource));
+        heading('Kit route', `${route.manufacturer} · ${originName(route.originCountry)} → ${destination.name}`);
+        stats([
+          [route.sheetNames.length === 1 ? 'Source sheet' : 'Source sheets', route.sheetNames.join(', ')],
+          ['Customs treatment', TREATMENT_LABELS[Core.customsTreatment(route.originCountry, state.warehouse.country)]],
+          ['Source currency', unique(route.kits.map(kitCurrency))],
+          ['Discount', unique(route.kits.map((kit) => formatPercent(kitDiscount(kit))))],
+          ['Customs duty', unique(lines.map((item) => formatPercent(item.dutyRate ?? 0)))],
+          ['Freight currency', unique(route.kits.map((kit) => kit.shippingCurrency))],
+          ['Purchase after discount', formatWhole(lines.reduce((total, item) => total + (item.discountedTotal ?? 0), 0))],
+          ['Freight & import total', formatWhole(lines.reduce((total, item) => total + (item.freightAndImport ?? 0), 0))],
+        ]);
+        guide(route.originCountry);
+      }
+    } else if (target === 'supplier') {
       heading('Manufacturer', state.supplier.name);
       stats([['Location', `${state.supplier.location} · ${originName()}`], ['Discount', formatPercent(state.config.discount)], ['List value', formatWhole(sum('convertedTotal'))], ['Purchase after discount', formatWhole(sum('discountedTotal'))]]);
     } else if (target === 'route') {
-      heading('Freight & tolls', `${originName()} → Norway`);
+      heading('Freight & tolls', `${[...new Set(guideOrigins().map((countryId) => originName(countryId)))].join(', ')} → ${destination.name}`);
       stats([
         ['Consolidated shipment', formatWhole(sum('consolidatedFreight'))],
         ['Kit freight', formatWhole(sum('kitFreight'))],
@@ -4600,9 +5135,9 @@
         ['Insurance & clearance', formatWhole(items.reduce((total, item) => total + (item.insurance ?? 0) + (item.clearance ?? 0), 0))],
         ['Freight & import total', formatWhole(sum('freightAndImport'))],
       ]);
-      guide(state.supplier.country);
+      guideOrigins().forEach((countryId) => guide(countryId));
     } else if (target === 'compare' && state.map.compare) {
-      heading('Comparison line', `${originName(state.map.compare)} → Norway`);
+      heading('Comparison line', `${originName(state.map.compare)} → ${destination.name}`);
       guide(state.map.compare);
       const actions = document.createElement('div');
       actions.className = 'map-actions';
@@ -4619,9 +5154,9 @@
       actions.append(use, clear);
       nodes.push(actions);
     } else if (target === 'customs') {
-      heading('Norway customs', 'Import clearance');
+      heading(`${destination.name} customs`, 'Import clearance');
       stats([['Landed value', formatWhole(sum('landedCost'))], ['Import VAT on this order', formatWhole(sum('importVat'))], ['Duty', formatWhole(items.reduce((total, item) => total + (item.duty ?? 0), 0))]]);
-      guide(state.supplier.country);
+      guideOrigins().forEach((countryId) => guide(countryId));
     } else if (target === 'warehouse') {
       heading('Warehouse', state.warehouse.site || 'Warehouse');
       stats([
@@ -4630,7 +5165,7 @@
         ['Storage / unit / month', formatWhole(model.perUnit.storagePerUnitMonth)],
       ]);
     } else if (target === 'delivery') {
-      heading('Delivery', 'Warehouse → customers in Norway');
+      heading('Delivery', `Warehouse → customers in ${customerConfig().name}`);
       stats([
         ['Parcel ≤35 kg (business)', formatNok(state.warehouse.rates.parcel)],
         ['Private recipient surcharge', formatNok(state.warehouse.rates.privateSurcharge)],
@@ -4642,13 +5177,13 @@
     } else if (typeof target === 'string' && target.startsWith('country:')) {
       const id = target.slice(8);
       heading('Country', originName(id));
-      note(`${AGREEMENT_TEXT[originAgreement(id)].badge}. Click to draw a comparison line to Norway.`);
+      note(`${AGREEMENT_TEXT[originAgreement(id)].badge}. Click to draw a comparison line to ${destination.name}.`);
     } else {
-      heading('Route overview', `${originName()} → Norway`);
+      heading('Route overview', `${enabledKitRoutes().length} kit route${enabledKitRoutes().length === 1 ? '' : 's'} → ${destination.name}`);
       stats([
         ['Purchase after discount', formatWhole(sum('discountedTotal'))],
         ['Freight & import', formatWhole(sum('freightAndImport'))],
-        ['Landed in Norway', formatWhole(sum('landedCost'))],
+        [`Landed in ${destination.name}`, formatWhole(sum('landedCost'))],
         ['Warehouse / month', formatWhole(model.warehouse.monthlyTotal)],
         ['Net profit / yr', formatWhole(model.net)],
       ]);
@@ -4697,7 +5232,7 @@
         if (!target) return;
         if (target.startsWith('country:')) {
           const id = target.slice(8);
-          if (id === '578') return;
+          if (id === state.warehouse.country) return;
           state.map.compare = id === state.supplier.country ? null : id;
           state.map.pinned = state.map.compare ? 'compare' : 'route';
           state.map.hover = null;
@@ -4757,7 +5292,7 @@
     const sources = [...new Set(state.consolidated.map((item) => item.currency).filter(Boolean))];
     const kitCurrencies = state.workbook.SheetNames
       .filter((name) => state.mappings[name]?.enabled)
-      .map((name) => kitSettings(name).shippingCurrency);
+      .flatMap((name) => [kitSettings(name).shippingCurrency, kitCurrency(kitSettings(name))]);
     const requestedPairs = uniqueBy([
       ...sources.map((source) => ({ from: source, to: target })),
       { from: 'USD', to: target },
@@ -4951,6 +5486,7 @@
         const raw = matrix[row]?.[col] ?? null;
         const value = readCalculatedValue(sheetName, row, col);
         td.textContent = displayValue(value);
+        td.translate = false;
         td.title = raw === null ? '' : String(raw);
         td.dataset.row = String(row);
         td.dataset.col = String(col);
@@ -5049,7 +5585,7 @@
     try {
       const range = parseRange(dom.targetRange.value);
       const cellCount = (range.e.r - range.s.r + 1) * (range.e.c - range.s.c + 1);
-      if (cellCount > MAX_FILL_CELLS) throw new Error(`The range is too large. The limit is ${MAX_FILL_CELLS.toLocaleString()} cells.`);
+      if (cellCount > MAX_FILL_CELLS) throw new Error(`The range is too large. The limit is ${formatNumber(MAX_FILL_CELLS, 0)} cells.`);
       const seed = clear ? null : parseUserInput(dom.rangeFormula.value);
       const block = [];
       for (let row = range.s.r; row <= range.e.r; row += 1) {
@@ -5064,7 +5600,7 @@
       setEngineBlock(state.activeView, range.s.r, range.s.c, block);
       state.selectedCell = { sheetName: state.activeView, row: range.s.r, col: range.s.c };
       afterWorkbookEdit(state.activeView);
-      showToast(clear ? 'Range cleared.' : `Formula applied to ${cellCount.toLocaleString()} cells.`);
+      showToast(clear ? 'Range cleared.' : `Formula applied to ${formatNumber(cellCount, 0)} cells.`);
     } catch (error) {
       showToast(error.message || 'The range could not be updated.', true);
     }
@@ -5461,6 +5997,8 @@
   function syncControlsFromState(active = null) {
     dom.sourceCurrency.value = state.config.sourceCurrency;
     dom.outputCurrency.value = state.config.outputCurrency;
+    dom.warehouseCountry.value = state.warehouse.country;
+    dom.languageSelect.value = state.language;
     writeInputValue(dom.whShelfEnabled, state.warehouse.shelfEnabled);
     writeInputValue(dom.whDrawerEnabled, state.warehouse.drawerEnabled);
     writeInputValue(dom.whPalletEnabled, state.warehouse.palletEnabled);
@@ -5606,7 +6144,7 @@
       ...state.consolidated.map((item) => item.currency),
       state.freight.consolidatedCurrency,
       state.freight.clearanceCurrency,
-      ...state.workbook.SheetNames.filter((name) => state.mappings[name]?.enabled).map((name) => kitSettings(name).shippingCurrency),
+      ...state.workbook.SheetNames.filter((name) => state.mappings[name]?.enabled).flatMap((name) => [kitSettings(name).shippingCurrency, kitCurrency(kitSettings(name))]),
     ]);
     [...currencies].filter(Boolean).sort().forEach((currency) => {
       rows.push([currency, currency === output ? 1 : state.rates[currency] ?? null, state.rateDates[currency] ?? null]);
@@ -5860,6 +6398,18 @@
       ['Named variables', 'Value or formula', 'Source'],
       ...(state.variables.length ? state.variables.map((variable) => [variable.name, variable.expression, 'User / workbook']) : [['(none)', '', '']]),
       [],
+      ['Kit routes', 'Value', 'Source'],
+      ['Warehouse country', destinationConfig().name, 'Selected'],
+      ['Customer country', customerConfig().name, 'Selected'],
+      ...Object.entries(state.kits).flatMap(([sheetName, kit]) => [
+        [`${sheetName} · manufacturer`, kit.manufacturer || sheetName, 'Kit profile'],
+        [`${sheetName} · origin country`, originName(kit.originCountry), 'Kit profile'],
+        [`${sheetName} · source currency`, kitCurrency(kit), 'Kit profile'],
+        [`${sheetName} · discount`, kitDiscount(kit), 'Kit profile'],
+        [`${sheetName} · customs duty`, Number.isFinite(kit.dutyRate) ? kit.dutyRate : state.freight.dutyRate, 'Kit profile'],
+        [`${sheetName} · freight`, `${kit.shippingAmount} ${kit.shippingCurrency} · ${kit.shippingMode}`, 'Kit profile'],
+      ]),
+      [],
       ['Warehouse quote rates', 'NOK', 'Source'],
       ...Object.entries(rateLabels).map(([key, label]) => [label, state.warehouse.rates[key], '3PL quote']),
       [],
@@ -6076,8 +6626,16 @@
       || (text.includes('$') ? 'USD' : null);
   }
 
+  const numberFormats = new Map();
+  function numberFormat(options) {
+    const locale = I18n ? I18n.locale(state.language) : undefined;
+    const key = `${locale}|${JSON.stringify(options)}`;
+    if (!numberFormats.has(key)) numberFormats.set(key, new Intl.NumberFormat(locale, options));
+    return numberFormats.get(key);
+  }
+
   function formatNumber(value, digits = 2) {
-    return new Intl.NumberFormat(undefined, { maximumFractionDigits: digits, minimumFractionDigits: 0 }).format(value);
+    return numberFormat({ maximumFractionDigits: digits, minimumFractionDigits: 0 }).format(value);
   }
 
   function formatNullableNumber(value, digits = 2) {
@@ -6085,7 +6643,7 @@
   }
 
   function formatPercent(value) {
-    return new Intl.NumberFormat(undefined, { style: 'percent', maximumFractionDigits: 1 }).format(value || 0);
+    return numberFormat({ style: 'percent', maximumFractionDigits: 1 }).format(value || 0);
   }
 
   function displayValue(value) {
