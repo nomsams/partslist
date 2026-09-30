@@ -1292,10 +1292,11 @@
     const polygon = (corners, fill, stroke = '#365443', opacity = 1) => {
       elements.push(`<polygon points="${points(corners)}" fill="${fill}" fill-opacity="${opacity}" stroke="${stroke}" stroke-width="1" vector-effect="non-scaling-stroke"/>`);
     };
-    const line = (a, b, color, width = 2) => {
+    const line = (a, b, color, width = 2, className = '') => {
       const [x1, y1] = project(...a);
       const [x2, y2] = project(...b);
-      elements.push(`<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="${color}" stroke-width="${width}" vector-effect="non-scaling-stroke"/>`);
+      const classAttribute = className ? ` class="${className}"` : '';
+      elements.push(`<line${classAttribute} x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="${color}" stroke-width="${width}" stroke-linecap="square" vector-effect="non-scaling-stroke"/>`);
     };
     const box = (x, y, z, width, depth, height, front, side, top, opacity = 1) => {
       polygon([[x, y, z], [x + width, y, z], [x + width, y, z + height], [x, y, z + height]], front, '#375246', opacity);
@@ -1323,9 +1324,9 @@
     const rackHeight = 9 + (rackLevels - 1) * levelHeight;
     let shelfCell = 0;
     if (rackBays > 0) {
+      // Paint the rear uprights first so the shelves can sit in front of them.
       for (let post = 0; post <= rackBays; post += 1) {
-        line([rackX + post * bayWidth, rackY, 0], [rackX + post * bayWidth, rackY, rackHeight], '#3b5f8a', 3);
-        line([rackX + post * bayWidth, rackY + 40, 0], [rackX + post * bayWidth, rackY + 40, rackHeight], '#3b5f8a', 2);
+        line([rackX + post * bayWidth, rackY + 40, 0], [rackX + post * bayWidth, rackY + 40, rackHeight], '#3b5f8a', 2.5, 'rack-upright rack-upright-rear');
       }
       for (let level = 0; level < rackLevels; level += 1) {
         const z = 5 + level * levelHeight;
@@ -1341,8 +1342,13 @@
           shelfCell += 1;
         }
       }
-      line([rackX, rackY, rackHeight], [rackX + rackWidth, rackY, rackHeight], '#3b5f8a', 3);
-      line([rackX, rackY + 40, rackHeight], [rackX + rackWidth, rackY + 40, rackHeight], '#3b5f8a', 2);
+      // Front uprights are intentionally painted after the shelf decks and bins.
+      // In the isometric projection the right-most one is closest to the viewer.
+      for (let post = 0; post <= rackBays; post += 1) {
+        line([rackX + post * bayWidth, rackY, 0], [rackX + post * bayWidth, rackY, rackHeight], '#3b5f8a', 3.5, 'rack-upright rack-upright-front');
+      }
+      line([rackX, rackY, rackHeight], [rackX + rackWidth, rackY, rackHeight], '#3b5f8a', 3.5, 'rack-top-beam rack-top-beam-front');
+      line([rackX, rackY + 40, rackHeight], [rackX + rackWidth, rackY + 40, rackHeight], '#3b5f8a', 2.5, 'rack-top-beam rack-top-beam-rear');
     }
     label(190, 38, `RACKS ${model.racks} · SHELVES ${model.shelfLocations} · BINS ${model.totalBins}`);
 

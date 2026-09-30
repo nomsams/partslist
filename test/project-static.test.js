@@ -39,3 +39,11 @@ test('the consolidated table has a bounded scroll area and 3PL rate import is di
   assert.match(html, />Import 3PL rates JSON</);
   assert.match(html, /id="warehouse-rate-editor"[^>]*open/);
 });
+
+test('isometric rack paints front uprights after shelves so the nearest support stays visible', () => {
+  const warehouseRenderer = app.slice(app.indexOf('function buildWarehouseIsoSvg'), app.indexOf('function formatNok'));
+  const shelfLoop = warehouseRenderer.indexOf('for (let level = 0; level < rackLevels; level += 1)');
+  const frontUprights = warehouseRenderer.indexOf("'rack-upright rack-upright-front'");
+  assert.ok(shelfLoop >= 0 && frontUprights > shelfLoop, 'Front rack uprights must be painted after the shelves');
+  assert.match(warehouseRenderer, /post <= rackBays/);
+});
