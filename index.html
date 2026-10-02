@@ -6,6 +6,12 @@
   <meta name="description" content="Import Excel parts lists, consolidate kits, add freight, tolls and VAT, estimate warehousing and profitability, and export a calculated workbook.">
   <title>PartsList Workbook</title>
   <link rel="stylesheet" href="styles.css">
+  <aside id="explain-panel" class="explain-panel hidden" role="dialog" aria-labelledby="explain-title">
+    <div class="explain-head"><strong id="explain-title">How this price is calculated</strong><button id="explain-close" class="icon-button" type="button" aria-label="Close">×</button></div>
+    <p id="explain-part" class="explain-part"></p>
+    <ol id="explain-steps" class="explain-steps"></ol>
+  </aside>
+  <dialog id="maker-setup" class="maker-setup"></dialog>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/hyperformula@3.4.0/dist/hyperformula.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js" defer></script>
@@ -64,10 +70,16 @@
           <p class="eyebrow">Start here</p>
           <h2>Bring in the source sheets</h2>
           <p>Import your parts lists: a workbook with one sheet per kit, or a price list that holds many kits (it is split into one kit per block). The app detects the part, quantity, price, shipping and currency columns. More manufacturers can be added afterwards with Add kits.</p>
+          <ol class="start-steps">
+            <li>Import your parts lists.</li>
+            <li>Check each manufacturer: country, currency, discount and freight.</li>
+            <li>Read the prices in the list, and save a customer price list.</li>
+          </ol>
           <label class="drop-zone" id="drop-zone" for="workbook-file">
             <strong>Drop a workbook here</strong>
             <span>or choose a file</span>
           </label>
+          <button id="example-data" class="button small ghost full" type="button">Try with example data</button>
           <form id="vault-form" class="vault-form hidden" autocomplete="off">
             <p class="eyebrow">Saved documents</p>
             <p class="vault-copy">This project's parts lists are saved here in encrypted form. Type the key to import all of them at once.</p>
@@ -299,11 +311,19 @@
             <div id="kit-breakdown-table"></div>
           </details>
         </div>
+        <div id="problem-bar" class="problem-bar" aria-live="polite"></div>
         <div id="summary-cards" class="summary-cards"></div>
         <div class="table-toolbar">
           <input id="consolidated-search" class="search-input" type="search" placeholder="Search part, description or kit" aria-label="Search consolidated parts" autocomplete="off">
           <label>Show <select id="consolidated-filter" aria-label="Filter consolidated parts"></select></label>
+          <div id="column-presets" class="preset-group" role="group" aria-label="Column view">
+            <button type="button" data-column-preset="simple" aria-pressed="true">Simple</button>
+            <button type="button" data-column-preset="purchase" aria-pressed="false">Purchase</button>
+            <button type="button" data-column-preset="sales" aria-pressed="false">Sales</button>
+            <button type="button" data-column-preset="full" aria-pressed="false">Everything</button>
+          </div>
           <span id="consolidated-count" class="toolbar-count"></span>
+          <button id="customer-export" class="button small" type="button" title="A clean price list with prices only: no costs, margins or internal columns">Customer price list</button>
           <details id="column-menu" class="column-menu">
             <summary class="button small ghost" title="Choose which columns to show">Columns</summary>
             <div class="column-menu-panel">
@@ -619,7 +639,7 @@
                 <svg id="map-overlay" class="map-overlay" aria-label="Supply routes" focusable="false"></svg>
                 <div id="map-boxes" class="map-boxes"></div>
               </div>
-              <p class="map-hint">Hover a wire or point for details · click a country to draw a comparison line</p>
+              <p class="map-hint">Hover a wire or point for details · click More on a table to edit everything · click a country to draw a comparison line</p>
               <div id="map-legend" class="map-legend"></div>
             </div>
             <aside id="map-info" class="map-info" aria-live="polite"></aside>

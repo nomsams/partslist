@@ -301,6 +301,10 @@
     consolidatedFilter: 'all',
     consolidatedSort: null,
     hiddenColumns: [...DEFAULT_HIDDEN_COLUMNS],
+    columnPreset: 'simple',
+    explainKey: null,
+    setupQueue: [],
+    setupName: null,
     focusedRowKey: null,
     undoStack: [],
     redoStack: [],
@@ -336,6 +340,14 @@
     file: el('workbook-file'),
     addKitFile: el('add-kit-file'),
     vaultForm: el('vault-form'),
+    problemBar: el('problem-bar'),
+    explainPanel: el('explain-panel'),
+    explainPart: el('explain-part'),
+    explainSteps: el('explain-steps'),
+    explainClose: el('explain-close'),
+    makerSetup: el('maker-setup'),
+    customerExport: el('customer-export'),
+    exampleData: el('example-data'),
     vaultKey: el('vault-key'),
     vaultOpen: el('vault-open'),
     addKitLabel: el('add-kit-label'),
@@ -566,6 +578,24 @@
       event.target.value = '';
     });
     dom.vaultForm.addEventListener('submit', unlockVault);
+    document.getElementById('column-presets').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-column-preset]');
+      if (button) setColumnPreset(button.dataset.columnPreset);
+    });
+    dom.problemBar.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-problem-action]');
+      if (button) handleProblemAction(button.dataset.problemAction);
+    });
+    dom.explainClose.addEventListener('click', closeExplain);
+    document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !dom.explainPanel.classList.contains('hidden')) closeExplain(); });
+    dom.customerExport.addEventListener('click', exportCustomerPriceList);
+    dom.exampleData.addEventListener('click', loadExampleData);
+    dom.makerSetup.addEventListener('click', (event) => { if (event.target.closest('[data-maker-setup-done]')) finishMakerSetup(); });
+    dom.makerSetup.addEventListener('cancel', () => { state.setupQueue = []; });
+    document.addEventListener('click', (event) => {
+      const reset = event.target.closest?.('[data-maker-reset]');
+      if (reset) resetMaker(reset.dataset.makerReset);
+    });
     dom.addKitFile.addEventListener('change', async (event) => {
       const files = [...event.target.files];
       if (files.length) await addKitWorkbooks(files);
@@ -647,14 +677,11 @@
     dom.columnsDone.addEventListener('click', () => { dom.columnMenu.open = false; });
     dom.columnsAll.addEventListener('click', () => {
       state.hiddenColumns = [];
+      state.columnPreset = 'custom';
       saveUiPreferences();
       renderConsolidated();
     });
-    dom.columnsReset.addEventListener('click', () => {
-      state.hiddenColumns = [...DEFAULT_HIDDEN_COLUMNS];
-      saveUiPreferences();
-      renderConsolidated();
-    });
+    dom.columnsReset.addEventListener('click', () => setColumnPreset('simple'));
     dom.columnList.addEventListener('change', (event) => {
       const box = event.target.closest('[data-column-key]');
       if (!box) return;
@@ -1248,6 +1275,289 @@
     return wrapper;
   }
 
+  /* ---------- Ease of use: column presets, price explainer, problem bar, price list, setup dialog, example ---------- */
+
+  // Ready-made column sets so nobody has to tick twenty boxes. "simple" is what most people need.
+  const COLUMN_PRESETS = {
+    simple: { show: ['part', 'description', 'altPart', 'quantity', 'manufacturer', 'unitSalesPrice', 'lineTotal'] },
+    purchase: { show: ['sources', 'part', 'description', 'altPart', 'quantity', 'manufacturer', 'currency', 'unitPrice', 'convertedTotal', 'discountedTotal', 'kitFreight', 'landedCost'] },
+    sales: { show: ['part', 'description', 'altPart', 'quantity', 'match', 'salesGroup', 'salesPerYear', 'sellingTotal', 'freightWithMargin', 'unitSalesPrice', 'lineTotal', 'vat', 'lineTotalInclVat'] },
+    full: { hide: DEFAULT_HIDDEN_COLUMNS },
+  };
+
+  function currentHiddenColumns() {
+    const preset = COLUMN_PRESETS[state.columnPreset];
+    if (!preset) return state.hiddenColumns;
+    if (preset.hide) return [...preset.hide];
+    return consolidatedColumns().map((column) => column.key).filter((key) => !preset.show.includes(key));
+  }
+
+  function setColumnPreset(name) {
+    if (!COLUMN_PRESETS[name]) return;
+    state.columnPreset = name;
+    state.hiddenColumns = currentHiddenColumns();
+    saveUiPreferences();
+    if (state.activeView === VIEW.consolidated) renderConsolidated();
+  }
+
+  function renderColumnPresets() {
+    document.querySelectorAll('[data-column-preset]').forEach((button) => {
+      button.setAttribute('aria-pressed', String(button.dataset.columnPreset === state.columnPreset));
+    });
+  }
+
+  /* -- "How is this price calculated?" -- */
+
+  function explainSteps(item) {
+    const output = state.config.outputCurrency;
+    const n = (value, digits = 2) => formatNullableNumber(value, digits);
+    const money = (value) => formatMoney(value, output);
+    const foreign = item.currency && item.currency !== output;
+    const quantity = item.maxQuantity;
+    const steps = [];
+    steps.push({
+      label: 'Price in the list',
+      detail: `${n(item.unitPrice)} ${item.currency} per piece × ${n(quantity)} pieces`,
+      value: item.unitPrice === null ? '—' : `${n(item.unitPrice * quantity)} ${item.currency}`,
+    });
+    if (foreign) {
+      steps.push({
+        label: 'Exchange rate',
+        detail: item.fxMargin > 0 ? `${n(item.fxLive, 4)} live rate + ${n(item.fxMargin)} buffer` : `${n(item.fxLive, 4)} live rate`,
+        value: `1 ${item.currency} = ${n(item.fx, 4)} ${output}`,
+      });
+    }
+    steps.push({ label: `Converted to ${output}`, detail: foreign ? 'List amount × exchange rate' : 'Already in this currency', value: money(item.convertedTotal) });
+    steps.push({ label: 'Purchase price', detail: `After ${formatPercent(item.discount)} discount`, value: money(item.discountedTotal) });
+    steps.push({
+      label: 'Kit freight',
+      detail: Number.isFinite(item.freightPercent) ? `${formatPercent(item.freightPercent)} of the purchase price` : 'From the kit freight settings',
+      value: money(item.kitFreight),
+    });
+    steps.push({ label: 'Shared shipment', detail: 'This part\'s share of the consolidated shipment', value: money(item.consolidatedFreight) });
+    steps.push({ label: 'Insurance, duty & clearance', detail: 'Import costs for this part', value: money(item.importCosts) });
+    steps.push({ label: 'Freight with margin', detail: `Freight & import plus a ${formatPercent(item.shippingMargin)} freight margin`, value: money(item.freightWithMargin) });
+    steps.push({ label: 'Sales price', detail: `Purchase price × ${n(item.multiplier)}`, value: money(item.sellingTotal) });
+    steps.push({ label: 'Line total', detail: 'Sales price + freight with margin', value: money(item.lineTotal), strong: true });
+    if (salesVatRate() > 0) steps.push({ label: 'VAT', detail: `${formatPercent(salesVatRate())} on the line total`, value: money(item.vat) });
+    steps.push({ label: 'Landed cost', detail: 'What the part costs you delivered', value: money(item.landedCost) });
+    return steps;
+  }
+
+  function openExplain(key) {
+    const item = [...state.consolidated, ...state.excludedItems].find((candidate) => candidate.key === key);
+    if (!item) return;
+    state.explainKey = key;
+    dom.explainPart.textContent = `${item.part} · ${item.description || ''}`.replace(/ · $/, '');
+    dom.explainPart.translate = false;
+    dom.explainSteps.replaceChildren(...explainSteps(item).map((step) => {
+      const li = document.createElement('li');
+      if (step.strong) li.className = 'strong';
+      const text = document.createElement('div');
+      const label = document.createElement('strong');
+      label.textContent = step.label;
+      const detail = document.createElement('small');
+      detail.textContent = step.detail;
+      text.append(label, detail);
+      const value = document.createElement('span');
+      value.className = 'explain-value';
+      value.textContent = step.value;
+      li.append(text, value);
+      return li;
+    }));
+    dom.explainPanel.classList.remove('hidden');
+  }
+
+  function closeExplain() {
+    state.explainKey = null;
+    dom.explainPanel.classList.add('hidden');
+  }
+
+  /* -- Problems in plain words, each with a button that fixes or shows it -- */
+
+  function collectProblems() {
+    const problems = [];
+    if (!state.workbook) return problems;
+    const items = state.consolidated;
+    const missingCurrencies = [...new Set(items.filter((item) => item.unitPrice !== null && item.fx === null).map((item) => item.currency))];
+    if (missingCurrencies.length) problems.push({ text: `The exchange rate for ${missingCurrencies.join(', ')} has not loaded yet`, action: 'rates', button: 'Refresh rates' });
+    const noPrice = items.filter((item) => item.unitPrice === null).length;
+    if (noPrice) problems.push({ text: `Parts without a price in the list: ${noPrice}`, action: 'show-missing', button: 'Show them' });
+    const noFreight = items.filter((item) => item.missingFreight && item.unitPrice !== null && item.fx !== null).length;
+    if (noFreight) problems.push({ text: `Parts without freight: ${noFreight}`, action: 'makers', button: 'Open manufacturers' });
+    state.workbook.SheetNames.forEach((name) => {
+      const mapping = state.mappings[name];
+      if (mapping?.enabled && !isGeneratedSheet(state.workbook.Sheets[name]) && (mapping.part === null || mapping.quantity === null)) {
+        problems.push({ text: `The columns of the sheet ${name} need to be checked`, action: 'mapping', button: 'Open sheet settings' });
+      }
+    });
+    return problems;
+  }
+
+  function renderProblemBar() {
+    if (!dom.problemBar) return;
+    const problems = collectProblems();
+    if (!state.workbook) {
+      dom.problemBar.replaceChildren();
+      return;
+    }
+    if (!problems.length) {
+      const ok = document.createElement('p');
+      ok.className = 'problem-ok';
+      ok.textContent = 'Nothing needs fixing.';
+      dom.problemBar.replaceChildren(ok);
+      return;
+    }
+    dom.problemBar.replaceChildren(...problems.map((problem) => {
+      const row = document.createElement('div');
+      row.className = 'problem-row';
+      row.setAttribute('role', 'alert');
+      const text = document.createElement('span');
+      text.textContent = problem.text;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'button small';
+      button.dataset.problemAction = problem.action;
+      button.textContent = problem.button;
+      row.append(text, button);
+      return row;
+    }));
+  }
+
+  function openSidebarAt(panelId) {
+    state.sidebarCollapsed = false;
+    saveUiPreferences();
+    renderSidebarState();
+    document.getElementById(panelId)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }
+
+  function handleProblemAction(action) {
+    if (action === 'rates') refreshRates(true);
+    else if (action === 'show-missing') {
+      state.consolidatedFilter = 'missing';
+      renderConsolidated();
+    } else if (action === 'makers') openSidebarAt('makers-panel');
+    else if (action === 'mapping') openSidebarAt('mapping-panel');
+  }
+
+  /* -- A clean price list for customers: no costs, margins or internal columns -- */
+
+  function exportCustomerPriceList() {
+    if (!state.workbook || !state.consolidated.length) {
+      showToast('There are no consolidated parts to export.', true);
+      return;
+    }
+    try {
+      const output = state.config.outputCurrency;
+      const withVat = salesVatRate() > 0;
+      const header = ['Article no.', 'Alt. article no.', 'Article name', 'Quantity', `Unit price (${output}${withVat ? ', excl. VAT' : ''})`, `Total (${output}${withVat ? ', excl. VAT' : ''})`];
+      if (withVat) header.push(`Total incl. VAT (${output})`);
+      const rows = [header];
+      [...state.consolidated].sort((a, b) => a.part.localeCompare(b.part, undefined, { numeric: true })).forEach((item) => {
+        const row = [item.part, item.altParts.join(', '), item.description, item.maxQuantity, item.unitSalesPrice === null ? null : Math.round(item.unitSalesPrice * 100) / 100, item.lineTotal === null ? null : Math.round(item.lineTotal * 100) / 100];
+        if (withVat) row.push(item.lineTotalInclVat === null ? null : Math.round(item.lineTotalInclVat * 100) / 100);
+        rows.push(row);
+      });
+      const sheet = XLSX.utils.aoa_to_sheet(rows);
+      sheet['!cols'] = [{ wch: 16 }, { wch: 16 }, { wch: 30 }, { wch: 10 }, { wch: 18 }, { wch: 18 }, { wch: 18 }];
+      const book = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(book, sheet, 'Price list');
+      const base = state.fileName.replace(/\.[^.]+$/, '').replace(/-(?:consolidated|partslist-project)$/i, '') || 'partslist';
+      XLSX.writeFile(book, `${base}-price-list.xlsx`, { bookType: 'xlsx', compression: true });
+      showToast('Customer price list saved. It holds prices only, no costs or margins.');
+    } catch (error) {
+      console.error(error);
+      showToast(error.message || 'The price list could not be exported.', true);
+    }
+  }
+
+  /* -- A short setup dialog for each manufacturer that was just added -- */
+
+  function openMakerSetup(names) {
+    const queue = names.filter((name) => makerKits(name).length);
+    if (!queue.length || !dom.makerSetup?.showModal) return;
+    state.setupQueue = queue;
+    showMakerSetup();
+  }
+
+  function showMakerSetup() {
+    const name = state.setupQueue[0];
+    if (!name) {
+      if (dom.makerSetup.open) dom.makerSetup.close();
+      return;
+    }
+    state.setupName = name;
+    renderMakerSetup();
+    if (!dom.makerSetup.open) dom.makerSetup.showModal();
+  }
+
+  function renderMakerSetup() {
+    const name = state.setupName;
+    if (!name) return;
+    const card = buildMakerCard(name);
+    const nameInput = card.querySelector('[data-maker-field="name"]');
+    if (nameInput) nameInput.readOnly = true;
+    const title = document.createElement('h3');
+    title.textContent = `Check the settings for ${name}`;
+    const heading = document.createElement('p');
+    heading.className = 'maker-setup-copy';
+    heading.textContent = 'These starting values were filled in for you. Change anything that is different for this manufacturer. Other manufacturers are not affected.';
+    const done = document.createElement('button');
+    done.type = 'button';
+    done.className = 'button primary';
+    done.dataset.makerSetupDone = 'true';
+    done.textContent = state.setupQueue.length > 1 ? 'Next manufacturer' : 'Done';
+    const body = document.createElement('div');
+    body.className = 'maker-setup-body';
+    body.append(card);
+    dom.makerSetup.replaceChildren(title, heading, body, done);
+    syncMakerInputs();
+  }
+
+  function finishMakerSetup() {
+    state.setupQueue.shift();
+    showMakerSetup();
+  }
+
+  /* -- Reset one manufacturer to the project defaults -- */
+
+  function resetMaker(name) {
+    pushHistory(`${name} reset to the project defaults`, () => {
+      makerKits(name).forEach((sheet) => {
+        Object.assign(kitSettings(sheet), {
+          defaultCurrency: null, discountRate: null, dutyRate: null, fxMargin: null,
+          shippingMode: KIT_DEFAULTS.shippingMode, shippingAmount: KIT_DEFAULTS.shippingAmount, shippingCurrency: state.config.outputCurrency,
+        });
+      });
+      state.makers[name] = { ...MAKER_DEFAULTS, shipmentCurrency: state.freight.consolidatedCurrency, clearanceCurrency: state.freight.clearanceCurrency };
+      saveSettingsSoon();
+      renderMakers();
+      rebuildConsolidation();
+      refreshRates(false);
+    });
+    showToast(`${name} was reset to the project defaults. Ctrl+Z reverts it.`);
+  }
+
+  /* -- Example data, so anyone can try the tool without a file -- */
+
+  async function loadExampleData() {
+    if (!window.XLSX) return;
+    const header = ['Part number', 'Description', 'Quantity', 'Unit price', 'Currency'];
+    const kitA = [header, ['A-100', 'Seal ring', 4, 12.5, 'EUR'], ['A-200', 'Valve seat', 2, 48, 'EUR'], ['A-300', 'Filter cartridge', 1, 95, 'EUR'], ['A-400', 'Gasket', 6, 3.2, 'EUR']];
+    const kitB = [header, ['A-100', 'Seal ring', 2, 12.5, 'EUR'], ['A-200', 'Valve seat', 8, 48, 'EUR'], ['B-500', 'Relay', 1, 27, 'EUR'], ['B-600', 'Protective cap', 3, 8, 'EUR']];
+    const book = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(kitA), 'Kit A');
+    XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(kitB), 'Kit B');
+    const bytes = XLSX.write(book, { type: 'array', bookType: 'xlsx' });
+    const file = new File([bytes], 'Example parts list.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const kit = (sheet) => ({ ...newKitSettings(sheet), manufacturer: 'Example supplier', originCountry: '276', defaultCurrency: 'EUR', shippingMode: 'percent', shippingAmount: 3, fxMargin: 0.4 });
+    await importWorkbook(file, {
+      kitSettings: { 'Kit A': kit('Kit A'), 'Kit B': kit('Kit B') },
+      makerSettings: { 'Example supplier': { ...MAKER_DEFAULTS, location: 'Frankfurt', shipmentMode: 'own', shipmentCurrency: state.config.outputCurrency, clearanceCurrency: state.config.outputCurrency } },
+    });
+    showToast('Example data loaded. Open the Manufacturers panel to change its settings.');
+  }
+
   /* ---------- Manufacturers: one route each, one warehouse for all ---------- */
 
   // Kit fields a manufacturer owns: changing one on the manufacturer changes it on every kit of that manufacturer.
@@ -1412,7 +1722,12 @@
         makerControl(name, 'insuranceRate', { kind: 'number', caption: 'Insurance', suffix: '%', scale: 100, max: 100, step: '0.1' }),
       );
     }
-    card.append(head, grid, route);
+    const reset = document.createElement('button');
+    reset.type = 'button';
+    reset.className = 'link-button';
+    reset.dataset.makerReset = name;
+    reset.textContent = 'Reset to the project defaults';
+    card.append(head, grid, route, reset);
     return card;
   }
 
@@ -1537,6 +1852,7 @@
     saveSettingsSoon();
     if (discrete) {
       renderMakers();
+      if (dom.makerSetup.open) renderMakerSetup();
       rebuildConsolidation();
       if (['shippingCurrency', 'defaultCurrency', 'shipmentCurrency', 'clearanceCurrency'].includes(field)) refreshRates(false);
       if (field === 'originCountry') renderMaps();
@@ -2260,6 +2576,9 @@
         state.consolidatedSort = { key: stored.consolidatedSort.key, direction: stored.consolidatedSort.direction };
       }
       if (Array.isArray(stored?.hiddenColumns)) state.hiddenColumns = stored.hiddenColumns.filter((key) => typeof key === 'string');
+      // A saved column choice that is not one of the presets stays as the user made it.
+      if (typeof stored?.columnPreset === 'string' && (stored.columnPreset === 'custom' || COLUMN_PRESETS[stored.columnPreset])) state.columnPreset = stored.columnPreset;
+      // Earlier versions saved only a hidden-column list; those users start on the simple view.
     } catch { /* Preferences are optional. */ }
   }
 
@@ -2272,6 +2591,7 @@
         sidebarCollapsed: state.sidebarCollapsed,
         consolidatedSort: state.consolidatedSort,
         hiddenColumns: state.hiddenColumns,
+        columnPreset: state.columnPreset,
       }));
     } catch { /* Preferences are optional. */ }
   }
@@ -3203,7 +3523,7 @@
       const isRates = (document) => /.json$/i.test(document.name);
       const lists = documents.filter((document) => !isRates(document)).map((document) => new File([document.bytes], document.name));
       if (!lists.length) throw new Error('The saved documents contain no parts lists.');
-      await addKitWorkbooks(lists);
+      await addKitWorkbooks(lists, { review: false });
       const rates = documents.find(isRates);
       if (rates) await importWarehouseRates(new File([rates.bytes], rates.name, { type: 'application/json' }));
       showToast('Saved documents imported.');
@@ -3217,6 +3537,7 @@
   }
 
   async function openWorkbookFile(file) {
+    if (state.workbook && state.projectDirty && !window.confirm(translateUi('Replace the open project? Changes since the last save will be lost.'))) return;
     let isCatalogue = false;
     try {
       isCatalogue = catalogueSheetsOf(await readWorkbookFile(file)).length > 0;
@@ -3232,7 +3553,7 @@
       const startsAsCatalogue = catalogueSheetsOf(await readWorkbookFile(files[0])).length > 0;
       if (!startsAsCatalogue) {
         await importWorkbook(files[0]);
-        if (files.length > 1) await addKitWorkbooks(files.slice(1));
+        if (files.length > 1) await addKitWorkbooks(files.slice(1), options);
         return;
       }
     }
@@ -3319,6 +3640,7 @@
       const mergedFile = new File([bytes], projectName, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
       const origin = ORIGIN_PRESETS[CATALOGUE_DEFAULTS.originCountry];
       await importWorkbook(mergedFile, {
+        review: options.review !== false,
         addedKits: added,
         displayName: projectName,
         kitSettings: newKits,
@@ -3466,6 +3788,7 @@
       if (state.importWarnings.length) showToast(`Import warning: ${state.importWarnings.join(' ')}`);
       await refreshRates(false);
       markProjectSaved(restoredWorkbook ? 'Workbook settings restored' : 'Workbook imported');
+      if (options.review && options.makerSettings) openMakerSetup(Object.keys(options.makerSettings));
       setLanguage(state.language, false);
       renderSetupGuide();
     } catch (error) {
@@ -4446,6 +4769,7 @@
       { key: 'importCosts', label: `Duty, insurance & fees in ${o}`, number: true, sortValue: (item) => item.importCosts, value: (item) => formatNumber(item.importCosts, 2) },
       { key: 'shippingMargin', label: 'Freight margin', number: true, sortValue: (item) => item.shippingMargin, value: (item) => formatPercent(item.shippingMargin) },
       { key: 'freightWithMargin', label: `Freight & import incl. margin in ${o}`, number: true, sortValue: (item) => item.freightWithMargin, value: (item) => formatNumber(item.freightWithMargin, 2) },
+      { key: 'unitSalesPrice', label: `Sales price / unit in ${o}`, number: true, sortValue: (item) => item.unitSalesPrice, value: money('unitSalesPrice') },
       { key: 'lineTotal', label: salesVatRate() > 0 ? `Line total excl. VAT in ${o}` : `Line total in ${o}`, number: true, sortValue: (item) => item.lineTotal, value: money('lineTotal'), required: true, strong: true },
       { key: 'vat', label: `VAT in ${o}`, number: true, vat: true, sortValue: (item) => item.vat, value: money('vat') },
       { key: 'lineTotalInclVat', label: `Line total incl. VAT in ${o}`, number: true, vat: true, sortValue: (item) => item.lineTotalInclVat, value: money('lineTotalInclVat'), required: true },
@@ -4456,7 +4780,7 @@
 
   // Columns the user has not hidden, minus the VAT columns when VAT is off.
   function visibleConsolidatedColumns() {
-    const hidden = new Set(state.hiddenColumns);
+    const hidden = new Set(currentHiddenColumns());
     const hasAltParts = state.consolidated.some((item) => item.altParts.length);
     return consolidatedColumns().filter((column) => !hidden.has(column.key) && (!column.vat || salesVatRate() > 0) && (!column.optional || hasAltParts));
   }
@@ -4468,11 +4792,12 @@
       dom.columnList.replaceChildren();
       return;
     }
+    const hiddenNow = new Set(currentHiddenColumns());
     dom.columnList.replaceChildren(...columns.map((column) => {
       const label = document.createElement('label');
       const box = document.createElement('input');
       box.type = 'checkbox';
-      box.checked = !state.hiddenColumns.includes(column.key);
+      box.checked = !hiddenNow.has(column.key);
       box.dataset.columnKey = column.key;
       box.setAttribute('aria-label', column.label);
       const text = document.createElement('span');
@@ -4484,8 +4809,10 @@
   }
 
   function toggleColumn(key, visible) {
-    const next = visible ? state.hiddenColumns.filter((item) => item !== key) : [...new Set([...state.hiddenColumns, key])];
+    const current = currentHiddenColumns();
+    const next = visible ? current.filter((item) => item !== key) : [...new Set([...current, key])];
     state.hiddenColumns = next;
+    state.columnPreset = 'custom';
     saveUiPreferences();
     if (state.activeView === VIEW.consolidated) renderConsolidated();
   }
@@ -4528,6 +4855,8 @@
 
   function renderConsolidated() {
     renderConsolidatedFilter();
+    renderColumnPresets();
+    renderProblemBar();
     const output = state.config.outputCurrency;
     const items = state.consolidated;
     const common = items.filter((item) => item.common);
@@ -4677,6 +5006,16 @@
         }
         const value = column.value(item);
         cell.textContent = value;
+        if (column.key === 'part') {
+          const explain = document.createElement('button');
+          explain.type = 'button';
+          explain.className = 'explain-button';
+          explain.dataset.explain = item.key;
+          explain.textContent = '?';
+          explain.setAttribute('aria-label', `How is the price of ${item.part} calculated?`);
+          explain.title = 'How is this price calculated?';
+          cell.append(explain);
+        }
         if (column.data) cell.translate = false;
         if (column.className) cell.classList.add(column.className);
         if (column.number) cell.classList.add('number');
@@ -4690,6 +5029,11 @@
   }
 
   function handleConsolidatedTableClick(event) {
+    const explain = event.target.closest('[data-explain]');
+    if (explain) {
+      openExplain(explain.dataset.explain);
+      return;
+    }
     const header = event.target.closest('th[data-sort-key]');
     if (header) {
       cycleConsolidatedSort(header.dataset.sortKey);
@@ -6449,6 +6793,10 @@
         const via = viaBox(from, rect, arrivalWorld, bow);
         worldParts.push(mapWire(via.into, { to: via.enter, target, label, color: route.color }));
         worldParts.push(mapWire(via.out, { from: via.exit, target, label, className: 'trunk', color: route.color }));
+        // The number that belongs to this arrow, written on it so nobody has to hover to find it.
+        const [labelX, labelY] = via.out.at((via.exit + 1) / 2);
+        const inbound = state.consolidated.filter((item) => (item.manufacturer || '') === route.manufacturer).reduce((total, item) => total + (item.freightAndImport ?? 0), 0);
+        worldParts.push(`<text class="map-wire-label" x="${labelX.toFixed(1)}" y="${(labelY - 8).toFixed(1)}" text-anchor="middle">${escapeMarkup(`Freight & import ${formatWhole(inbound)}`)}</text>`);
       } else {
         worldParts.push(mapWire(Core.quadraticBow(from, arrivalWorld, bow), { target, label, color: route.color }));
       }

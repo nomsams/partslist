@@ -196,6 +196,25 @@ test('saved documents are an encrypted bundle that the start screen can unlock, 
   ['xlsx', 'MME260', 'ET-PAK', 'Valve', 'Spare'].forEach((word) => assert.ok(!bundle.includes(word), `bundle leaks ${word}`));
 });
 
+test('ease of use: column presets, price explainer, problem bar, customer price list, setup dialog and example data', () => {
+  ['simple', 'purchase', 'sales', 'full'].forEach((name) => assert.match(html, new RegExp(`data-column-preset="${name}"`)));
+  assert.match(html, /id="problem-bar"/);
+  assert.match(html, /id="explain-panel"/);
+  assert.match(html, /id="maker-setup"/);
+  assert.match(html, /id="customer-export"/);
+  assert.match(html, /id="example-data"/);
+  assert.match(app, /function explainSteps\(/);
+  assert.match(app, /function collectProblems\(/);
+  assert.match(app, /function exportCustomerPriceList\(/);
+  assert.match(app, /function openMakerSetup\(/);
+  assert.match(app, /function resetMaker\(/);
+  // The customer list must never carry costs.
+  const customer = app.slice(app.indexOf('function exportCustomerPriceList('), app.indexOf('/* -- A short setup dialog'));
+  assert.doesNotMatch(customer, /landedCost|discountedTotal|kitFreight|fxMargin/);
+  // The saved documents open without the setup dialog; a file added by hand gets it.
+  assert.match(app, /addKitWorkbooks\(lists, \{ review: false \}\)/);
+});
+
 test('every manufacturer is its own route: own settings, exchange-rate buffer, percentage freight and an independent shipment', () => {
   assert.match(html, /id="makers-panel"/);
   assert.match(app, /function buildMakerCard\(/);
