@@ -273,16 +273,16 @@ test('missing inputs are classified by what is actually absent', () => {
 
 test('a catalogue sheet is split into kits; the first article number identifies a part, the second is kit-specific', () => {
   const header = [[], [null, ' 1 / 3'], ['SPARE PART KITS'], [null, null, null, null, null, null, null, null, 'Listprice ', 'Net x '], [null, null, null, 0, null, null, 0, 0, 'EUR', 'EUR']];
-  const line = (kit, number, qty, description, article, alternate, list) => [null, kit, number, qty, null, description, article, alternate, list, list * 0.75];
+  const line = (kit, number, qty, description, article, alternate, list) => [null, kit, number, qty, null, description, article, alternate, list, list * 0.5];
   const rows = [
     ...header,
     line('SPARE PART KIT ZMP 625V', ' ', 4, 'Valve seat', 'A-100', '100.001', 44),
-    [null, null, 0, 1, null, 'Oil filter cartridge', 'A-300', 'XXX.300', 115, 86.25],
+    [null, null, 0, 1, null, 'Oil filter cartridge', 'A-300', 'XXX.300', 115, 57.5],
     [null, null, 0, '2', null, 'Relay', 900001, ' ', 27, 20.25],
     [null, null, 0, 0, null, null, 0, 0],
     ...header.slice(1),
     line('SPARE PART KIT ZMP 710/712V', ' ', 2, 'Valve seat', 'A-200', '200.001', 78.8),
-    [null, '(without plunger unit)', null, 1, null, 'Oil filter cartridge', 'A-300', '200.300', 115, 86.25],
+    [null, '(without plunger unit)', null, 1, null, 'Oil filter cartridge', 'A-300', '200.300', 115, 57.5],
     line('SPARE PART HRW 350', 1000337, 1, 'Rubber scraper', 'A-400', '300.001', 54),
   ];
   const catalogue = parseKitCatalogue(rows);
@@ -292,7 +292,7 @@ test('a catalogue sheet is split into kits; the first article number identifies 
   assert.equal(first.lines.length, 3);                       // the zero rows and page headers are not lines
   assert.equal(first.lines[0].article, 'A-100');
   assert.equal(first.lines[0].alternate, '100.001');
-  assert.equal(first.lines[0].netPrice, 33);
+  assert.equal(first.lines[0].netPrice, 22);
   assert.equal(first.lines[2].quantity, 2);                  // a quantity typed as text still counts
   assert.equal(first.lines[2].article, '900001');           // the second number may be missing
   assert.equal(first.lines[2].alternate, '');

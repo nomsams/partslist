@@ -2609,7 +2609,7 @@
                 ...newKitSettings(targetName),
                 manufacturer,
                 originCountry,
-                // The net price column is already after the supplier's discount.
+                // Net prices are used as given, with no further discount.
                 discountRate: 0,
                 defaultCurrency: CURRENCIES.includes(catalogue.currency) ? catalogue.currency : null,
                 shippingMode: 'kitTotal',

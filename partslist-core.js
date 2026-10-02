@@ -126,7 +126,7 @@
     const round = (value) => (value === null ? null : Math.round(value * 10000) / 10000);
     return [
       [[manufacturer, kit.title].filter(Boolean).join(' · ')],
-      [[kit.number ? `Kit no. ${kit.number}` : '', ...kit.notes, currency ? `Prices in ${currency}, net of the supplier discount` : ''].filter(Boolean).join(' · ')],
+      [[kit.number ? `Kit no. ${kit.number}` : '', ...kit.notes, currency ? `Prices in ${currency} (net)` : ''].filter(Boolean).join(' · ')],
       [],
       ['Article no.', 'Alt. article no.', 'Description', 'Quantity', 'Unit price (net)', 'Currency', 'List price (info)'],
       ...kit.lines.map((line) => [line.article, line.alternate, line.description, line.quantity, round(line.netPrice), currency, round(line.listPrice)]),
