@@ -284,7 +284,7 @@
     flowOverrides: { outboundPerUnit: null, outtakePerUnit: null, storagePerUnitMonth: null },
     flowUnlocked: false,
     flowMode: 'route',
-    map: { features: null, names: null, loading: false, error: null, compare: null, hover: null, pinned: null, open: { warehouse: false, customer: false }, worldKey: null, nordicKey: null },
+    map: { features: null, names: null, loading: false, error: null, compare: null, hover: null, pinned: null, open: { shipment: false, warehouse: false, customer: false }, worldKey: null, nordicKey: null },
     customsPinned: false,
     excludedItems: [],
     kitSummaries: [],
@@ -5675,7 +5675,7 @@
     stage.classList.toggle('stacked', stacked);
     stage.querySelector('.map-panels').style.setProperty('--map-height', `${Math.max(540, Math.min(640, Math.round(width * 0.56)))}px`);
     dom.mapBoxes.classList.toggle('flow', !overlay);
-    [['warehouse', dom.flowBoxWarehouse], ['customer', dom.flowBoxCustomer]].forEach(([name, box]) => {
+    [['shipment', dom.flowBoxShipment], ['warehouse', dom.flowBoxWarehouse], ['customer', dom.flowBoxCustomer]].forEach(([name, box]) => {
       box.classList.toggle('is-collapsed', !state.map.open[name]);
       box.querySelector('[data-map-box-toggle]').setAttribute('aria-expanded', String(state.map.open[name]));
     });

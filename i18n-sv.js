@@ -1122,6 +1122,7 @@
 
     // ===== Map: editable tables on the route =====
     ['Show or hide the rates', 'Visa eller dölj priserna'],
+    ['Show or hide the freight per kit', 'Visa eller dölj frakten per kit'],
     ['Show or hide the per-item costs', 'Visa eller dölj kostnaderna per artikel'],
     ['Supply routes', 'Försörjningsrutter'],
 
