@@ -33,6 +33,10 @@
         <button type="button" data-language="sv" aria-pressed="true" title="Svenska" translate="no">SV</button>
         <button type="button" data-language="en" aria-pressed="false" title="English" translate="no">EN</button>
       </div>
+      <button id="undo-button" class="button header-button" type="button" disabled aria-label="Undo" title="Undo (Ctrl+Z)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7H15a5 5 0 0 1 0 10H8"/><path d="M11.5 3.5 8 7l3.5 3.5"/></svg>
+        <span class="undo-label">Undo</span>
+      </button>
       <button id="guide-toggle" class="button header-button" type="button" aria-expanded="false" disabled>Setup guide</button>
       <label class="button header-button" for="workbook-file" role="button" tabindex="0">Import workbook</label>
       <input id="workbook-file" type="file" accept=".xlsx,.xls,.xlsm,.xlsb,.ods,.csv">
@@ -59,11 +63,17 @@
         <section class="panel upload-panel" id="empty-panel">
           <p class="eyebrow">Start here</p>
           <h2>Bring in the source sheets</h2>
-          <p>Import the workbook that contains the three or four parts lists. The app detects likely part, quantity, price, margin, shipping, and currency columns.</p>
+          <p>Import your parts lists: a workbook with one sheet per kit, or a price list that holds many kits (it is split into one kit per block). The app detects the part, quantity, price, shipping and currency columns. More manufacturers can be added afterwards with Add kits.</p>
           <label class="drop-zone" id="drop-zone" for="workbook-file">
             <strong>Drop a workbook here</strong>
             <span>or choose a file</span>
           </label>
+          <form id="vault-form" class="vault-form hidden" autocomplete="off">
+            <p class="eyebrow">Saved documents</p>
+            <p class="vault-copy">This project's parts lists are saved here in encrypted form. Type the key to import all of them at once.</p>
+            <label>Key <input id="vault-key" name="vault-key" type="password" autocomplete="new-password" spellcheck="false" required></label>
+            <button id="vault-open" class="button primary" type="submit">Unlock and import</button>
+          </form>
         </section>
 
         <section id="workbook-controls" class="hidden">
@@ -88,10 +98,17 @@
                 Freight margin
                 <span class="input-suffix"><input id="shipping-margin-input" type="number" value="15" min="0" max="99.9" step="0.1" data-bind="config.shippingMargin" data-scale="100"><span>%</span></span>
               </label>
-              <label>
-                <span class="field-caption">VAT (MVA) <span class="info-tip" tabindex="0" role="img" aria-label="Information: VAT added to customer prices. It is shown separately and never counted as profit." data-tip="VAT added to customer prices. It is shown separately and never counted as profit.">i</span></span>
-                <span class="input-suffix"><input id="vat-input" type="number" value="25" min="0" max="100" step="0.1" data-bind="config.vatRate" data-scale="100"><span>%</span></span>
-              </label>
+              <div class="vat-setting">
+                <span class="field-caption">VAT rate <span class="info-tip" tabindex="0" role="img" aria-label="Information: VAT is off by default (0 %). Unlock to enter a rate; it is added to the price after margin for the sales countries that use VAT, and never counted as profit." data-tip="VAT is off by default (0 %). Unlock to enter a rate; it is added to the price after margin for the sales countries that use VAT, and never counted as profit.">i</span></span>
+                <span class="vat-field">
+                  <span class="input-suffix"><input id="vat-input" type="number" value="0" min="0" max="100" step="0.1" placeholder="e.g. 25" data-bind="config.vatRate" data-scale="100" data-vat-field readonly aria-label="VAT rate"><span>%</span></span>
+                  <button class="lock-toggle" type="button" aria-pressed="false" data-vat-lock title="Unlock to include VAT">
+                <svg class="icon-locked" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3h2v11H5V10zm2 0h6V7a3 3 0 0 0-6 0z"/></svg>
+                <svg class="icon-unlocked" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 9.6-2l-1.8.9A3 3 0 0 0 9 7v3h10v11H5V10z"/></svg>
+                <span class="lock-label">Locked</span>
+              </button>
+                </span>
+              </div>
               <label>
                 Default source currency
                 <select id="source-currency"></select>
@@ -276,6 +293,18 @@
           <input id="consolidated-search" class="search-input" type="search" placeholder="Search part, description or kit" aria-label="Search consolidated parts" autocomplete="off">
           <label>Show <select id="consolidated-filter" aria-label="Filter consolidated parts"></select></label>
           <span id="consolidated-count" class="toolbar-count"></span>
+          <details id="column-menu" class="column-menu">
+            <summary class="button small ghost" title="Choose which columns to show">Columns</summary>
+            <div class="column-menu-panel">
+              <div class="column-menu-head">
+                <button id="columns-all" class="link-button" type="button">Show all</button>
+                <button id="columns-reset" class="link-button" type="button">Reset</button>
+                <button id="columns-done" class="button small" type="button">Done</button>
+              </div>
+              <p class="fine-print">Click a column heading to sort. Tick the columns you want to see.</p>
+              <div id="column-list" class="column-list" role="group" aria-label="Visible columns"></div>
+            </div>
+          </details>
         </div>
         <div id="consolidated-actions" class="selection-bar hidden" aria-live="polite"></div>
         <div id="consolidated-table" class="table-shell" tabindex="0" aria-label="Scrollable consolidated parts table"></div>
@@ -312,10 +341,25 @@
 
             <section class="dash-card vat-box" aria-labelledby="vat-box-title">
               <p class="eyebrow">VAT box</p>
-              <h3 id="vat-box-title">MVA</h3>
-              <label class="vat-rate">VAT rate <span class="input-suffix"><input type="number" min="0" max="100" step="0.1" value="25" data-bind="config.vatRate" data-scale="100"><span>%</span></span></label>
+              <h3 id="vat-box-title">VAT</h3>
+              <div class="vat-rate">
+                <span>VAT rate</span>
+                <span class="vat-field">
+                  <span class="input-suffix"><input type="number" min="0" max="100" step="0.1" value="0" placeholder="e.g. 25" data-bind="config.vatRate" data-scale="100" data-vat-field readonly aria-label="VAT rate"><span>%</span></span>
+                  <button class="lock-toggle" type="button" aria-pressed="false" data-vat-lock title="Unlock to include VAT">
+                <svg class="icon-locked" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3h2v11H5V10zm2 0h6V7a3 3 0 0 0-6 0z"/></svg>
+                <svg class="icon-unlocked" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 9.6-2l-1.8.9A3 3 0 0 0 9 7v3h10v11H5V10z"/></svg>
+                <span class="lock-label">Locked</span>
+              </button>
+                </span>
+              </div>
+              <p id="vat-state" class="fine-print"></p>
+              <p class="eyebrow">VAT by sales country</p>
+              <div id="vat-countries" class="vat-countries"></div>
+              <p class="eyebrow">This project's routes</p>
+              <dl id="vat-routes" class="stat-list"></dl>
               <dl id="vat-summary" class="stat-list"></dl>
-              <p class="fine-print">Output VAT is collected from customers and paid on. Import VAT handled through a VAT-registered company is reported as both input and output VAT in the VAT return, so it is liquidity-neutral. Neither counts as profit or cost.</p>
+              <p class="fine-print">VAT is added to the price after your margin, never to the purchase cost. By default sales to Norwegian customers carry no VAT (goods from the USA or from a Swedish warehouse), while sales to Swedish customers do (Swedish stock, goods from Norway where VAT is paid when you sell, and goods bought from Switzerland). VAT is shown separately and never counted as profit or cost.</p>
             </section>
 
             <section class="dash-card">
@@ -549,13 +593,23 @@
             </div>
           </div>
           <div id="flow-map" class="flow-map hidden">
-            <div class="map-panel map-world">
-              <div class="map-panel-head"><strong>Supply route</strong><span>Hover a wire or point for details · click a country to draw a comparison line</span></div>
-              <div id="map-world" class="map-canvas" aria-live="polite"></div>
-            </div>
-            <div class="map-panel map-norway">
-              <div class="map-panel-head"><strong id="destination-map-title">Norway</strong><span>Customs, warehouse and deliveries</span></div>
-              <div id="map-norway" class="map-canvas"></div>
+            <div class="map-main">
+              <div id="map-stage" class="map-stage">
+                <div class="map-panels">
+                  <div class="map-panel map-world">
+                    <span class="map-panel-label">Supply route</span>
+                    <div id="map-world" class="map-canvas" aria-live="polite"></div>
+                  </div>
+                  <div class="map-panel map-norway">
+                    <span id="destination-map-title" class="map-panel-label">Norway</span>
+                    <div id="map-norway" class="map-canvas"></div>
+                  </div>
+                </div>
+                <svg id="map-overlay" class="map-overlay" aria-label="Supply routes" focusable="false"></svg>
+                <div id="map-boxes" class="map-boxes"></div>
+              </div>
+              <p class="map-hint">Hover a wire or point for details · click a country to draw a comparison line</p>
+              <div id="map-legend" class="map-legend"></div>
             </div>
             <aside id="map-info" class="map-info" aria-live="polite"></aside>
           </div>
@@ -570,9 +624,9 @@
                 <dl id="flow-factory-stats" class="stat-list"></dl>
               </article>
 
-              <div class="flow-leg">
+              <div id="flow-leg-shipment" class="flow-leg">
                 <div class="flow-arrow"><span id="flow-ship-destination">Ship to Norway</span></div>
-                <section class="flow-box" aria-label="Shipment and tolls">
+                <section id="flow-box-shipment" class="flow-box" aria-label="Shipment and tolls">
                   <h4>Shipment &amp; tolls</h4>
                   <table class="flow-table">
                     <tbody>
@@ -598,10 +652,10 @@
                 <dl id="flow-norway-stats" class="stat-list"></dl>
               </article>
 
-              <div class="flow-leg">
+              <div id="flow-leg-warehouse" class="flow-leg">
                 <div class="flow-arrow"><span>Receive &amp; store</span></div>
-                <section class="flow-box" aria-label="Warehouse costs">
-                  <h4>Warehouse costs <small>NOK</small></h4>
+                <section id="flow-box-warehouse" class="flow-box" aria-label="Warehouse costs">
+                  <h4><span>Warehouse costs <small>NOK</small></span><button class="box-toggle" type="button" data-map-box-toggle="warehouse" aria-expanded="false" aria-label="Show or hide the rates" title="Show or hide the rates"></button></h4>
                   <table class="flow-table">
                     <tbody>
                       <tr><th scope="row">Shelf location / mo</th><td><input type="number" min="0" step="1" data-bind="warehouse.rates.shelf" aria-label="Shelf location rate in NOK per month"></td></tr>
@@ -626,15 +680,19 @@
                 <dl id="flow-warehouse-stats" class="stat-list"></dl>
               </article>
 
-              <div class="flow-leg">
+              <div id="flow-leg-customer" class="flow-leg">
                 <div class="flow-arrow"><span>Sell &amp; deliver</span></div>
-                <section class="flow-box" aria-label="Customer pricing">
-                  <h4>Customer pricing</h4>
+                <section id="flow-box-customer" class="flow-box" aria-label="Customer pricing">
+                  <h4><span>Customer pricing</span><button class="box-toggle" type="button" data-map-box-toggle="customer" aria-expanded="false" aria-label="Show or hide the per-item costs" title="Show or hide the per-item costs"></button></h4>
                   <table class="flow-table">
                     <tbody>
                       <tr><th scope="row">Price multiplier</th><td><span class="input-suffix"><input type="number" min="0" step="0.01" data-bind="config.multiplier" aria-label="Price multiplier"><span>×</span></span></td></tr>
                       <tr><th scope="row">Freight margin</th><td><span class="input-suffix"><input type="number" min="0" max="99.9" step="0.1" data-bind="config.shippingMargin" data-scale="100" aria-label="Freight margin"><span>%</span></span></td></tr>
-                      <tr><th scope="row">VAT (MVA)</th><td><span class="input-suffix"><input type="number" min="0" max="100" step="0.1" data-bind="config.vatRate" data-scale="100" aria-label="VAT rate"><span>%</span></span></td></tr>
+                      <tr><th scope="row">VAT <button class="lock-toggle icon-only" type="button" aria-pressed="false" data-vat-lock title="Unlock to include VAT">
+                <svg class="icon-locked" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3h2v11H5V10zm2 0h6V7a3 3 0 0 0-6 0z"/></svg>
+                <svg class="icon-unlocked" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 9.6-2l-1.8.9A3 3 0 0 0 9 7v3h10v11H5V10z"/></svg>
+                <span class="lock-label">Locked</span>
+              </button></th><td><span class="input-suffix"><input type="number" min="0" max="100" step="0.1" placeholder="e.g. 25" data-bind="config.vatRate" data-scale="100" data-vat-field readonly aria-label="VAT rate"><span>%</span></span></td></tr>
                     </tbody>
                     <tbody id="flow-per-item" class="locked">
                       <tr class="lock-row"><th colspan="2">
@@ -719,6 +777,7 @@
   <div id="chart-tooltip" class="chart-tooltip" role="tooltip" hidden></div>
   <div id="customs-popover" class="customs-popover" role="dialog" aria-label="Customs and VAT rules" hidden></div>
   <div id="toast" class="toast" role="alert" aria-live="assertive"></div>
+  <script src="vault.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

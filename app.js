@@ -14,7 +14,17 @@
   const RATE_SOURCE = 'https://api.frankfurter.dev/v2';
   const WAREHOUSE_RATE_STORAGE_KEY = 'partslist.warehouse-rates.caesar14.v1';
   const WAREHOUSE_RATE_PRIVATE_FILE = 'warehouse-rates.private.json';
+  // Parts lists saved encrypted in the repository (see vault.js and scripts/encrypt-documents.js).
+  const VAULT_FILE = 'data/bundle.dat';
   const UI_PREFERENCES_KEY = 'partslist.ui-preferences';
+  // Undo keeps the last few reversible edits. Snapshots are small (settings + item overrides + variables),
+  // not whole workbooks, so a bounded stack stays cheap.
+  const UNDO_LIMIT = 40;
+  // Typing in a number field must not rebuild the whole table on every keystroke.
+  const RECALC_DEBOUNCE_MS = 180;
+  // Columns that are rarely needed in day-to-day use. Hidden by default so the table fits a normal
+  // screen, and reachable in one click from the Columns menu.
+  const DEFAULT_HIDDEN_COLUMNS = Object.freeze(['fx', 'convertedUnit', 'discount', 'sellingTotal', 'importCosts', 'shippingMargin', 'pricingSource']);
   const CAESAR_SHIFT = 14;
   const PRINTABLE_ASCII_START = 32;
   const PRINTABLE_ASCII_RANGE = 95;
@@ -97,6 +107,12 @@
   // Currencies that name one country unambiguously; used only to pre-fill the origin of an added kit.
   const CURRENCY_HOME_COUNTRY = Object.freeze({ USD: '840', CHF: '756', GBP: '826', JPY: '392', CNY: '156', CAD: '124', NOK: '578', SEK: '752' });
   const MAP_DATA_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-50m.json';
+  const MAP_STUB = 34;                 // wire kept visible on each side of a table so the arrow reads as passing through it
+  const MAP_OVERLAY_MIN_WIDTH = 820;   // narrower than this the tables sit under the map instead of on it
+  // How VAT is treated for sales into each country: 'none', or 'price' = added to the price after margin.
+  const VAT_DEFAULTS = Object.freeze({ 578: 'none', 752: 'price' });
+  const VAT_TREATMENT_KEYS = ['none', 'price'];
+  const VAT_LABELS = { none: 'No VAT', price: 'VAT on the price after margin' };
   const FLOW_OVERRIDE_KEYS = ['outboundPerUnit', 'outtakePerUnit', 'storagePerUnitMonth'];
   // Validated categorical order (dataviz reference palette); groups take slots in creation order.
   const GROUP_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
@@ -124,6 +140,7 @@
 
   const FIELD_LABELS = {
     part: 'Part / SKU',
+    altPart: 'Alt. part no.',
     description: 'Description',
     quantity: 'Quantity',
     price: 'Unit price',
@@ -215,6 +232,7 @@
 
   const HEADER_TERMS = {
     part: ['part number', 'part no', 'part #', 'part', 'sku', 'item code', 'item number', 'item no', 'article number', 'article', 'component', 'product code', 'product', 'artikelnummer', 'artikelnr', 'reservdelsnummer', 'teilenummer', 'artikel nr', 'numero de piece', 'référence'],
+    altPart: ['alt article no', 'alt part no', 'alt article number', 'alt part number', 'alternative article number', 'alternative part number', 'alternate article number', 'alternate part number', 'secondary article number', 'secondary part number'],
     description: ['part description', 'item description', 'description', 'details', 'name', 'beskrivning', 'beteckning', 'bezeichnung', 'benämning', 'наименование'],
     quantity: ['maximum quantity', 'max quantity', 'quantity', 'qty', 'amount', 'count', 'pcs', 'pieces', 'units', 'antal', 'mängd', 'menge', 'quantite', 'quantité', 'количество'],
     price: ['unit price', 'unit cost', 'purchase price', 'price each', 'price', 'cost each', 'cost', 'styckpris', 'inköpspris', 'pris', 'einzelpreis', 'preis', 'prix unitaire', 'цена'],
@@ -246,7 +264,7 @@
       discount: 0.30,
       multiplier: 2,
       shippingMargin: 0.15,
-      vatRate: 0.25,
+      vatRate: 0,
       sourceCurrency: 'USD',
       outputCurrency: 'SEK',
     },
@@ -256,6 +274,7 @@
     },
     freight: { ...FREIGHT_DEFAULTS },
     customer: { country: '578' },
+    vat: { unlocked: false, byCountry: { ...VAT_DEFAULTS } },
     kits: {},
     groups: [],
     items: {},
@@ -265,7 +284,7 @@
     flowOverrides: { outboundPerUnit: null, outtakePerUnit: null, storagePerUnitMonth: null },
     flowUnlocked: false,
     flowMode: 'route',
-    map: { features: null, names: null, loading: false, error: null, compare: null, hover: null, pinned: null },
+    map: { features: null, names: null, loading: false, error: null, compare: null, hover: null, pinned: null, open: { warehouse: false, customer: false }, worldKey: null, nordicKey: null },
     customsPinned: false,
     excludedItems: [],
     kitSummaries: [],
@@ -275,6 +294,17 @@
     sheetSelection: { sheetName: null, rows: new Set(), anchor: null },
     consolidatedSearch: '',
     consolidatedFilter: 'all',
+    consolidatedSort: null,
+    hiddenColumns: [...DEFAULT_HIDDEN_COLUMNS],
+    focusedRowKey: null,
+    undoStack: [],
+    redoStack: [],
+    undoLabel: '',
+    vaultBytes: null,
+    recalcTimer: null,
+    pendingRecalc: null,
+    suppressHistory: false,
+    suppressHash: false,
     pendingDisabledKits: null,
     pendingMappings: null,
     pendingVariables: null,
@@ -300,12 +330,21 @@
   const dom = {
     file: el('workbook-file'),
     addKitFile: el('add-kit-file'),
+    vaultForm: el('vault-form'),
+    vaultKey: el('vault-key'),
+    vaultOpen: el('vault-open'),
     addKitLabel: el('add-kit-label'),
     languageSelect: el('language-select'),
     sidebarBody: el('sidebar-body'),
     sidebarCollapse: el('sidebar-collapse'),
     sidebarExpand: el('sidebar-expand'),
     exportButton: el('export-button'),
+    undoButton: el('undo-button'),
+    columnMenu: el('column-menu'),
+    columnList: el('column-list'),
+    columnsAll: el('columns-all'),
+    columnsReset: el('columns-reset'),
+    columnsDone: el('columns-done'),
     saveState: el('save-state'),
     workspace: el('workspace'),
     sidebar: el('app-sidebar'),
@@ -462,7 +501,20 @@
     mapWorld: el('map-world'),
     mapNorway: el('map-norway'),
     mapInfo: el('map-info'),
+    mapStage: el('map-stage'),
+    mapOverlay: el('map-overlay'),
+    mapBoxes: el('map-boxes'),
+    mapLegend: el('map-legend'),
+    flowBoxShipment: el('flow-box-shipment'),
+    flowBoxWarehouse: el('flow-box-warehouse'),
+    flowBoxCustomer: el('flow-box-customer'),
+    flowLegShipment: el('flow-leg-shipment'),
+    flowLegWarehouse: el('flow-leg-warehouse'),
+    flowLegCustomer: el('flow-leg-customer'),
     flowNote: el('flow-note'),
+    vatState: el('vat-state'),
+    vatCountries: el('vat-countries'),
+    vatRoutes: el('vat-routes'),
   };
 
   initialize();
@@ -482,6 +534,7 @@
     await loadPrivateWarehouseRateFile();
     syncWarehouseRateInputs();
     bindEvents();
+    detectVault();
     observeLanguage();
     setLanguage(state.language, false);
     renderSaveState();
@@ -497,11 +550,24 @@
       event.returnValue = '';
     });
 
+    window.addEventListener('popstate', () => applyHashView());
+    window.addEventListener('hashchange', () => { if (!state.suppressHash) applyHashView(); });
+    dom.undoButton.addEventListener('click', () => (state.redoStack.length ? redo() : undo()));
+    document.addEventListener('keydown', (event) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'z') return;
+      const field = event.target;
+      const typing = field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement || field?.isContentEditable;
+      if (typing) return;
+      event.preventDefault();
+      if (event.shiftKey) redo();
+      else undo();
+    });
     dom.file.addEventListener('change', (event) => {
       const [file] = event.target.files;
-      if (file) importWorkbook(file);
+      if (file) openWorkbookFile(file);
       event.target.value = '';
     });
+    dom.vaultForm.addEventListener('submit', unlockVault);
     dom.addKitFile.addEventListener('change', async (event) => {
       const files = [...event.target.files];
       if (files.length) await addKitWorkbooks(files);
@@ -537,7 +603,7 @@
     }));
     dom.dropZone.addEventListener('drop', (event) => {
       const [file] = event.dataTransfer.files;
-      if (file) importWorkbook(file);
+      if (file) openWorkbookFile(file);
     });
 
     // One delegated handler keeps every copy of a value (sidebar, flow, dashboard) in sync.
@@ -572,6 +638,30 @@
       renderConsolidated();
     });
     dom.consolidatedTable.addEventListener('click', handleConsolidatedTableClick);
+    dom.consolidatedTable.addEventListener('keydown', handleConsolidatedTableKeydown);
+    // The Columns menu closes on an outside click or Escape, so it never covers the table.
+    document.addEventListener('click', (event) => {
+      if (dom.columnMenu.open && !dom.columnMenu.contains(event.target)) dom.columnMenu.open = false;
+    });
+    dom.columnMenu.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') dom.columnMenu.open = false;
+    });
+    dom.columnsDone.addEventListener('click', () => { dom.columnMenu.open = false; });
+    dom.columnsAll.addEventListener('click', () => {
+      state.hiddenColumns = [];
+      saveUiPreferences();
+      renderConsolidated();
+    });
+    dom.columnsReset.addEventListener('click', () => {
+      state.hiddenColumns = [...DEFAULT_HIDDEN_COLUMNS];
+      saveUiPreferences();
+      renderConsolidated();
+    });
+    dom.columnList.addEventListener('change', (event) => {
+      const box = event.target.closest('[data-column-key]');
+      if (!box) return;
+      toggleColumn(box.dataset.columnKey, box.checked);
+    });
     dom.groupForm.addEventListener('submit', (event) => {
       event.preventDefault();
       const group = addGroup(dom.groupName.value);
@@ -586,6 +676,12 @@
       const remove = event.target.closest('[data-remove-group]');
       if (remove) deleteGroup(remove.dataset.removeGroup);
     });
+    document.addEventListener('click', (event) => {
+      if (!event.target.closest?.('[data-vat-lock]')) return;
+      state.vat.unlocked = !state.vat.unlocked;
+      renderVatControls();
+      if (state.vat.unlocked) document.getElementById('vat-input')?.focus();
+    });
     dom.flowLock.addEventListener('click', () => {
       state.flowUnlocked = !state.flowUnlocked;
       renderFlowLock();
@@ -598,6 +694,8 @@
       showToast('Per-item values reset to the calculated amounts.');
     });
     [dom.kitBar, dom.dashboardKitBar].forEach((bar) => bar.addEventListener('click', (event) => {
+      const only = event.target.closest('[data-kit-only]');
+      if (only) setKitsOnly(only.dataset.kitOnly);
       const chip = event.target.closest('[data-kit-toggle]');
       if (chip) setKitEnabled(chip.dataset.kitToggle, chip.dataset.kitEnable === 'true');
     }));
@@ -620,14 +718,14 @@
       const observer = new ResizeObserver(() => {
         cancelAnimationFrame(resizeFrame);
         resizeFrame = requestAnimationFrame(() => {
-          const widths = [dom.chartWaterfall, dom.chartCumulative, dom.chartGroups, dom.mapWorld, dom.mapNorway].map((node) => node.clientWidth).join(',');
+          const widths = [dom.chartWaterfall, dom.chartCumulative, dom.chartGroups, dom.mapStage].map((node) => node.clientWidth).join(',');
           if (widths === lastWidths) return;
           lastWidths = widths;
           if (state.activeView === VIEW.dashboard) renderDashboardCharts();
           if (state.activeView === VIEW.wire && state.flowMode === 'map') renderMaps();
         });
       });
-      [dom.chartWaterfall, dom.chartCumulative, dom.chartGroups, dom.mapWorld, dom.mapNorway].forEach((node) => observer.observe(node));
+      [dom.chartWaterfall, dom.chartCumulative, dom.chartGroups, dom.mapStage].forEach((node) => observer.observe(node));
     }
     dom.refreshRates.addEventListener('click', () => refreshRates(true));
     dom.exportButton.addEventListener('click', exportWorkbook);
@@ -822,26 +920,72 @@
       const value = input.type === 'checkbox' ? input.checked : input.type === 'number' ? readNumberInput(input) : input.value;
       if (value === undefined) return;
       setPath(input.dataset.bind, value);
-      onBoundChange(input.dataset.bind);
+      if (discrete) onBoundChange(input.dataset.bind);
+      else {
+        onBoundChange(input.dataset.bind, { defer: true });
+        scheduleRecalc(debouncedKindFor(input.dataset.bind));
+      }
     } else if (input.dataset.kitBind) {
       handleKitInput(input);
     } else if (input.dataset.groupField) {
       handleGroupInput(input);
+    } else if (input.dataset.vatCountry) {
+      state.vat.byCountry[input.dataset.vatCountry] = input.value === 'price' ? 'price' : 'none';
+      saveSettingsSoon();
+      rebuildConsolidation();
     } else if (input.dataset.override) {
       if (input.readOnly) return;
       const value = input.value.trim() === '' ? null : readNumberInput(input);
       if (value === undefined) return;
       state.flowOverrides[input.dataset.override] = value;
       saveSettingsSoon();
+      scheduleRecalc('views');
+    }
+  }
+
+  // Text fields that only affect the rendered views, rather than the consolidation itself.
+  function debouncedKindFor(bind) {
+    return bind.startsWith('scenario.') ? 'views' : 'consolidation';
+  }
+
+  /* ---------- Debounced recalculation ---------- */
+
+  // Typing in a number field fires an event per keystroke. Recomputing and re-rendering the whole
+  // table each time is what made the form feel sticky, so the heavy work is coalesced into one call
+  // shortly after typing stops. Dropdown and checkbox changes are discrete and still run at once.
+  function scheduleRecalc(kind) {
+    if (state.recalcTimer) clearTimeout(state.recalcTimer);
+    state.pendingRecalc = kind;
+    state.recalcTimer = setTimeout(() => {
+      state.recalcTimer = null;
+      flushRecalc();
+    }, RECALC_DEBOUNCE_MS);
+  }
+
+  function flushRecalc() {
+    if (state.recalcTimer) {
+      clearTimeout(state.recalcTimer);
+      state.recalcTimer = null;
+    }
+    const kind = state.pendingRecalc;
+    state.pendingRecalc = null;
+    if (!kind) return;
+    if (kind === 'consolidation') {
+      rebuildConsolidation();
+      if (state.activeView === VIEW.consolidated) renderConsolidated();
+    } else {
       refreshViews();
     }
   }
 
-  function onBoundChange(path) {
+  function onBoundChange(path, options = {}) {
     if (path.startsWith('warehouse.rates.')) persistWarehouseRates();
     if (path.startsWith('warehouse.')) state.warehouse.unitsPerShelf = state.warehouse.binsPerShelf * state.warehouse.unitsPerBin;
     if (path === 'warehouse.plannedPallets') state.warehouse.plannedPallets = Math.max(0, Math.round(state.warehouse.plannedPallets || 0));
     saveSettingsSoon();
+    // A deferred change is a text field mid-edit: state is already updated, but the caller schedules
+    // one coalesced rebuild instead of paying for a full render on every keystroke.
+    if (options.defer) return;
     if (/Currency$/.test(path)) {
       rebuildConsolidation();
       refreshRates(false);
@@ -849,7 +993,6 @@
     }
     if (path === 'customer.country') {
       state.customer.country = DESTINATIONS[state.customer.country] ? state.customer.country : '578';
-      state.config.vatRate = customerConfig().vat;
       rebuildConsolidation();
       return;
     }
@@ -955,10 +1098,16 @@
       return;
     }
     saveSettingsSoon();
-    rebuildConsolidation();
-    if (['shippingCurrency', 'defaultCurrency'].includes(field)) refreshRates(false);
-    if (field === 'originCountry') renderMaps();
-    updateKitRouteSummaries();
+    // Free-text kit fields (manufacturer) are typed, so the rebuild is coalesced like other text inputs.
+    const discrete = input.tagName === 'SELECT' || input.type === 'checkbox';
+    if (discrete) {
+      rebuildConsolidation();
+      if (['shippingCurrency', 'defaultCurrency'].includes(field)) refreshRates(false);
+      if (field === 'originCountry') renderMaps();
+      updateKitRouteSummaries();
+    } else {
+      scheduleRecalc('consolidation');
+    }
   }
 
   function isSourceKit(sheetName) {
@@ -966,15 +1115,31 @@
     return Boolean(mapping && mapping.part !== null && mapping.quantity !== null && !isGeneratedSheet(state.workbook?.Sheets[sheetName]));
   }
 
+  // One click to look at a single manufacturer's kits (or all of them again); undo restores the previous choice.
+  function setKitsOnly(maker) {
+    const names = state.workbook.SheetNames.filter(isSourceKit);
+    pushHistory(maker ? `Only ${maker} kits` : 'All kits', () => {
+      names.forEach((name) => { state.mappings[name].enabled = !maker || (kitSettings(name).manufacturer || name) === maker; });
+      renderMappings();
+      saveSettingsSoon();
+      rebuildConsolidation();
+      refreshRates(false);
+    });
+  }
+
   function setKitEnabled(sheetName, enabled) {
     const mapping = state.mappings[sheetName];
     if (!mapping) return;
-    mapping.enabled = enabled;
-    renderMappings();
-    saveSettingsSoon();
-    rebuildConsolidation();
-    refreshRates(false);
-    showToast(`${sheetName} ${enabled ? 'added to' : 'removed from'} the consolidation. Everything was recalculated.`);
+    pushHistory(`${sheetName} ${enabled ? 'added to' : 'removed from'} the consolidation`, () => {
+      mapping.enabled = enabled;
+      renderMappings();
+      saveSettingsSoon();
+      rebuildConsolidation();
+      refreshRates(false);
+    });
+    showToast(enabled
+      ? `${sheetName} added to the consolidation. Everything was recalculated. Ctrl+Z reverts it.`
+      : `${sheetName} removed from the consolidation. Everything was recalculated. Ctrl+Z reverts it.`);
   }
 
   function createKitFreightControl(sheetName) {
@@ -1081,6 +1246,7 @@
       scenario: { ...state.scenario },
       supplier: { ...state.supplier },
       customer: { ...state.customer },
+      vat: { byCountry: { ...state.vat.byCountry } },
       flowOverrides: { ...state.flowOverrides },
       wireNodePositions: Core.sanitizeWirePositions(state.wireNodePositions),
       wireRelations: state.wireRelations.filter(isValidWireRelation).map((edge) => ({ ...edge })),
@@ -1184,6 +1350,11 @@
       warehouseDelta: finiteOr(scenario.warehouseDelta, 0, -100, 500),
     };
     state.customer = { country: DESTINATIONS[settings.customer?.country] ? settings.customer.country : '578' };
+    state.vat = { unlocked: false, byCountry: { ...VAT_DEFAULTS } };
+    Object.keys(DESTINATIONS).forEach((id) => {
+      const saved = settings.vat?.byCountry?.[id];
+      if (VAT_TREATMENT_KEYS.includes(saved)) state.vat.byCountry[id] = saved;
+    });
     const supplier = settings.supplier || {};
     const country = Core.normalizeCountryCode(supplier.country, SUPPLIER_DEFAULTS.country);
     state.supplier = {
@@ -1268,6 +1439,122 @@
     renderSaveState();
   }
 
+  /* ---------- Undo & redo ---------- */
+
+  // A snapshot is only the small, reversible slice of the project: the settings the user edits by hand,
+  // the per-item overrides, the sales groups and the named variables.
+  function captureHistoryState() {
+    return {
+      config: { ...state.config },
+      freight: { ...state.freight },
+      sales: { ...state.sales },
+      scenario: { ...state.scenario },
+      customer: { ...state.customer },
+      supplier: { ...state.supplier },
+      vat: { unlocked: state.vat.unlocked, byCountry: { ...state.vat.byCountry } },
+      kits: JSON.parse(JSON.stringify(state.kits)),
+      groups: JSON.parse(JSON.stringify(state.groups)),
+      items: JSON.parse(JSON.stringify(state.items)),
+      flowOverrides: { ...state.flowOverrides },
+      variables: state.variables.map((variable) => ({ ...variable })),
+      disabledKits: Object.entries(state.mappings).filter(([, mapping]) => !mapping.enabled).map(([name]) => name),
+    };
+  }
+
+  function restoreHistoryState(snapshot) {
+    if (!snapshot) return;
+    state.config = { ...state.config, ...snapshot.config };
+    state.freight = { ...snapshot.freight };
+    state.sales = { ...snapshot.sales };
+    state.scenario = { ...snapshot.scenario };
+    state.customer = { ...snapshot.customer };
+    state.supplier = { ...snapshot.supplier };
+    state.vat = { unlocked: snapshot.vat.unlocked, byCountry: { ...snapshot.vat.byCountry } };
+    state.kits = JSON.parse(JSON.stringify(snapshot.kits));
+    state.groups = JSON.parse(JSON.stringify(snapshot.groups));
+    state.items = JSON.parse(JSON.stringify(snapshot.items));
+    state.flowOverrides = { ...snapshot.flowOverrides };
+    state.variables = (snapshot.variables || []).map((variable) => ({ ...variable }));
+    Object.values(state.mappings).forEach((mapping) => { mapping.enabled = true; });
+    (snapshot.disabledKits || []).forEach((name) => {
+      if (state.mappings[name]) state.mappings[name].enabled = false;
+    });
+  }
+
+  // Records a reversible edit. Call this *before* changing state so the snapshot holds the "before" value;
+  // the action itself runs immediately, and is kept so redo can replay exactly the same edit.
+  function pushHistory(label, apply, options = {}) {
+    if (state.suppressHistory || !state.workbook) {
+      apply();
+      return;
+    }
+    const before = captureHistoryState();
+    apply();
+    state.undoStack.push({ label, before, apply, restore: options.restore || null });
+    if (state.undoStack.length > UNDO_LIMIT) state.undoStack.shift();
+    state.redoStack = [];
+    state.undoLabel = label;
+    renderUndoState();
+  }
+
+  function undo() {
+    const entry = state.undoStack.pop();
+    if (!entry) return;
+    // The snapshot holds the state from before the edit, so restoring it and replaying the action on redo
+    // moves the project back and forth without either side re-deriving the other's values.
+    state.suppressHistory = true;
+    restoreHistoryState(entry.before);
+    // Worksheet cells live outside the settings snapshot, so their restore step runs separately.
+    entry.restore?.();
+    state.suppressHistory = false;
+    state.redoStack.push(entry);
+    state.undoLabel = entry.label;
+    // Kits switched on or off change which parts are consolidated, so the list is rebuilt, not just redrawn.
+    renderMappings();
+    rebuildConsolidation();
+    refreshRates(false);
+    renderGroups();
+    renderVariables();
+    renderUndoState();
+    showToast(`Undone: ${entry.label}.`);
+  }
+
+  function redo() {
+    const entry = state.redoStack.pop();
+    if (!entry) return;
+    state.suppressHistory = true;
+    try {
+      // A redo follows an undo, so worksheet cells the edit overwrote still hold their restored values.
+      // apply() writes the edit on top of them, which is exactly what redoing the edit should mean.
+      entry.apply();
+    } finally {
+      state.suppressHistory = false;
+    }
+    state.undoStack.push(entry);
+    state.undoLabel = entry.label;
+    // Kits switched on or off change which parts are consolidated, so the list is rebuilt, not just redrawn.
+    renderMappings();
+    rebuildConsolidation();
+    refreshRates(false);
+    renderGroups();
+    renderVariables();
+    renderUndoState();
+    showToast(`Redone: ${entry.label}.`);
+  }
+
+  function renderUndoState() {
+    const canUndo = state.undoStack.length > 0;
+    const canRedo = state.redoStack.length > 0;
+    dom.undoButton.disabled = !canUndo;
+    const label = canUndo ? state.undoLabel : 'Undo';
+    const next = canRedo ? 'Redo' : label;
+    dom.undoButton.title = canUndo
+      ? `${canRedo ? 'Redo' : 'Undo'} ${label} (${canRedo ? 'Ctrl+Shift+Z' : 'Ctrl+Z'})`
+      : 'Nothing to undo (Ctrl+Z)';
+    dom.undoButton.setAttribute('aria-label', canUndo ? `${next} ${label}` : 'Nothing to undo');
+    dom.undoButton.querySelector('.undo-label').textContent = next;
+  }
+
   function markProjectSaved(label) {
     state.projectDirty = false;
     state.projectSaveLabel = label || 'Saved';
@@ -1275,6 +1562,7 @@
   }
 
   function renderSaveState() {
+    renderUndoState();
     if (!state.workbook) {
       dom.saveState.textContent = 'No workbook loaded';
       dom.saveState.className = 'save-state';
@@ -1308,12 +1596,23 @@
       const stored = JSON.parse(localStorage.getItem(UI_PREFERENCES_KEY) || 'null');
       if (stored?.language === 'en' || stored?.language === 'sv') state.language = stored.language;
       if (typeof stored?.sidebarCollapsed === 'boolean') state.sidebarCollapsed = stored.sidebarCollapsed;
+      if (stored?.consolidatedSort && ['asc', 'desc'].includes(stored.consolidatedSort.direction) && typeof stored.consolidatedSort.key === 'string') {
+        state.consolidatedSort = { key: stored.consolidatedSort.key, direction: stored.consolidatedSort.direction };
+      }
+      if (Array.isArray(stored?.hiddenColumns)) state.hiddenColumns = stored.hiddenColumns.filter((key) => typeof key === 'string');
     } catch { /* Preferences are optional. */ }
   }
 
   function saveUiPreferences() {
     try {
-      localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify({ language: state.language, sidebarCollapsed: state.sidebarCollapsed }));
+      // Only harmless, non-business interface choices are remembered: language, panel state and how the
+      // parts table is arranged. No workbook or pricing data is written here.
+      localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify({
+        language: state.language,
+        sidebarCollapsed: state.sidebarCollapsed,
+        consolidatedSort: state.consolidatedSort,
+        hiddenColumns: state.hiddenColumns,
+      }));
     } catch { /* Preferences are optional. */ }
   }
 
@@ -1333,23 +1632,26 @@
   function resetProjectSettings() {
     if (!state.workbook) return;
     if (!window.confirm(translateUi('Reset kit freight, freight & import, VAT, sales groups, item overrides and sales assumptions to their defaults? Warehouse quote rates are kept.'))) return;
-    state.config.vatRate = 0.25;
-    state.freight = { ...FREIGHT_DEFAULTS };
-    state.kits = {};
-    state.groups = [];
-    state.items = {};
-    state.sales = { ...SALES_DEFAULTS };
-    state.scenario = { salesDelta: 0, purchaseDelta: 0, inboundDelta: 0, warehouseDelta: 0 };
-    state.supplier = { ...SUPPLIER_DEFAULTS };
-    state.customer = { country: '578' };
-    FLOW_OVERRIDE_KEYS.forEach((key) => { state.flowOverrides[key] = null; });
-    state.selectedKeys.clear();
-    renderMappings();
-    renderGroups();
-    renderAllSelectionBars();
-    rebuildConsolidation();
-    refreshRates(false);
-    showToast('Kit, freight, group and sales settings were reset.');
+    pushHistory('Settings reset to defaults', () => {
+      state.config.vatRate = 0;
+      state.vat = { unlocked: false, byCountry: { ...VAT_DEFAULTS } };
+      state.freight = { ...FREIGHT_DEFAULTS };
+      state.kits = {};
+      state.groups = [];
+      state.items = {};
+      state.sales = { ...SALES_DEFAULTS };
+      state.scenario = { salesDelta: 0, purchaseDelta: 0, inboundDelta: 0, warehouseDelta: 0 };
+      state.supplier = { ...SUPPLIER_DEFAULTS };
+      state.customer = { country: '578' };
+      FLOW_OVERRIDE_KEYS.forEach((key) => { state.flowOverrides[key] = null; });
+      state.selectedKeys.clear();
+      renderMappings();
+      renderGroups();
+      renderAllSelectionBars();
+      rebuildConsolidation();
+      refreshRates(false);
+    });
+    showToast('Kit, freight, group and sales settings were reset. Ctrl+Z restores them.');
   }
 
   function rotatePrintableAscii(value, shift) {
@@ -1775,7 +2077,7 @@
       { id: 'consolidated.shipping', label: 'Freight margin', meta: `${formatPercent(state.config.shippingMargin)} margin`, detail: 'Freight and import costs plus margin', category: 'calculation', x: 265, y: 400 },
       { id: 'consolidated.total', label: 'Line total', meta: `${state.config.outputCurrency} excl. VAT`, detail: 'Sales price + freight incl. margin', category: 'calculation', x: 265, y: 473 },
       { id: 'consolidated.freight', label: 'Freight & tolls', meta: `Kit + ${formatMoney(toOutput(state.freight.consolidatedShipment, state.freight.consolidatedCurrency), state.config.outputCurrency)} shipment`, detail: `Duty ${formatPercent(state.freight.dutyRate)}, insurance ${formatPercent(state.freight.insuranceRate)}, clearance fees`, category: 'assumption', x: 265, y: 546 },
-      { id: 'consolidated.vat', label: 'VAT', meta: formatPercent(state.config.vatRate), detail: 'Added to customer prices; import VAT is deductible', category: 'assumption', x: 265, y: 619 },
+      { id: 'consolidated.vat', label: 'VAT', meta: formatPercent(salesVatRate()), detail: 'Added to customer prices; import VAT is deductible', category: 'assumption', x: 265, y: 619 },
       { id: 'sales.groups', label: 'Sales groups', meta: `${state.groups.length} group${state.groups.length === 1 ? '' : 's'}`, detail: 'Expected sales and multiplier per group', category: 'assumption', x: 515, y: 473 },
       { id: 'sales.expected', label: 'Expected sales', meta: `${formatNumber(state.consolidated.reduce((sum, item) => sum + (item.salesPerYear || 0), 0), 0)} units / yr`, detail: 'Group, item or default sales assumption', category: 'calculation', x: 515, y: 546 },
       { id: 'output.dashboard', label: 'Profitability dashboard', meta: 'Net profit + payback', detail: 'Revenue, landed cost and warehouse costs', category: 'output', x: 765, y: 495 },
@@ -1872,7 +2174,7 @@
       { id: 'formula.kitFreight', label: 'Kit freight', meta: 'Per kit: sheet / per line / whole kit', detail: 'Kit freight setting applied to the pricing row', category: 'calculation', x: 510, y: 729 },
       { id: 'formula.consFreight', label: 'Consolidated shipment share', meta: `${formatMoney(toOutput(state.freight.consolidatedShipment, state.freight.consolidatedCurrency), state.config.outputCurrency)} by ${state.freight.allocation}`, detail: 'One shipment for the whole consolidated order, split across lines', category: 'assumption', x: 510, y: 807 },
       { id: 'formula.importCosts', label: 'Duty, insurance & fees', meta: `${formatPercent(state.freight.dutyRate)} duty · ${formatPercent(state.freight.insuranceRate)} ins.`, detail: 'Duty on purchase + freight + insurance, plus clearance fees', category: 'assumption', x: 510, y: 885 },
-      { id: 'formula.vat', label: 'VAT', meta: formatPercent(state.config.vatRate), detail: 'Line total incl. VAT for the customer', category: 'assumption', x: 510, y: 963 },
+      { id: 'formula.vat', label: 'VAT', meta: formatPercent(salesVatRate()), detail: 'Line total incl. VAT for the customer', category: 'assumption', x: 510, y: 963 },
       { id: 'formula.landed', label: 'Landed cost', meta: 'Purchase + freight & import', detail: `Cost of the stock delivered to ${destinationConfig().name}`, category: 'calculation', x: 510, y: 1041 },
       { id: 'sales.groups', label: 'Sales groups', meta: `${state.groups.length} groups · ${Object.keys(state.items).length} item overrides`, detail: 'Group sales volumes and multipliers', category: 'assumption', x: 755, y: 804 },
       { id: 'sales.expected', label: 'Expected sales / yr', meta: `${formatNumber(state.consolidated.reduce((sum, item) => sum + (item.salesPerYear || 0), 0), 0)} units`, detail: 'Item override → group → default assumption', category: 'calculation', x: 755, y: 882 },
@@ -2205,22 +2507,120 @@
     });
   }
 
-  async function addKitWorkbooks(files) {
-    if (!state.workbook) {
-      await importWorkbook(files[0]);
-      if (files.length > 1) await addKitWorkbooks(files.slice(1));
-      return;
+  // The only multi-kit price list supported so far is Häny's spare-part catalogue; its kits ship from Bulgaria.
+  const CATALOGUE_DEFAULTS = Object.freeze({ manufacturer: 'Häny', originCountry: '100' });
+
+  // Sheets that hold several kits one after another (see Core.parseKitCatalogue).
+  function catalogueSheetsOf(workbook) {
+    return workbook.SheetNames
+      .map((name) => ({ name, catalogue: Core.parseKitCatalogue(XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: null })) }))
+      .filter((entry) => entry.catalogue);
+  }
+
+  // The encrypted bundle is offered only when it exists next to the page (it is absent on a plain local copy).
+  async function detectVault() {
+    if (!window.PartsListVault) return;
+    try {
+      const response = await fetch(VAULT_FILE, { cache: 'no-store' });
+      if (!response.ok) return;
+      state.vaultBytes = new Uint8Array(await response.arrayBuffer());
+      dom.vaultForm.classList.remove('hidden');
+    } catch (error) {
+      console.info('No encrypted document bundle is available.', error);
     }
-    setStatus(`Adding ${files.length} workbook${files.length === 1 ? '' : 's'}…`, 'busy');
+  }
+
+  async function unlockVault(event) {
+    event.preventDefault();
+    const key = dom.vaultKey.value;
+    if (!key || !state.vaultBytes) return;
+    dom.vaultOpen.disabled = true;
+    setStatus('Unlocking the saved documents…', 'busy');
+    try {
+      const documents = await window.PartsListVault.open(state.vaultBytes, key);
+      dom.vaultKey.value = '';
+      const isRates = (document) => /.json$/i.test(document.name);
+      const lists = documents.filter((document) => !isRates(document)).map((document) => new File([document.bytes], document.name));
+      if (!lists.length) throw new Error('The saved documents contain no parts lists.');
+      await addKitWorkbooks(lists);
+      const rates = documents.find(isRates);
+      if (rates) await importWarehouseRates(new File([rates.bytes], rates.name, { type: 'application/json' }));
+      showToast('Saved documents imported.');
+    } catch (error) {
+      console.error(error);
+      setStatus(`Could not unlock the saved documents: ${error.message}`, 'error');
+      showToast(error.message || 'The saved documents could not be opened.', true);
+    } finally {
+      dom.vaultOpen.disabled = false;
+    }
+  }
+
+  async function openWorkbookFile(file) {
+    let isCatalogue = false;
+    try {
+      isCatalogue = catalogueSheetsOf(await readWorkbookFile(file)).length > 0;
+    } catch (error) {
+      // An unreadable file is reported by the normal import below.
+    }
+    if (isCatalogue) await addKitWorkbooks([file], { fresh: true });
+    else await importWorkbook(file);
+  }
+
+  async function addKitWorkbooks(files, options = {}) {
+    if (!state.workbook && !options.fresh) {
+      const startsAsCatalogue = catalogueSheetsOf(await readWorkbookFile(files[0])).length > 0;
+      if (!startsAsCatalogue) {
+        await importWorkbook(files[0]);
+        if (files.length > 1) await addKitWorkbooks(files.slice(1));
+        return;
+      }
+    }
+    const fresh = options.fresh === true || !state.workbook;
+    setStatus(files.length === 1 ? 'Adding 1 workbook…' : `Adding ${files.length} workbooks…`, 'busy');
     try {
       const merged = XLSX.utils.book_new();
-      state.workbook.SheetNames.forEach((name) => {
-        if (!isGeneratedSheet(state.workbook.Sheets[name])) XLSX.utils.book_append_sheet(merged, state.workbook.Sheets[name], uniqueWorkbookSheetName(merged, name));
-      });
+      if (!fresh) {
+        state.workbook.SheetNames.forEach((name) => {
+          if (!isGeneratedSheet(state.workbook.Sheets[name])) XLSX.utils.book_append_sheet(merged, state.workbook.Sheets[name], uniqueWorkbookSheetName(merged, name));
+        });
+      }
       let added = 0;
+      const skipped = [];
+      const duplicates = [];
+      const newKits = {};
       for (const file of files) {
         const incoming = await readWorkbookFile(file);
         const fileBase = String(file.name).replace(/\.[^.]+$/, '');
+        const catalogues = catalogueSheetsOf(incoming);
+        if (catalogues.length) {
+          // A catalogue file is split into one kit sheet per kit; its other sheets are not parts lists we want.
+          const { manufacturer, originCountry } = CATALOGUE_DEFAULTS;
+          catalogues.forEach(({ catalogue }) => {
+            catalogue.kits.forEach((kit) => {
+              const baseName = Core.catalogueSheetName(kit.name, manufacturer);
+              // Adding the same price list twice would make every part "common", so kits already present are left out.
+              if (merged.SheetNames.includes(baseName)) {
+                duplicates.push(kit.name);
+                return;
+              }
+              const targetName = uniqueWorkbookSheetName(merged, baseName);
+              XLSX.utils.book_append_sheet(merged, XLSX.utils.aoa_to_sheet(Core.catalogueSheetRows(kit, { manufacturer, currency: catalogue.currency })), targetName);
+              newKits[targetName] = {
+                ...newKitSettings(targetName),
+                manufacturer,
+                originCountry,
+                // The net price column is already after the supplier's discount.
+                discountRate: 0,
+                defaultCurrency: CURRENCIES.includes(catalogue.currency) ? catalogue.currency : null,
+                shippingMode: 'kitTotal',
+                shippingAmount: 0,
+              };
+              added += 1;
+            });
+          });
+          incoming.SheetNames.filter((name) => !catalogues.some((entry) => entry.name === name) && !isGeneratedSheet(incoming.Sheets[name])).forEach((name) => skipped.push(name));
+          continue;
+        }
         incoming.SheetNames.forEach((name) => {
           if (isGeneratedSheet(incoming.Sheets[name])) return;
           const fallback = `${fileBase} - ${name}`;
@@ -2229,7 +2629,7 @@
           // The manufacturer and country of an added kit are not known; start from the file name and let the user set them.
           const headerText = (XLSX.utils.sheet_to_json(incoming.Sheets[name], { header: 1, defval: '', range: 0 }).slice(0, 12) || []).flat().join(' ');
           const guessed = CURRENCY_HOME_COUNTRY[currencyFromText(headerText)];
-          state.kits[targetName] = {
+          newKits[targetName] = {
             ...newKitSettings(targetName),
             manufacturer: fileBase.slice(0, 80) || targetName,
             originCountry: guessed || state.supplier.country,
@@ -2239,15 +2639,28 @@
           added += 1;
         });
       }
-      if (!added) throw new Error('No source sheets were found in the selected workbook.');
-      const settingsName = uniqueWorkbookSheetName(merged, 'PartsList settings');
-      XLSX.utils.book_append_sheet(merged, buildSettingsSheet(), settingsName);
-      merged.Workbook = merged.Workbook || {};
-      merged.Workbook.Sheets = merged.SheetNames.map((name) => ({ Hidden: name === settingsName ? 1 : 0 }));
+      if (!added) throw new Error(duplicates.length ? 'These kits are already in the project.' : 'No source sheets were found in the selected workbook.');
+      if (!fresh) {
+        const settingsName = uniqueWorkbookSheetName(merged, 'PartsList settings');
+        XLSX.utils.book_append_sheet(merged, buildSettingsSheet(), settingsName);
+        merged.Workbook = merged.Workbook || {};
+        merged.Workbook.Sheets = merged.SheetNames.map((name) => ({ Hidden: name === settingsName ? 1 : 0 }));
+      }
       const bytes = XLSX.write(merged, { type: 'array', bookType: 'xlsx', cellStyles: true, bookSST: true });
-      const projectName = state.fileName || 'partslist-project.xlsx';
+      const projectName = (!fresh && state.fileName) || `${String(files[0].name).replace(/\.[^.]+$/, '')}.xlsx`;
       const mergedFile = new File([bytes], projectName, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-      await importWorkbook(mergedFile, { addedKits: added, displayName: projectName });
+      const origin = ORIGIN_PRESETS[CATALOGUE_DEFAULTS.originCountry];
+      await importWorkbook(mergedFile, {
+        addedKits: added,
+        displayName: projectName,
+        kitSettings: newKits,
+        skippedSheets: skipped,
+        duplicateKits: duplicates,
+        // A project that starts from a catalogue is that manufacturer's project.
+        supplier: fresh && Object.values(newKits).every((kit) => kit.manufacturer === CATALOGUE_DEFAULTS.manufacturer)
+          ? { name: CATALOGUE_DEFAULTS.manufacturer, location: origin.place, country: CATALOGUE_DEFAULTS.originCountry, countryName: origin.name, lat: origin.lat, lon: origin.lon }
+          : null,
+      });
     } catch (error) {
       console.error(error);
       setStatus(`Could not add kits: ${error.message}`, 'error');
@@ -2291,7 +2704,8 @@
         ...WAREHOUSE_DEFAULTS,
         rates: { ...WAREHOUSE_RATE_DEFAULTS, ...persistedRates },
       };
-      state.config.vatRate = 0.25;
+      state.config.vatRate = 0;
+      state.vat = { unlocked: false, byCountry: { ...VAT_DEFAULTS } };
       state.freight = { ...FREIGHT_DEFAULTS };
       state.kits = {};
       state.groups = [];
@@ -2312,10 +2726,12 @@
       state.pendingVariables = null;
       state.pendingWireRelations = null;
       state.importWarnings = [];
-      state.guideDismissed = false;
+      state.guideDismissed = true; // the guide floats over the list, so it opens from the header button instead of covering the data after every import
       state.projectDirty = false;
       state.projectSaveLabel = 'Workbook imported';
       const restoredWorkbook = hydrateExportedSettings(workbook);
+      if (options.kitSettings) Object.assign(state.kits, options.kitSettings);
+      if (options.supplier) state.supplier = { ...options.supplier };
 
       const engineSheets = {};
       workbook.SheetNames.forEach((sheetName) => {
@@ -2345,7 +2761,9 @@
       rebuildDependencyIndex();
 
       dom.workbookName.textContent = state.fileName;
-      dom.sheetCount.textContent = `${workbook.SheetNames.length} sheet${workbook.SheetNames.length === 1 ? '' : 's'}`;
+      // Sheets that PartsList generated (Consolidated, Profitability, settings…) are not counted as source sheets.
+      const sourceSheetCount = workbook.SheetNames.filter((name) => !isGeneratedSheet(workbook.Sheets[name])).length;
+      dom.sheetCount.textContent = `${sourceSheetCount} sheet${sourceSheetCount === 1 ? '' : 's'}`;
       dom.emptyPanel.classList.add('hidden');
       dom.controls.classList.remove('hidden');
       dom.tabs.classList.remove('hidden');
@@ -2361,7 +2779,8 @@
       renderGroups();
       renderTabs();
       rebuildConsolidation();
-      showView(VIEW.consolidated);
+      // Honour a linked view (#dashboard, #warehouse, a sheet name) when the workbook finishes loading.
+      showView(viewFromHash() || VIEW.consolidated);
       renderAllSelectionBars();
       saveSettingsSoon();
 
@@ -2369,7 +2788,9 @@
       const restoredNote = restoredWorkbook ? ' Saved settings were restored from the workbook.' : '';
       const warningNote = state.importWarnings.length ? ` Warning: ${state.importWarnings.join(' ')}` : '';
       const addedNote = options.addedKits ? ` Added ${options.addedKits} new kit sheet${options.addedKits === 1 ? '' : 's'}.` : '';
-      setStatus(`Loaded ${state.fileName}. ${enabled} of ${workbook.SheetNames.length} sheets are included in consolidation.${addedNote}${restoredNote}${warningNote}`, state.importWarnings.length ? 'warning' : '');
+      const skippedNote = (options.skippedSheets?.length ? ` Skipped other sheets: ${options.skippedSheets.join(', ')}.` : '')
+        + (options.duplicateKits?.length ? ` Already in the project, not added: ${options.duplicateKits.join(', ')}.` : '');
+      setStatus(`Loaded ${state.fileName}. ${enabled} of ${sourceSheetCount} sheets are included in consolidation.${addedNote}${skippedNote}${restoredNote}${warningNote}`, state.importWarnings.length ? 'warning' : '');
       if (options.addedKits) showToast(`${options.addedKits} new kit sheet${options.addedKits === 1 ? '' : 's'} added. Review each kit's manufacturer, route, currency and discount.`);
       if (state.importWarnings.length) showToast(`Import warning: ${state.importWarnings.join(' ')}`);
       await refreshRates(false);
@@ -2613,6 +3034,7 @@
   function renderMappings() {
     dom.mappingList.replaceChildren();
     state.workbook.SheetNames.forEach((sheetName) => {
+      if (isGeneratedSheet(state.workbook.Sheets[sheetName])) return;
       const mapping = state.mappings[sheetName];
       const mappingReady = mapping.part !== null
         && mapping.quantity !== null
@@ -2781,6 +3203,7 @@
           key,
           part,
           description: mapping.description === null ? '' : displayValue(readCalculatedValue(sheetName, row, mapping.description)),
+          altPart: mapping.altPart === null ? '' : cleanAltPart(displayValue(readCalculatedValue(sheetName, row, mapping.altPart))),
           quantity,
           price: mapping.price === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.price)),
           sourceDiscountedTotal: mapping.discountedTotal === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.discountedTotal)),
@@ -2899,6 +3322,8 @@
       key,
       part: representative.part,
       description: representative.description,
+      // The second article number can differ between kits for the same part, so every one that occurs is listed.
+      altParts: [...new Set(occurrences.map((occurrence) => occurrence.altPart).filter(Boolean))],
       common: occurrenceSummary.common,
       sourceMaxQuantity,
       maxQuantity,
@@ -2935,7 +3360,7 @@
   function applyLandedCosts(items, allocateShipment) {
     const freight = state.freight;
     const margin = state.config.shippingMargin;
-    const vatRate = state.config.vatRate;
+    const vatRate = salesVatRate();
     const shipment = allocateShipment ? toOutput(freight.consolidatedShipment, freight.consolidatedCurrency) : 0;
     const clearance = allocateShipment ? toOutput(freight.clearanceFee, freight.clearanceCurrency) : 0;
     const shares = Core.allocationShares(items, freight.allocation);
@@ -3165,6 +3590,7 @@
     updateGroupCounts();
     populateOriginSelects();
     populateCustomerSelects();
+    renderVatControls();
     updateKitRouteSummaries();
     renderCustomsGuides();
     if (state.activeView === VIEW.consolidated) renderConsolidated();
@@ -3191,6 +3617,15 @@
       const label = document.createElement('span');
       label.className = 'kit-bar-label';
       label.textContent = 'Kits';
+      const makers = [...new Set(state.workbook.SheetNames.filter(isSourceKit).map((name) => kitSettings(name).manufacturer || name))];
+      const quick = makers.length > 1 ? [['', 'All kits'], ...makers.map((maker) => [maker, `Only ${maker}`])].map(([maker, text]) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'kit-quick';
+        button.dataset.kitOnly = maker;
+        button.textContent = text;
+        return button;
+      }) : [];
       const chips = state.workbook.SheetNames.filter(isSourceKit).map((sheetName) => {
         const enabled = state.mappings[sheetName].enabled;
         const summary = state.kitSummaries.find((item) => item.sheetName === sheetName);
@@ -3226,7 +3661,7 @@
         empty.textContent = 'No kit sheets detected.';
         chips.push(empty);
       }
-      bar.replaceChildren(label, ...chips);
+      bar.replaceChildren(label, ...quick, ...chips);
     });
     renderKitBreakdown();
   }
@@ -3261,45 +3696,88 @@
 
   /* ---------- Consolidated table ---------- */
 
+  // Every column carries a stable `key` (used for sorting, the chooser and the hidden list) and an
+  // optional `sortValue` giving the raw number or text to order by. `value` stays the display string,
+  // because most columns are formatted for reading rather than for comparing.
   function consolidatedColumns() {
     const o = state.config.outputCurrency;
     const money = (field) => (item) => formatNullableNumber(item[field], 2);
     return [
-      { label: 'Source sheets', data: true, value: (item) => item.sources.join(', ') },
-      { label: 'Part', data: true, value: (item) => item.part, className: 'part-cell' },
-      { label: 'Description', data: true, value: (item) => item.description },
-      { label: 'Quantity', number: true, value: (item) => formatNumber(item.maxQuantity, 2), overridden: (item) => item.quantityOverridden, note: (item) => (item.quantityOverridden ? `Stock quantity override. Source maximum: ${formatNumber(item.sourceMaxQuantity, 2)}` : '') },
-      { label: `Amount in ${o}`, number: true, value: money('convertedTotal'), required: true },
-      { label: 'Amount in USD', number: true, value: money('amountUsd'), required: true },
-      { label: 'Manufacturer', data: true, value: (item) => item.manufacturer || item.pricingSource },
-      { label: 'Country of origin', value: (item) => originName(item.originCountry) },
-      { label: 'Match', value: (item) => (item.common ? 'Common' : 'Unique') },
-      { label: 'Sales group', group: true },
-      { label: 'Expected sales / yr', number: true, value: (item) => formatNumber(item.salesPerYear, 2), overridden: (item) => item.salesOverridden, note: (item) => (item.salesOverridden ? 'Item sales override' : item.groupName ? `From group ${item.groupName}` : 'Default sales assumption') },
-      { label: 'Currency', value: (item) => item.currency },
-      { label: 'Unit price', number: true, value: money('unitPrice'), required: true },
-      { label: `FX to ${o}`, number: true, value: (item) => formatNullableNumber(item.fx, 6), required: true },
-      { label: `Unit in ${o}`, number: true, value: money('convertedUnit'), required: true },
-      { label: 'Discount', number: true, value: (item) => formatPercent(item.discount) },
-      { label: `Purchase after discount in ${o}`, number: true, value: money('discountedTotal'), required: true },
-      { label: 'Price multiplier', number: true, value: (item) => formatNumber(item.multiplier, 2), overridden: (item) => item.multiplierOverridden },
-      { label: `Sales price in ${o}`, number: true, value: money('sellingTotal'), required: true },
-      { label: `Kit freight in ${o}`, number: true, value: money('kitFreight'), required: true },
-      { label: `Consolidated shipment in ${o}`, number: true, value: money('consolidatedFreight') },
-      { label: `Duty, insurance & fees in ${o}`, number: true, value: (item) => formatNumber(item.importCosts, 2) },
-      { label: 'Freight margin', number: true, value: (item) => formatPercent(item.shippingMargin) },
-      { label: `Freight & import incl. margin in ${o}`, number: true, value: (item) => formatNumber(item.freightWithMargin, 2) },
-      { label: `Line total excl. VAT in ${o}`, number: true, value: money('lineTotal'), required: true, strong: true },
-      { label: `VAT in ${o}`, number: true, value: money('vat') },
-      { label: `Line total incl. VAT in ${o}`, number: true, value: money('lineTotalInclVat'), required: true },
-      { label: `Landed cost in ${o}`, number: true, value: money('landedCost'), required: true },
-      { label: 'Pricing source', value: (item) => `${item.pricingSource} row ${item.pricingRow}` },
+      { key: 'sources', label: 'Source sheets', data: true, sortValue: (item) => item.sources.join(', '), value: (item) => item.sources.join(', ') },
+      { key: 'part', label: 'Part', data: true, sortValue: (item) => item.part, value: (item) => item.part, className: 'part-cell' },
+      { key: 'description', label: 'Description', data: true, sortValue: (item) => item.description, value: (item) => item.description },
+      { key: 'altPart', label: 'Alt. part no.', data: true, optional: true, sortValue: (item) => item.altParts.join(', '), value: (item) => item.altParts.join(', ') },
+      { key: 'quantity', label: 'Quantity', number: true, sortValue: (item) => item.maxQuantity, value: (item) => formatNumber(item.maxQuantity, 2), overridden: (item) => item.quantityOverridden, note: (item) => (item.quantityOverridden ? `Stock quantity override. Source maximum: ${formatNumber(item.sourceMaxQuantity, 2)}` : '') },
+      { key: 'convertedTotal', label: `Amount in ${o}`, number: true, sortValue: (item) => item.convertedTotal, value: money('convertedTotal'), required: true },
+      { key: 'amountUsd', label: 'Amount in USD', number: true, sortValue: (item) => item.amountUsd, value: money('amountUsd'), required: true },
+      { key: 'manufacturer', label: 'Manufacturer', data: true, sortValue: (item) => item.manufacturer || item.pricingSource, value: (item) => item.manufacturer || item.pricingSource },
+      { key: 'originCountry', label: 'Country of origin', sortValue: (item) => originName(item.originCountry), value: (item) => originName(item.originCountry) },
+      { key: 'match', label: 'Match', sortValue: (item) => (item.common ? 1 : 0), value: (item) => (item.common ? 'Common' : 'Unique') },
+      { key: 'salesGroup', label: 'Sales group', group: true, sortValue: (item) => item.groupName || '' },
+      { key: 'salesPerYear', label: 'Expected sales / yr', number: true, sortValue: (item) => item.salesPerYear, value: (item) => formatNumber(item.salesPerYear, 2), overridden: (item) => item.salesOverridden, note: (item) => (item.salesOverridden ? 'Item sales override' : item.groupName ? `From group ${item.groupName}` : 'Default sales assumption') },
+      { key: 'currency', label: 'Currency', sortValue: (item) => item.currency, value: (item) => item.currency },
+      { key: 'unitPrice', label: 'Unit price', number: true, sortValue: (item) => item.unitPrice, value: money('unitPrice'), required: true },
+      { key: 'fx', label: `FX to ${o}`, number: true, sortValue: (item) => item.fx, value: (item) => formatNullableNumber(item.fx, 6), required: true },
+      { key: 'convertedUnit', label: `Unit in ${o}`, number: true, sortValue: (item) => item.convertedUnit, value: money('convertedUnit'), required: true },
+      { key: 'discount', label: 'Discount', number: true, sortValue: (item) => item.discount, value: (item) => formatPercent(item.discount) },
+      { key: 'discountedTotal', label: `Purchase after discount in ${o}`, number: true, sortValue: (item) => item.discountedTotal, value: money('discountedTotal'), required: true },
+      { key: 'multiplier', label: 'Price multiplier', number: true, sortValue: (item) => item.multiplier, value: (item) => formatNumber(item.multiplier, 2), overridden: (item) => item.multiplierOverridden },
+      { key: 'sellingTotal', label: `Sales price in ${o}`, number: true, sortValue: (item) => item.sellingTotal, value: money('sellingTotal'), required: true },
+      { key: 'kitFreight', label: `Kit freight in ${o}`, number: true, sortValue: (item) => item.kitFreight, value: money('kitFreight'), required: true },
+      { key: 'consolidatedFreight', label: `Consolidated shipment in ${o}`, number: true, sortValue: (item) => item.consolidatedFreight, value: money('consolidatedFreight') },
+      { key: 'importCosts', label: `Duty, insurance & fees in ${o}`, number: true, sortValue: (item) => item.importCosts, value: (item) => formatNumber(item.importCosts, 2) },
+      { key: 'shippingMargin', label: 'Freight margin', number: true, sortValue: (item) => item.shippingMargin, value: (item) => formatPercent(item.shippingMargin) },
+      { key: 'freightWithMargin', label: `Freight & import incl. margin in ${o}`, number: true, sortValue: (item) => item.freightWithMargin, value: (item) => formatNumber(item.freightWithMargin, 2) },
+      { key: 'lineTotal', label: salesVatRate() > 0 ? `Line total excl. VAT in ${o}` : `Line total in ${o}`, number: true, sortValue: (item) => item.lineTotal, value: money('lineTotal'), required: true, strong: true },
+      { key: 'vat', label: `VAT in ${o}`, number: true, vat: true, sortValue: (item) => item.vat, value: money('vat') },
+      { key: 'lineTotalInclVat', label: `Line total incl. VAT in ${o}`, number: true, vat: true, sortValue: (item) => item.lineTotalInclVat, value: money('lineTotalInclVat'), required: true },
+      { key: 'landedCost', label: `Landed cost in ${o}`, number: true, sortValue: (item) => item.landedCost, value: money('landedCost'), required: true },
+      { key: 'pricingSource', label: 'Pricing source', sortValue: (item) => `${item.pricingSource} row ${item.pricingRow}`, value: (item) => `${item.pricingSource} row ${item.pricingRow}` },
     ];
   }
 
+  // Columns the user has not hidden, minus the VAT columns when VAT is off.
+  function visibleConsolidatedColumns() {
+    const hidden = new Set(state.hiddenColumns);
+    const hasAltParts = state.consolidated.some((item) => item.altParts.length);
+    return consolidatedColumns().filter((column) => !hidden.has(column.key) && (!column.vat || salesVatRate() > 0) && (!column.optional || hasAltParts));
+  }
+
+  // Builds the show/hide list in the Columns menu. Hidden columns are listed too, ticked off, so a
+  // column that was switched off by mistake can always be found and switched back on.
+  function renderColumnChooser(columns) {
+    if (!columns.length) {
+      dom.columnList.replaceChildren();
+      return;
+    }
+    dom.columnList.replaceChildren(...columns.map((column) => {
+      const label = document.createElement('label');
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = !state.hiddenColumns.includes(column.key);
+      box.dataset.columnKey = column.key;
+      box.setAttribute('aria-label', column.label);
+      const text = document.createElement('span');
+      text.textContent = column.label;
+      label.append(box, text);
+      if (!box.checked) label.classList.add('is-hidden-column');
+      return label;
+    }));
+  }
+
+  function toggleColumn(key, visible) {
+    const next = visible ? state.hiddenColumns.filter((item) => item !== key) : [...new Set([...state.hiddenColumns, key])];
+    state.hiddenColumns = next;
+    saveUiPreferences();
+    if (state.activeView === VIEW.consolidated) renderConsolidated();
+  }
+
+
+  const makerOf = (item) => item.manufacturer || item.pricingSource;
+
   function itemMatchesFilter(item, filter, term) {
     if (term) {
-      const haystack = `${item.part} ${item.description} ${item.sources.join(' ')} ${item.groupName}`.toLowerCase();
+      const haystack = `${item.part} ${item.altParts.join(' ')} ${item.description} ${item.sources.join(' ')} ${item.groupName}`.toLowerCase();
       if (!haystack.includes(term)) return false;
     }
     if (filter === 'common') return item.common;
@@ -3307,15 +3785,22 @@
     if (filter === 'ungrouped') return !item.groupId;
     if (filter === 'selected') return state.selectedKeys.has(item.key);
     if (filter === 'overridden') return item.quantityOverridden || item.salesOverridden || item.multiplierOverridden;
+    if (filter === 'missing') return Core.hasMissingInputs(item);
     if (filter.startsWith('group:')) return item.groupId === filter.slice(6);
+    if (filter.startsWith('maker:')) return makerOf(item) === filter.slice(6);
+    if (filter.startsWith('makercommon:')) return item.common && makerOf(item) === filter.slice(12);
+    if (filter.startsWith('makerunique:')) return !item.common && makerOf(item) === filter.slice(12);
     return true;
   }
 
   function renderConsolidatedFilter() {
+    const makers = [...new Set(state.consolidated.map(makerOf).filter(Boolean))];
     const options = [
       ['all', 'All parts'], ['common', 'Common parts'], ['unique', 'Unique parts'], ['selected', 'Selected'],
-      ['overridden', 'With overrides'], ['ungrouped', 'No sales group'],
+      ['overridden', 'With overrides'], ['ungrouped', 'No sales group'], ['missing', 'Missing inputs'],
       ...state.groups.map((group) => [`group:${group.id}`, `Group: ${group.name}`]),
+      // With several manufacturers in one warehouse, each one gets its own common and unique lists.
+      ...(makers.length > 1 ? makers.flatMap((maker) => [[`maker:${maker}`, `Manufacturer: ${maker}`], [`makercommon:${maker}`, `${maker}: common parts`], [`makerunique:${maker}`, `${maker}: unique parts`]]) : []),
       ['excluded', 'Excluded parts'],
     ];
     if (!options.some(([value]) => value === state.consolidatedFilter)) state.consolidatedFilter = 'all';
@@ -3337,25 +3822,43 @@
     dom.summaryCards.replaceChildren(
       summaryCard('Common parts', common.length),
       summaryCard('Unique parts', unique.length),
-      summaryCard(`Total excl. VAT (${output})`, formatNumber(sum('lineTotal'), 2)),
-      summaryCard(`Total incl. VAT (${output})`, formatNumber(sum('lineTotalInclVat'), 2)),
+      summaryCard(salesVatRate() > 0 ? `Total excl. VAT (${output})` : `Total (${output})`, formatNumber(sum('lineTotal'), 2)),
+      ...(salesVatRate() > 0 ? [summaryCard(`Total incl. VAT (${output})`, formatNumber(sum('lineTotalInclVat'), 2))] : []),
       summaryCard(`Landed cost (${output})`, formatNumber(sum('landedCost'), 2)),
-      summaryCard('Missing inputs', missingPrices + missingFreight),
+      // Clicking the count filters the table down to the rows that still need something filled in,
+      // the same shortcut pattern the setup guide already uses for its own checks.
+      actionCard('Missing inputs', missingPrices + missingFreight, () => {
+        state.consolidatedFilter = 'missing';
+        renderConsolidated();
+      }, {
+        attention: missingPrices + missingFreight > 0,
+        hint: missingPrices + missingFreight > 0
+          ? 'Show only the parts with a missing price or freight'
+          : 'Every part has a price and freight',
+      }),
     );
 
     const term = state.consolidatedSearch.trim().toLowerCase();
     const filter = state.consolidatedFilter;
     const showExcluded = filter === 'excluded';
-    const visibleCommon = showExcluded ? [] : common.filter((item) => itemMatchesFilter(item, filter, term));
-    const visibleUnique = showExcluded ? [] : unique.filter((item) => itemMatchesFilter(item, filter, term));
-    const visibleExcluded = state.excludedItems.filter((item) => itemMatchesFilter(item, showExcluded ? 'all' : filter, term) && (showExcluded || filter === 'all' || filter === 'selected'));
+    // The chosen sort column orders rows inside each block; the Common/Unique grouping is kept so the
+    // table still reads top-down, and an unsorted column leaves the default common-then-part order alone.
+    const sortColumns = visibleConsolidatedColumns();
+    const sortColumn = sortColumns.find((column) => column.key === state.consolidatedSort?.key);
+    const sorter = (list) => (sortColumn
+      ? Core.sortItems(list, state.consolidatedSort, { keyFor: sortColumn.sortValue || sortColumn.value, tieBreaker: (item) => item.part })
+      : list);
+    const visibleCommon = showExcluded ? [] : sorter(common.filter((item) => itemMatchesFilter(item, filter, term)));
+    const visibleUnique = showExcluded ? [] : sorter(unique.filter((item) => itemMatchesFilter(item, filter, term)));
+    const visibleExcluded = sorter(state.excludedItems.filter((item) => itemMatchesFilter(item, showExcluded ? 'all' : filter, term) && (showExcluded || filter === 'all' || filter === 'selected')));
     state.visibleKeys = [...visibleCommon, ...visibleUnique, ...visibleExcluded].map((item) => item.key);
     const visibleCount = visibleCommon.length + visibleUnique.length;
     dom.consolidatedCount.textContent = showExcluded
       ? `${visibleExcluded.length} excluded`
       : `${visibleCount} of ${items.length} shown${state.selectedKeys.size ? ` · ${state.selectedKeys.size} selected` : ''}`;
 
-    const columns = consolidatedColumns();
+    const columns = visibleConsolidatedColumns();
+    renderColumnChooser(consolidatedColumns());
     const table = document.createElement('table');
     table.className = 'parts-table';
     const headRow = table.createTHead().insertRow();
@@ -3372,8 +3875,19 @@
     headRow.append(selectHead);
     columns.forEach((column) => {
       const th = document.createElement('th');
-      th.textContent = column.label;
-      if (column.number) th.className = 'number';
+      th.className = column.number ? 'number sortable' : 'sortable';
+      th.scope = 'col';
+      th.dataset.sortKey = column.key;
+      const text = document.createElement('span');
+      text.textContent = column.label;
+      const caret = document.createElement('span');
+      caret.className = 'sort-caret';
+      caret.setAttribute('aria-hidden', 'true');
+      th.append(text, caret);
+      const sorted = state.consolidatedSort?.key === column.key;
+      th.setAttribute('aria-sort', sorted ? (state.consolidatedSort.direction === 'asc' ? 'ascending' : 'descending') : 'none');
+      th.setAttribute('aria-label', `${column.label}: sort ${sorted && state.consolidatedSort.direction === 'asc' ? 'descending' : 'ascending'}`);
+      th.tabIndex = 0;
       headRow.append(th);
     });
 
@@ -3413,6 +3927,11 @@
     items.forEach((item) => {
       const row = tbody.insertRow();
       row.className = [item.common ? 'common' : '', excluded ? 'excluded' : '', state.selectedKeys.has(item.key) ? 'selected' : ''].filter(Boolean).join(' ');
+      // The whole row is a selection target, so parts can be picked with a click or the keyboard
+      // instead of only by finding the small checkbox.
+      row.dataset.rowKey = item.key;
+      row.tabIndex = state.focusedRowKey === item.key ? 0 : -1;
+      row.setAttribute('aria-selected', String(state.selectedKeys.has(item.key)));
       const selectCell = row.insertCell();
       selectCell.className = 'select-cell';
       const checkbox = document.createElement('input');
@@ -3453,30 +3972,102 @@
   }
 
   function handleConsolidatedTableClick(event) {
+    const header = event.target.closest('th[data-sort-key]');
+    if (header) {
+      cycleConsolidatedSort(header.dataset.sortKey);
+      return;
+    }
     const checkbox = event.target.closest('input[type="checkbox"]');
-    if (!checkbox) return;
-    if (checkbox.dataset.selectAll) {
+    if (checkbox && checkbox.dataset.selectAll) {
       const keys = state.visibleKeys || [];
       if (checkbox.checked) keys.forEach((key) => state.selectedKeys.add(key));
       else keys.forEach((key) => state.selectedKeys.delete(key));
       state.selectionAnchor = null;
-    } else if (checkbox.dataset.selectKey) {
-      const key = checkbox.dataset.selectKey;
-      const keys = state.visibleKeys || [];
-      if (event.shiftKey && state.selectionAnchor && keys.includes(state.selectionAnchor)) {
-        const [from, to] = [keys.indexOf(state.selectionAnchor), keys.indexOf(key)].sort((a, b) => a - b);
-        keys.slice(from, to + 1).forEach((rangeKey) => (checkbox.checked ? state.selectedKeys.add(rangeKey) : state.selectedKeys.delete(rangeKey)));
-      } else if (checkbox.checked) {
-        state.selectedKeys.add(key);
-      } else {
-        state.selectedKeys.delete(key);
-      }
-      state.selectionAnchor = key;
-    } else {
+      renderConsolidated();
+      renderSelectionBar(dom.consolidatedActions, [...state.selectedKeys], 'consolidated');
       return;
     }
+    const row = event.target.closest('tr[data-row-key]');
+    if (!row) return;
+    const key = row.dataset.rowKey;
+    // A click on the checkbox itself already handled the selection, so only row clicks get here.
+    if (event.target.closest('input[type="checkbox"]')) return;
+    selectConsolidatedRow(key, { range: event.shiftKey, additive: event.ctrlKey || event.metaKey, focus: true });
+  }
+
+  // Clicking a header sorts by it: first click ascending, second descending, third back to the
+  // default common-then-part order.
+  function cycleConsolidatedSort(key) {
+    const current = state.consolidatedSort;
+    if (!current || current.key !== key) state.consolidatedSort = { key, direction: 'asc' };
+    else if (current.direction === 'asc') state.consolidatedSort = { key, direction: 'desc' };
+    else state.consolidatedSort = null;
+    saveUiPreferences();
     renderConsolidated();
     renderSelectionBar(dom.consolidatedActions, [...state.selectedKeys], 'consolidated');
+  }
+
+  function selectConsolidatedRow(key, options = {}) {
+    const keys = state.visibleKeys || [];
+    const alreadySelected = state.selectedKeys.has(key);
+    if (options.range && state.selectionAnchor && keys.includes(state.selectionAnchor)) {
+      const [from, to] = [keys.indexOf(state.selectionAnchor), keys.indexOf(key)].sort((a, b) => a - b);
+      keys.slice(from, to + 1).forEach((rangeKey) => state.selectedKeys.add(rangeKey));
+    } else if (options.additive) {
+      if (alreadySelected) state.selectedKeys.delete(key);
+      else state.selectedKeys.add(key);
+    } else if (alreadySelected) {
+      state.selectedKeys.clear();
+    } else {
+      state.selectedKeys.add(key);
+    }
+    state.selectionAnchor = key;
+    state.focusedRowKey = key;
+    renderConsolidated();
+    renderSelectionBar(dom.consolidatedActions, [...state.selectedKeys], 'consolidated');
+    if (options.focus) dom.consolidatedTable.querySelector(`tr[data-row-key="${CSS.escape(key)}"]`)?.focus();
+  }
+
+  // Keyboard selection inside the table: Space toggles, arrows move, Ctrl+A selects what is visible.
+  function handleConsolidatedTableKeydown(event) {
+    const header = event.target.closest('th[data-sort-key]');
+    if (header && (event.key === 'Enter' || event.key === ' ')) {
+      event.preventDefault();
+      cycleConsolidatedSort(header.dataset.sortKey);
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
+      const keys = state.visibleKeys || [];
+      if (!keys.length) return;
+      event.preventDefault();
+      keys.forEach((key) => state.selectedKeys.add(key));
+      renderConsolidated();
+      renderSelectionBar(dom.consolidatedActions, [...state.selectedKeys], 'consolidated');
+      return;
+    }
+    const row = event.target.closest('tr[data-row-key]');
+    if (!row) return;
+    const key = row.dataset.rowKey;
+    if (event.key === ' ' || event.key === 'Enter') {
+      event.preventDefault();
+      selectConsolidatedRow(key, { additive: true });
+      return;
+    }
+    const keys = state.visibleKeys || [];
+    const index = keys.indexOf(key);
+    let nextIndex = null;
+    if (event.key === 'ArrowDown') nextIndex = Math.min(keys.length - 1, index + 1);
+    if (event.key === 'ArrowUp') nextIndex = Math.max(0, index - 1);
+    if (event.key === 'Home') nextIndex = 0;
+    if (event.key === 'End') nextIndex = keys.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const nextKey = keys[nextIndex];
+    state.focusedRowKey = nextKey;
+    if (event.shiftKey && state.selectionAnchor) selectConsolidatedRow(nextKey, { range: true });
+    else {
+      dom.consolidatedTable.querySelector(`tr[data-row-key="${CSS.escape(nextKey)}"]`)?.focus();
+    }
   }
 
   /* ---------- Item selection & bulk actions ---------- */
@@ -3623,9 +4214,16 @@
       const select = bar.querySelector('.action-group');
       value = select.value;
       if (value === '__new') {
-        const group = addGroup(bar.querySelector('.action-new-group').value);
-        if (!group) return;
-        value = group.id;
+        const groupNameInput = bar.querySelector('.action-new-group');
+        const requested = groupNameInput.value;
+        const existing = state.groups.find((group) => group.name.toLowerCase() === String(requested || '').trim().toLowerCase());
+        if (!existing && state.groups.length >= MAX_GROUPS) {
+          showToast(`Up to ${MAX_GROUPS} sales groups are supported so each keeps a distinct color.`, true);
+          return;
+        }
+        const created = pushAndCaptureNewGroup(requested);
+        if (!created) return;
+        value = created.id;
       }
     } else if (['sales', 'quantity', 'multiplier'].includes(action)) {
       const input = bar.querySelector('.action-input');
@@ -3636,7 +4234,8 @@
         return;
       }
     }
-    applyItemAction(keys, action, value);
+    // One undo step for the whole bulk edit, so Ctrl+Z reverses the selection rather than each part.
+    pushHistory(`${keys.length} part${keys.length === 1 ? '' : 's'} updated`, () => applyItemAction(keys, action, value));
     renderAllSelectionBars();
     const group = action === 'group' ? groupById(value) : null;
     const messages = {
@@ -3676,16 +4275,21 @@
 
   /* ---------- Sales groups ---------- */
 
-  function addGroup(rawName) {
+  // Creates a group without pushing its own history entry, so "assign to a new group" undoes as one action.
+  function pushAndCaptureNewGroup(rawName) {
+    return addGroup(rawName, { silent: true });
+  }
+
+  function addGroup(rawName, options = {}) {
     const name = String(rawName || '').trim().slice(0, 40);
     if (!name) {
-      showToast('Enter a name for the new group.', true);
+      if (!options.silent) showToast('Enter a name for the new group.', true);
       return null;
     }
     const existing = state.groups.find((group) => group.name.toLowerCase() === name.toLowerCase());
     if (existing) return existing;
     if (state.groups.length >= MAX_GROUPS) {
-      showToast(`Up to ${MAX_GROUPS} sales groups are supported so each keeps a distinct color.`, true);
+      if (!options.silent) showToast(`Up to ${MAX_GROUPS} sales groups are supported so each keeps a distinct color.`, true);
       return null;
     }
     const used = new Set(state.groups.map((group) => group.color));
@@ -3702,12 +4306,11 @@
     renderGroups();
     renderAllSelectionBars();
     refreshViews();
+    if (!options.silent) pushHistory(`Group ${name} added`, () => {});
     return group;
   }
 
-  function deleteGroup(id) {
-    const group = groupById(id);
-    if (!group) return;
+  function removeGroupNow(id) {
     state.groups = state.groups.filter((item) => item.id !== id);
     Object.entries(state.items).forEach(([key, item]) => {
       if (item.group !== id) return;
@@ -3719,7 +4322,13 @@
     renderGroups();
     renderAllSelectionBars();
     rebuildConsolidation();
-    showToast(`Group ${group.name} deleted. Its parts are now ungrouped.`);
+  }
+
+  function deleteGroup(id) {
+    const group = groupById(id);
+    if (!group) return;
+    pushHistory(`Group ${group.name} deleted`, () => removeGroupNow(id));
+    showToast(`Group ${group.name} deleted. Its parts are now ungrouped. Ctrl+Z restores it.`);
   }
 
   function handleGroupInput(input) {
@@ -3837,7 +4446,7 @@
   function calculateProfitability() {
     const warehouse = calculateWarehouseModel();
     const nok = warehouse.nokToOutput;
-    const vatRate = state.config.vatRate;
+    const vatRate = salesVatRate();
     const items = state.consolidated;
     const inventoryUnits = warehouse.inventoryUnits;
     const salesUnits = items.reduce((sum, item) => sum + (item.salesPerYear || 0), 0);
@@ -4005,7 +4614,7 @@
     const logistics = model.storage + model.outtake + model.outbound + model.fixed;
     dom.dashboardKpis.replaceChildren(
       kpiTile('Annual net profit', model.complete ? formatWhole(model.net) : 'Incomplete', model.complete ? `${formatWhole(model.monthlyNet)} per month${model.revenue > 0 ? ` · ${formatPercent(model.net / model.revenue)} of revenue` : ''}` : `${formatWhole(model.net)} known-cost result; do not use as final`, { hero: true, status: model.complete ? (model.net >= 0 ? 'good' : 'critical') : 'incomplete' }),
-      kpiTile('Revenue / yr', formatWhole(model.revenue), `${formatWhole(model.revenue * (1 + state.config.vatRate))} incl. VAT`),
+      kpiTile('Revenue / yr', formatWhole(model.revenue), (salesVatRate() > 0 ? `${formatWhole(model.revenue * (1 + salesVatRate()))} incl. VAT` : 'No VAT included')),
       kpiTile('Gross profit / yr', formatWhole(model.gross), model.grossMargin === null ? 'No expected revenue' : `${formatPercent(model.grossMargin)} gross margin`),
       kpiTile('Warehouse & logistics / yr', formatWhole(logistics), `Storage ${formatWhole(model.storage)} · handling ${formatWhole(model.outtake + model.outbound + model.fixed)}`),
       kpiTile('Payback on stock', model.complete ? (model.paybackMonths === null ? 'Not reached' : `${formatNumber(model.paybackMonths, 1)} months`) : 'Incomplete', `${formatWhole(model.investment)} landed stock${model.complete && model.roi !== null ? ` · ${formatPercent(model.roi)} annual return` : ''}`),
@@ -4456,7 +5065,9 @@
 
     setStats(dom.flowCustomerStats, [
       ['Avg. price / unit', model.averageUnitPrice === null ? '—' : `${formatWhole(model.averageUnitPrice)} excl. VAT`],
-      ['incl. VAT', model.averageUnitPrice === null ? '—' : formatWhole(model.averageUnitPrice * (1 + state.config.vatRate))],
+      ...(salesVatRate() > 0
+        ? [['incl. VAT', model.averageUnitPrice === null ? '—' : formatWhole(model.averageUnitPrice * (1 + salesVatRate()))]]
+        : [['VAT', 'Not included']]),
       ['Sales / yr', `${formatNumber(model.salesUnits, 0)} units · ${formatWhole(model.revenue)}`],
       ['Net profit / yr', formatWhole(model.net)],
     ]);
@@ -4476,7 +5087,7 @@
         const th = document.createElement('th');
         th.scope = 'row';
         const kit = kitSettings(sheetName);
-        th.textContent = `${kit.manufacturer || sheetName} · ${originName(kit.originCountry)}`;
+        th.textContent = `${sheetName}${kit.manufacturer ? ` · ${kit.manufacturer}` : ''} · ${originName(kit.originCountry)}`;
         const td = document.createElement('td');
         const wrap = document.createElement('div');
         wrap.className = 'kit-inline';
@@ -4528,6 +5139,56 @@
   // country can serve customers in another.
   function customerConfig() {
     return DESTINATIONS[state.customer.country] || DESTINATIONS['578'];
+  }
+
+  // VAT is off (rate 0) unless the rate is unlocked and set; it only applies to sales countries set to "price".
+  function salesVatRate() {
+    return Core.salesVatRate(state.config.vatRate, state.vat.byCountry, state.customer.country);
+  }
+
+  function vatTreatment(countryId = state.customer.country) {
+    return state.vat.byCountry[countryId] === 'price' ? 'price' : 'none';
+  }
+
+  function renderVatControls() {
+    const unlocked = state.vat.unlocked;
+    document.querySelectorAll('[data-vat-lock]').forEach((button) => {
+      button.setAttribute('aria-pressed', String(unlocked));
+      button.title = unlocked ? 'Lock VAT' : 'Unlock to include VAT';
+      const label = button.querySelector('.lock-label');
+      if (label) label.textContent = unlocked ? 'Unlocked' : 'Locked';
+    });
+    document.querySelectorAll('[data-vat-field]').forEach((input) => { input.readOnly = !unlocked; });
+    if (dom.vatCountries) {
+      const ids = Object.keys(DESTINATIONS);
+      const signature = `${state.language}|${ids.join(',')}`;
+      if (dom.vatCountries.dataset.signature !== signature) {
+        dom.vatCountries.dataset.signature = signature;
+        dom.vatCountries.replaceChildren(...ids.map((id) => {
+          const label = document.createElement('label');
+          label.append(document.createTextNode(originName(id)));
+          const select = document.createElement('select');
+          select.dataset.vatCountry = id;
+          select.setAttribute('aria-label', originName(id));
+          VAT_TREATMENT_KEYS.forEach((key) => select.append(new Option(VAT_LABELS[key], key)));
+          label.append(select);
+          return label;
+        }));
+      }
+      dom.vatCountries.querySelectorAll('select').forEach((select) => {
+        select.value = vatTreatment(select.dataset.vatCountry);
+        select.disabled = !unlocked;
+      });
+    }
+    if (dom.vatState) {
+      dom.vatState.textContent = state.config.vatRate > 0
+        ? `VAT rate ${formatPercent(salesVatRate())} applies to sales into countries set to "VAT on the price after margin".`
+        : 'VAT is off: the project calculates without VAT (0 %). Unlock the rate to include it.';
+    }
+    if (dom.vatRoutes) {
+      const customer = customerConfig();
+      setStats(dom.vatRoutes, guideOrigins().map((origin) => [`${originName(origin)} → ${customer.name}`, VAT_LABELS[vatTreatment()]]));
+    }
   }
 
   function isCrossBorderSale() {
@@ -4824,6 +5485,7 @@
     document.querySelectorAll('[data-flow-mode]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.flowMode === state.flowMode)));
     dom.flowMap.classList.toggle('hidden', state.flowMode !== 'map');
     dom.flowOverview.querySelector('.flow-scroll').classList.toggle('hidden', state.flowMode === 'map');
+    placeFlowBoxes();
     if (state.flowMode === 'map') renderMaps();
   }
 
@@ -4866,19 +5528,6 @@
     if (state.flowMode === 'map' && state.activeView === VIEW.wire) renderMaps();
   }
 
-  // Equirectangular projection with a standard parallel at the view's middle latitude.
-  function createProjection(bounds, width, maxHeight) {
-    let [lonMin, latMin, lonMax, latMax] = bounds;
-    const cos = Math.cos(((latMin + latMax) / 2) * Math.PI / 180);
-    const scale = Math.min(width / ((lonMax - lonMin) * cos), maxHeight / (latMax - latMin));
-    const extra = width / (scale * cos) - (lonMax - lonMin);
-    lonMin -= extra / 2;
-    lonMax += extra / 2;
-    const height = Math.round((latMax - latMin) * scale);
-    const project = ([lon, lat]) => [(lon - lonMin) * cos * scale, (latMax - lat) * scale];
-    return { project, width, height, bounds: [lonMin, latMin, lonMax, latMax] };
-  }
-
   function countryPath(feature, project) {
     return feature.rings.map((ring) => {
       let d = '';
@@ -4906,39 +5555,58 @@
       }).join('');
   }
 
-  // A curved "flight path" between two projected points, bowed towards the top of the map.
-  function arcPath([x1, y1], [x2, y2], bow = 0.22) {
-    const mx = (x1 + x2) / 2;
-    const my = (y1 + y2) / 2;
-    const distance = Math.hypot(x2 - x1, y2 - y1);
-    const cx = mx;
-    const cy = my - distance * bow;
-    const at = (t) => {
-      const u = 1 - t;
-      return [u * u * x1 + 2 * u * t * cx + t * t * x2, u * u * y1 + 2 * u * t * cy + t * t * y2];
-    };
-    const angle = (t) => Math.atan2(2 * (1 - t) * (cy - y1) + 2 * t * (y2 - cy), 2 * (1 - t) * (cx - x1) + 2 * t * (x2 - cx)) * 180 / Math.PI;
-    return { d: `M${x1.toFixed(1)},${y1.toFixed(1)} Q${cx.toFixed(1)},${cy.toFixed(1)} ${x2.toFixed(1)},${y2.toFixed(1)}`, at, angle };
+  // A stretch of a curve as an SVG path, sampled so a box can hide the middle of a wire.
+  function curvePath(curve, from = 0, to = 1, steps = 36) {
+    let d = '';
+    for (let index = 0; index <= steps; index += 1) {
+      const [x, y] = curve.at(from + ((to - from) * index) / steps);
+      d += `${index ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`;
+    }
+    return d;
   }
 
-  function mapArrows(arc, positions, className) {
-    return positions.map((t) => {
-      const [x, y] = arc.at(t);
-      return `<path class="${className}" transform="translate(${x.toFixed(1)} ${y.toFixed(1)}) rotate(${arc.angle(t).toFixed(1)})" d="M-5,-4 L5,0 L-5,4 Z"/>`;
-    }).join('');
+  function mapArrowhead(curve, t, className, style = '') {
+    const [x, y] = curve.at(t);
+    return `<path class="map-arrow ${className}"${style} transform="translate(${x.toFixed(1)} ${y.toFixed(1)}) rotate(${curve.angle(t).toFixed(1)})" d="M-11,-5 L0,0 L-11,5 Z"/>`;
+  }
+
+  // A wire with a wide invisible hit line (hover and click open the info panel) and an arrowhead at its end.
+  function mapWire(curve, { from = 0, to = 1, target = '', label = '', className = '', color = '' } = {}) {
+    const d = curvePath(curve, from, to);
+    const hit = target
+      ? `<path class="map-route-hit" d="${d}" data-map-target="${escapeMarkup(target)}" tabindex="0" role="button" aria-label="${escapeMarkup(label)}"/>`
+      : '';
+    return `${hit}<path class="map-route ${className}"${color ? ` style="stroke:${color}"` : ''} d="${d}"/>${mapArrowhead(curve, to, className, color ? ` style="fill:${color}"` : '')}`;
   }
 
   function mapPoint([x, y], target, label, kind, anchor = 'start') {
-    const dx = anchor === 'start' ? 9 : anchor === 'end' ? -9 : 0;
-    const dy = anchor === 'middle' ? -10 : 4;
-    return `<g class="map-point ${kind}" data-map-target="${target}" tabindex="0" role="button" aria-label="${escapeMarkup(label)}"><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="12" class="map-hit-circle"/><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5.5"/><text x="${(x + dx).toFixed(1)}" y="${(y + dy).toFixed(1)}" text-anchor="${anchor}">${escapeMarkup(label)}</text></g>`;
+    const below = anchor === 'below';
+    const textAnchor = below ? 'middle' : anchor;
+    const dx = textAnchor === 'start' ? 9 : textAnchor === 'end' ? -9 : 0;
+    const dy = below ? 20 : textAnchor === 'middle' ? -10 : 4;
+    return `<g class="map-point ${kind}" data-map-target="${target}" tabindex="0" role="button" aria-label="${escapeMarkup(label)}"><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="12" class="map-hit-circle"/><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5.5"/><text x="${(x + dx).toFixed(1)}" y="${(y + dy).toFixed(1)}" text-anchor="${textAnchor}">${escapeMarkup(label)}</text></g>`;
+  }
+
+  // The editable tables sit in the route row in Route view and on the route itself in Map view.
+  function placeFlowBoxes() {
+    const onMap = state.flowMode === 'map';
+    [[dom.flowBoxShipment, dom.flowLegShipment], [dom.flowBoxWarehouse, dom.flowLegWarehouse], [dom.flowBoxCustomer, dom.flowLegCustomer]]
+      .forEach(([box, leg]) => (onMap ? dom.mapBoxes : leg).append(box));
+    if (!onMap) resetFlowBoxes();
+  }
+
+  function resetFlowBoxes() {
+    [dom.flowBoxShipment, dom.flowBoxWarehouse, dom.flowBoxCustomer].forEach((box) => {
+      box.style.left = '';
+      box.style.top = '';
+      if (state.flowMode !== 'map') box.classList.remove('is-collapsed');
+    });
   }
 
   function renderMaps() {
     if (state.flowMode !== 'map') return;
     ensureMapData();
-    renderWorldMap();
-    renderNorwayMap();
+    renderMapScene();
     renderMapInfo();
   }
 
@@ -4968,45 +5636,10 @@
     return [...routes.values()];
   }
 
-  function renderWorldMap() {
-    const container = dom.mapWorld;
-    if (!state.map.features) {
-      container.innerHTML = `<p class="map-status">${escapeMarkup(state.map.error || 'Loading map outlines…')}</p>`;
-      return;
-    }
-    const destination = destinationConfig();
-    const kitRoutes = enabledKitRoutes();
-    const routeOrigins = kitRoutes.length
-      ? kitRoutes.map(({ origin }) => [origin.lon, origin.lat])
-      : [[state.supplier.lon, state.supplier.lat]];
-    const compareFeature = state.map.compare ? state.map.features.find((feature) => feature.id === state.map.compare) : null;
-    const compare = compareFeature ? compareFeature.centroid || (compareFeature.centroid = featureCentroid(compareFeature)) : null;
-    const points = [...routeOrigins, destination.arrival, ...(compare ? [compare] : [])];
-    const lons = points.map(([lon]) => lon);
-    const lats = points.map(([, lat]) => lat);
-    let bounds = [Math.min(...lons) - 22, Math.max(-50, Math.min(...lats) - 14), Math.max(...lons) + 18, Math.min(80, Math.max(72, Math.max(...lats) + 8))];
-    if (bounds[2] - bounds[0] < 70) {
-      const middle = (bounds[0] + bounds[2]) / 2;
-      bounds = [middle - 35, bounds[1], middle + 35, bounds[3]];
-    }
-    const width = Math.max(300, container.clientWidth || 520);
-    const projection = createProjection(bounds, width, 330);
-    const layerKey = `${width}|${bounds.join(',')}|${kitRoutes.map(({ originCountry }) => originCountry).join(',')}|${state.warehouse.country}|${state.map.compare}`;
-    if (state.map.worldKey !== layerKey) {
-      state.map.worldKey = layerKey;
-      state.map.worldLayer = countryLayer(projection, { supplier: kitRoutes[0]?.originCountry || state.supplier.country, compare: state.map.compare });
-    }
-    const to = projection.project(destination.arrival);
-    const parts = [
-      `<rect class="map-sea" width="${width}" height="${projection.height}"/>`,
-      `<g class="map-countries">${state.map.worldLayer}</g>`,
-    ];
-    if (compare) {
-      const compareArc = arcPath(projection.project(compare), to, 0.16);
-      parts.push(`<path class="map-route-hit" d="${compareArc.d}" data-map-target="compare"/><path class="map-route compare" d="${compareArc.d}"/>${mapArrows(compareArc, [0.5], 'map-arrow compare')}`);
-      parts.push(mapPoint(projection.project(compare), 'compare', originName(state.map.compare), 'compare', 'middle'));
-    }
-    const displayedRoutes = kitRoutes.length ? kitRoutes : [{
+  // The routes the map draws: one per manufacturer and country, or the project supplier before a workbook is open.
+  function mapRoutes() {
+    const routes = enabledKitRoutes();
+    return routes.length ? routes : [{
       key: 'supplier',
       manufacturer: state.supplier.name,
       originCountry: state.supplier.country,
@@ -5015,60 +5648,218 @@
       kits: [],
       color: GROUP_COLORS[0],
     }];
-    displayedRoutes.forEach(({ key, manufacturer, originCountry, origin, color }, index) => {
-      const from = projection.project([origin.lon, origin.lat]);
-      const route = arcPath(from, to, 0.16 + (index % 3) * 0.045);
-      const target = `kit:${key}`;
-      parts.push(`<path class="map-route-hit" d="${route.d}" data-map-target="${escapeMarkup(target)}" tabindex="0" role="button" aria-label="${escapeMarkup(`${manufacturer}: ${originName(originCountry)} to ${destination.name}`)}"/><path class="map-route kit-route" style="stroke:${color}" d="${route.d}"/>${mapArrows(route, [0.32, 0.58, 0.82], 'map-arrow kit-arrow').replaceAll('class="map-arrow kit-arrow"', `class="map-arrow kit-arrow" style="fill:${color}"`)}`);
-      const [labelX, labelY] = route.at(0.5);
-      parts.push(`<text class="map-route-label" style="fill:${color}" x="${labelX.toFixed(1)}" y="${(labelY - 7 - index * 2).toFixed(1)}" text-anchor="middle">${escapeMarkup(manufacturer)}</text>`);
-      parts.push(mapPoint(from, target, manufacturer, 'supplier', from[0] > width * 0.7 ? 'end' : 'start'));
+  }
+
+  // Where each map panel sits inside the stage, in pixels.
+  function mapPanels() {
+    // Layout pixels (offset*, client*) rather than getBoundingClientRect, so CSS transforms and page zoom do not skew the geometry.
+    const measure = (canvas) => {
+      const panel = canvas.parentElement;
+      return { x: panel.offsetLeft + panel.clientLeft, y: panel.offsetTop + panel.clientTop, w: canvas.clientWidth, h: canvas.clientHeight };
+    };
+    return { world: measure(dom.mapWorld), nordic: measure(dom.mapNorway) };
+  }
+
+  const boxSize = (box) => ({ w: box.offsetWidth, h: box.offsetHeight });
+
+  // The map is two panels: the ocean crossing on the left and the destination country enlarged on the right. The
+  // shipment table sits on the ocean arrow and the customer table on the arrow north to the customer; every wire
+  // is drawn up to a table, hidden behind it, and drawn on from its far side.
+  function renderMapScene() {
+    const stage = dom.mapStage;
+    const width = stage.clientWidth;
+    if (!width) return;
+    const stacked = width < MAP_OVERLAY_MIN_WIDTH;
+    const ready = Boolean(state.map.features);
+    const overlay = ready && !stacked;
+    stage.classList.toggle('stacked', stacked);
+    stage.querySelector('.map-panels').style.setProperty('--map-height', `${Math.max(540, Math.min(640, Math.round(width * 0.56)))}px`);
+    dom.mapBoxes.classList.toggle('flow', !overlay);
+    [['warehouse', dom.flowBoxWarehouse], ['customer', dom.flowBoxCustomer]].forEach(([name, box]) => {
+      box.classList.toggle('is-collapsed', !state.map.open[name]);
+      box.querySelector('[data-map-box-toggle]').setAttribute('aria-expanded', String(state.map.open[name]));
     });
-    parts.push(mapPoint(to, 'customs', `${destination.name} customs`, 'customs', 'end'));
-    container.innerHTML = `<svg width="${width}" height="${projection.height}" viewBox="0 0 ${width} ${projection.height}" role="img" aria-label="Supply routes to ${escapeMarkup(destination.name)}">${parts.join('')}</svg>
-      <div class="map-legend">${displayedRoutes.map(({ manufacturer, originCountry, color }) => `<span><i style="background:${color}"></i>${escapeMarkup(`${manufacturer} · ${originName(originCountry)}`)}</span>`).join('')}<span><i class="eu"></i>EU / EEA</span><span><i class="efta"></i>EFTA</span><span><i class="usa"></i>USA</span></div>`;
+    if (!ready) {
+      state.map.worldKey = null;
+      state.map.nordicKey = null;
+      dom.mapWorld.innerHTML = `<p class="map-status">${escapeMarkup(state.map.error || 'Loading map outlines…')}</p>`;
+      dom.mapNorway.innerHTML = '';
+      dom.mapOverlay.innerHTML = '';
+      dom.mapLegend.innerHTML = '';
+      resetFlowBoxes();
+      return;
+    }
+
+    const { world, nordic } = mapPanels();
+    const destination = destinationConfig();
+    const customer = customerConfig();
+    const routes = mapRoutes();
+    const compareFeature = state.map.compare ? state.map.features.find((feature) => feature.id === state.map.compare) : null;
+    const compare = compareFeature ? compareFeature.centroid || (compareFeature.centroid = featureCentroid(compareFeature)) : null;
+
+    const dist = ([x1, y1], [x2, y2]) => Math.hypot(x2 - x1, y2 - y1);
+    const around = (point, stub, extra = 0) => Core.rectAround(point, { w: 2 * stub + extra, h: 2 * stub });
+    // Keeps a full stretch of wire visible on each side of a table; when the panel is too crowded for that, settles for less.
+    const place = (size, anchor, bounds, avoidFor) => {
+      let result = null;
+      for (const stub of [MAP_STUB, 20, 10]) {
+        result = Core.placeBox(size, anchor, { bounds, avoid: avoidFor(stub), step: 8 });
+        if (result.ok) break;
+      }
+      return result;
+    };
+    const centreOf = (rect) => [rect.x + rect.w / 2, rect.y + rect.h / 2];
+    const viaBox = (from, rect, to, bow) => {
+      const centre = centreOf(rect);
+      const into = Core.quadraticBow(from, centre, bow);
+      const out = Core.quadraticBow(centre, to, bow);
+      return { into, out, enter: Core.curveAroundRect(into.at, rect)?.enter ?? 1, exit: Core.curveAroundRect(out.at, rect)?.exit ?? 0 };
+    };
+
+    // ---- Left panel: from the manufacturers to the destination country.
+    const spread = [...routes.map(({ origin }) => [origin.lon, origin.lat]), ...(compare ? [compare] : [])];
+    const lons = spread.map(([lon]) => lon);
+    const lats = spread.map(([, lat]) => lat);
+    let bounds = [
+      Math.min(...lons, destination.bounds[0]) - 16,
+      Math.min(...lats, destination.bounds[1]) - 10,
+      Math.max(...lons, destination.bounds[2]) + 6,
+      Math.max(...lats, destination.bounds[3]) + 4,
+    ];
+    if (bounds[2] - bounds[0] < 60) {
+      const middle = (bounds[0] + bounds[2]) / 2;
+      bounds = [middle - 30, bounds[1], middle + 30, bounds[3]];
+    }
+    let worldView = Core.fitProjection(bounds, world.w, world.h);
+    const overshoot = worldView.bounds[3] - 84;       // no empty polar sea above Greenland
+    if (overshoot > 0) worldView = Core.fitProjection([bounds[0], bounds[1] - overshoot, bounds[2], bounds[3] - overshoot], world.w, world.h);
+    const worldKey = [world.w, world.h, worldView.bounds.map((value) => Math.round(value * 10)).join(','), routes[0].originCountry, state.map.compare || ''].join('|');
+    if (state.map.worldKey !== worldKey) {
+      state.map.worldKey = worldKey;
+      dom.mapWorld.innerHTML = `<svg viewBox="0 0 ${world.w} ${world.h}" role="img" aria-label="Supply routes to ${escapeMarkup(destination.name)}"><rect class="map-sea" width="${world.w}" height="${world.h}"/><g class="map-countries">${countryLayer(worldView, { supplier: routes[0].originCountry, compare: state.map.compare })}</g></svg>`;
+    }
+
+    const arrivalWorld = worldView.project(destination.arrival);
+    const legs = routes.map((route) => ({ route, from: worldView.project([route.origin.lon, route.origin.lat]) }));
+    const lead = legs.reduce((best, leg) => (dist(leg.from, arrivalWorld) > dist(best.from, arrivalWorld) ? leg : best), legs[0]);
+    let shipment = null;
+    if (overlay) {
+      shipment = place(boxSize(dom.flowBoxShipment), Core.quadraticBow(lead.from, arrivalWorld, 0.16).at(0.5), { x: 6, y: 34, w: world.w - 12, h: world.h - 40 }, (stub) => [
+        ...legs.map(({ from }) => around(from, stub, 120)),
+        around(arrivalWorld, stub, 60),
+        ...(compare ? [around(worldView.project(compare), stub, 100)] : []),
+      ]);
+    }
+    const worldParts = [];
+    if (overlay) {
+      const [west, north] = worldView.project([destination.bounds[0], destination.bounds[3]]);
+      const [east, south] = worldView.project([destination.bounds[2], destination.bounds[1]]);
+      worldParts.push(`<rect class="map-zoom-frame" x="${west.toFixed(1)}" y="${north.toFixed(1)}" width="${(east - west).toFixed(1)}" height="${(south - north).toFixed(1)}" rx="3"/>`);
+    }
+    if (compare) {
+      const from = worldView.project(compare);
+      worldParts.push(mapWire(Core.quadraticBow(from, arrivalWorld, 0.16), { target: 'compare', label: 'Comparison line', className: 'compare' }));
+    }
+    const shipmentCentre = shipment ? centreOf(shipment) : null;
+    let trunk = null;
+    legs.forEach(({ route, from }, index) => {
+      const target = `kit:${route.key}`;
+      const label = `${route.manufacturer}: ${originName(route.originCountry)} to ${destination.name}`;
+      const bow = 0.15 + (index % 3) * 0.04;
+      const passes = shipment && (route === lead.route || dist(from, arrivalWorld) > dist(shipmentCentre, arrivalWorld) + 60);
+      if (passes) {
+        const via = viaBox(from, shipment, arrivalWorld, bow);
+        worldParts.push(mapWire(via.into, { to: via.enter, target, label, color: route.color }));
+        if (route === lead.route) trunk = via;
+      } else {
+        worldParts.push(mapWire(Core.quadraticBow(from, arrivalWorld, bow), { target, label, color: route.color }));
+      }
+    });
+    if (trunk) worldParts.push(mapWire(trunk.out, { from: trunk.exit, target: 'route', label: 'Freight & tolls', className: 'trunk' }));
+    if (compare) worldParts.push(mapPoint(worldView.project(compare), 'compare', originName(state.map.compare), 'compare', 'below'));
+    legs.forEach(({ route, from }) => worldParts.push(mapPoint(from, `kit:${route.key}`, route.manufacturer, 'supplier', 'below')));
+    worldParts.push(mapPoint(arrivalWorld, 'customs', `${destination.name} customs`, 'customs', 'below'));
+
+    // ---- Right panel: the destination country, enlarged.
+    const extent = isCrossBorderSale()
+      ? [Math.min(destination.bounds[0], customer.bounds[0]), Math.min(destination.bounds[1], customer.bounds[1]), Math.max(destination.bounds[2], customer.bounds[2]), Math.max(destination.bounds[3], customer.bounds[3])]
+      : destination.bounds;
+    const nordicView = Core.fitProjection(extent, nordic.w, nordic.h);
+    const nordicKey = [nordic.w, nordic.h, state.warehouse.country, state.customer.country].join('|');
+    if (state.map.nordicKey !== nordicKey) {
+      state.map.nordicKey = nordicKey;
+      dom.mapNorway.innerHTML = `<svg viewBox="0 0 ${nordic.w} ${nordic.h}" role="img" aria-label="Map of ${escapeMarkup(destination.name)} with customs, warehouse and delivery routes"><rect class="map-sea" width="${nordic.w}" height="${nordic.h}"/><g class="map-countries">${countryLayer(nordicView)}</g></svg>`;
+    }
+    const cityPoint = ([, lat, lon]) => nordicView.project([lon, lat]);
+    const north = customer.customers.reduce((best, city) => (city[1] > best[1] ? city : best), customer.customers[0]);
+    const customs = nordicView.project(destination.arrival);
+    const warehouse = nordicView.project(destination.warehouse);
+    const end = cityPoint(north);
+    let customerRect = null;
+    let warehouseRect = null;
+    if (overlay) {
+      const nordicBounds = { x: 6, y: 34, w: nordic.w - 12, h: nordic.h - 40 };
+      const endpoints = (stub) => [around(customs, stub, 90), around(warehouse, stub, 110), around(end, stub, 90)];
+      customerRect = place(boxSize(dom.flowBoxCustomer), [(warehouse[0] + end[0]) / 2, (warehouse[1] + end[1]) / 2], nordicBounds, endpoints);
+      const size = boxSize(dom.flowBoxWarehouse);
+      warehouseRect = place(size, [warehouse[0] + 70 + size.w / 2, warehouse[1]], nordicBounds, (stub) => [...endpoints(stub), customerRect]);
+    }
+    const nordicParts = [];
+    customer.customers.forEach((city) => {
+      if (city === north) return;
+      const [x, y] = cityPoint(city);
+      // A city that shares its spot with the customs or warehouse marker is already labelled by that marker.
+      if ([customs, warehouse].some((point) => Math.hypot(point[0] - x, point[1] - y) < 14)) return;
+      nordicParts.push(`<g class="map-city" data-map-target="delivery"><circle class="map-hit-circle" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="10"/><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3"/><text x="${(x - 6).toFixed(1)}" y="${(y + 3.5).toFixed(1)}" text-anchor="end">${escapeMarkup(city[0])}</text></g>`);
+    });
+    const receive = Core.quadraticBow(customs, warehouse, 0.35);
+    nordicParts.push(`<path class="map-route-hit" d="${curvePath(receive)}" data-map-target="warehouse"/><path class="map-route receive" d="${curvePath(receive)}"/>`);
+    if (customerRect) {
+      const via = viaBox(warehouse, customerRect, end, 0.1);
+      nordicParts.push(mapWire(via.into, { to: via.enter, target: 'delivery', label: 'Delivery', className: 'delivery trunk' }));
+      nordicParts.push(mapWire(via.out, { from: via.exit, target: 'delivery', label: 'Delivery', className: 'delivery trunk' }));
+    } else {
+      nordicParts.push(mapWire(Core.quadraticBow(warehouse, end, 0.1), { target: 'delivery', label: 'Delivery', className: 'delivery trunk' }));
+    }
+    if (warehouseRect) {
+      const [x, y] = Core.rayToRect(centreOf(warehouseRect), warehouse, warehouseRect);
+      nordicParts.push(`<path class="map-link" d="M${warehouse[0].toFixed(1)},${warehouse[1].toFixed(1)}L${x.toFixed(1)},${y.toFixed(1)}"/>`);
+    }
+    nordicParts.push(mapPoint(customs, 'customs', 'Customs', 'customs', 'end'));
+    nordicParts.push(mapPoint(warehouse, 'warehouse', state.warehouse.site || 'Warehouse', 'warehouse', 'below'));
+    nordicParts.push(mapPoint(end, 'delivery', north[0], 'customer', end[0] > nordic.w - 100 ? 'end' : 'start'));
+
+    // ---- One overlay carries every wire and point; the dashed wire leads from the ocean panel into the enlargement.
+    let zoom = '';
+    if (overlay) {
+      const from = [world.x + arrivalWorld[0], world.y + arrivalWorld[1]];
+      const to = [nordic.x + customs[0], nordic.y + customs[1]];
+      zoom = mapWire(Core.quadraticBow(from, to, 0.08), { to: 0.93, className: 'zoom' });
+    }
+    const extentHeight = Math.max(world.y + world.h, nordic.y + nordic.h);
+    dom.mapOverlay.setAttribute('width', String(width));
+    dom.mapOverlay.setAttribute('height', String(extentHeight));
+    dom.mapOverlay.setAttribute('viewBox', `0 0 ${width} ${extentHeight}`);
+    dom.mapOverlay.innerHTML = `<g transform="translate(${world.x.toFixed(1)} ${world.y.toFixed(1)})">${worldParts.join('')}</g><g transform="translate(${nordic.x.toFixed(1)} ${nordic.y.toFixed(1)})">${nordicParts.join('')}</g>${zoom}`;
+
+    const put = (box, rect, panel) => {
+      box.style.left = `${Math.round(panel.x + rect.x)}px`;
+      box.style.top = `${Math.round(panel.y + rect.y)}px`;
+    };
+    if (overlay) {
+      put(dom.flowBoxShipment, shipment, world);
+      put(dom.flowBoxCustomer, customerRect, nordic);
+      put(dom.flowBoxWarehouse, warehouseRect, nordic);
+    } else {
+      resetFlowBoxes();
+    }
+    dom.mapLegend.innerHTML = `${routes.map(({ manufacturer, originCountry, color }) => `<span><i style="background:${color}"></i>${escapeMarkup(`${manufacturer} · ${originName(originCountry)}`)}</span>`).join('')}<span><i class="eu"></i>EU / EEA</span><span><i class="efta"></i>EFTA</span><span><i class="usa"></i>USA</span>`;
   }
 
   function featureCentroid(feature) {
     const largest = feature.rings.reduce((best, ring) => (ring.length > best.length ? ring : best), []);
     const sum = largest.reduce(([sx, sy], [lon, lat]) => [sx + lon, sy + lat], [0, 0]);
     return [sum[0] / largest.length, sum[1] / largest.length];
-  }
-
-  function renderNorwayMap() {
-    const container = dom.mapNorway;
-    if (!state.map.features) {
-      container.innerHTML = '';
-      return;
-    }
-    const destination = destinationConfig();
-    const customer = customerConfig();
-    const bounds = isCrossBorderSale()
-      ? [Math.min(destination.bounds[0], customer.bounds[0]), Math.min(destination.bounds[1], customer.bounds[1]), Math.max(destination.bounds[2], customer.bounds[2]), Math.max(destination.bounds[3], customer.bounds[3])]
-      : destination.bounds;
-    const width = Math.max(220, container.clientWidth || 260);
-    const projection = createProjection(bounds, width, 330);
-    const key = `${width}|${state.warehouse.country}|${state.customer.country}`;
-    if (state.map.norwayKey !== key) {
-      state.map.norwayKey = key;
-      state.map.norwayLayer = countryLayer(projection);
-    }
-    const arrival = projection.project(destination.arrival);
-    const warehouse = projection.project(destination.warehouse);
-    const parts = [`<rect class="map-sea" width="${width}" height="${projection.height}"/>`, `<g class="map-countries">${state.map.norwayLayer}</g>`];
-    const inbound = arcPath([4, projection.height - 6], arrival, 0.1);
-    parts.push(`<path class="map-route-hit" d="${inbound.d}" data-map-target="route"/><path class="map-route" d="${inbound.d}"/>${mapArrows(inbound, [0.55], 'map-arrow')}`);
-    customer.customers.forEach(([name, lat, lon]) => {
-      const point = projection.project([lon, lat]);
-      const arc = arcPath(warehouse, point, 0.12);
-      parts.push(`<path class="map-route-hit" d="${arc.d}" data-map-target="delivery"/><path class="map-route delivery" d="${arc.d}"/>${mapArrows(arc, [0.92], 'map-arrow delivery')}`);
-      parts.push(`<g class="map-city"><circle cx="${point[0].toFixed(1)}" cy="${point[1].toFixed(1)}" r="3"/><text x="${(point[0] - 6).toFixed(1)}" y="${(point[1] + 3.5).toFixed(1)}" text-anchor="end">${escapeMarkup(name)}</text></g>`);
-    });
-    const receive = arcPath(arrival, warehouse, 0.35);
-    parts.push(`<path class="map-route-hit" d="${receive.d}" data-map-target="warehouse"/><path class="map-route receive" d="${receive.d}"/>`);
-    parts.push(mapPoint(arrival, 'customs', 'Customs', 'customs', 'start'));
-    parts.push(mapPoint(warehouse, 'warehouse', state.warehouse.site || 'Warehouse', 'warehouse', 'start'));
-    container.innerHTML = `<svg width="${width}" height="${projection.height}" viewBox="0 0 ${width} ${projection.height}" role="img" aria-label="Map of ${escapeMarkup(destination.name)} with customs, warehouse and delivery routes">${parts.join('')}</svg>`;
   }
 
   function renderMapInfo() {
@@ -5207,10 +5998,10 @@
       const country = event.target.closest?.('[data-country-id]');
       return country ? `country:${country.dataset.countryId}` : null;
     };
-    [dom.mapWorld, dom.mapNorway].forEach((container) => {
+    [dom.mapStage].forEach((container) => {
       container.addEventListener('mouseover', (event) => {
         const target = targetOf(event);
-        if (target && target !== state.map.hover) {
+        if (target !== state.map.hover) {
           state.map.hover = target;
           renderMapInfo();
         }
@@ -5236,7 +6027,7 @@
           state.map.compare = id === state.supplier.country ? null : id;
           state.map.pinned = state.map.compare ? 'compare' : 'route';
           state.map.hover = null;
-          renderWorldMap();
+          renderMaps();
         } else {
           state.map.pinned = target;
           state.map.hover = null;
@@ -5264,13 +6055,19 @@
       if (event.target.closest('[data-map-clear-compare]')) {
         state.map.compare = null;
         state.map.pinned = null;
-        renderWorldMap();
-        renderMapInfo();
+        renderMaps();
       }
       if (event.target.closest('[data-map-unpin]')) {
         state.map.pinned = null;
         renderMapInfo();
       }
+    });
+    dom.mapBoxes.addEventListener('click', (event) => {
+      const toggle = event.target.closest('[data-map-box-toggle]');
+      if (!toggle) return;
+      const name = toggle.dataset.mapBoxToggle;
+      state.map.open[name] = !state.map.open[name];
+      renderMaps();
     });
     document.querySelectorAll('[data-flow-mode]').forEach((button) => button.addEventListener('click', () => setFlowMode(button.dataset.flowMode)));
   }
@@ -5283,6 +6080,23 @@
     const number = document.createElement('strong');
     number.textContent = value;
     card.append(title, number);
+    return card;
+  }
+
+  // A summary card that jumps somewhere useful. Rendered as a real <button> so it is reachable by
+  // keyboard and announced as an action rather than as a number.
+  function actionCard(label, value, onActivate, options = {}) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'summary-card is-actionable' + (options.attention ? ' is-attention' : '');
+    const title = document.createElement('span');
+    title.textContent = label;
+    const number = document.createElement('strong');
+    number.textContent = value;
+    card.append(title, number);
+    card.title = options.hint || label;
+    card.setAttribute('aria-label', label + ': ' + value + '. ' + (options.hint || ''));
+    card.addEventListener('click', onActivate);
     return card;
   }
 
@@ -5400,7 +6214,8 @@
       createTab('Dashboard', VIEW.dashboard),
       createTab('Warehouse', VIEW.warehouse),
       createTab('Wire view', VIEW.wire),
-      ...state.workbook.SheetNames.map((sheetName) => createTab(sheetName, sheetName)),
+      // Sheets that PartsList itself generated (Consolidated, Profitability, settings…) are not source sheets.
+      ...state.workbook.SheetNames.filter((sheetName) => !isGeneratedSheet(state.workbook.Sheets[sheetName])).map((sheetName) => createTab(sheetName, sheetName)),
     );
   }
 
@@ -5414,6 +6229,30 @@
     return button;
   }
 
+  // The current view lives in the URL hash (with '#' + name), so views can be bookmarked and linked to,
+  // and the browser Back button steps through them. Sheet names keep their own '#' form.
+  function viewFromHash() {
+    const raw = decodeURIComponent(String(location.hash || '').replace(/^#/, ''));
+    if (!raw) return null;
+    if (Object.values(VIEW).includes(raw)) return raw;
+    return state.workbook && state.workbook.SheetNames.includes(raw) ? raw : null;
+  }
+
+  function syncHash(view) {
+    const next = '#' + encodeURIComponent(view);
+    if (location.hash !== next) {
+      state.suppressHash = true;
+      history.pushState(null, '', next);
+      state.suppressHash = false;
+    }
+  }
+
+  function applyHashView() {
+    const view = viewFromHash();
+    if (!view || view === state.activeView) return;
+    showView(view);
+  }
+
   function showView(view) {
     state.activeView = view;
     const isSheet = !SPECIAL_VIEWS.has(view);
@@ -5425,6 +6264,7 @@
     dom.sheetView.classList.toggle('hidden', !isSheet);
     [...dom.tabs.children].forEach((tab) => tab.classList.toggle('active', tab.dataset.view === view));
     hideChartTooltip();
+    syncHash(view);
     if (isSheet) {
       if (!state.selectedCell || state.selectedCell.sheetName !== view) {
         state.selectedCell = { sheetName: view, row: 0, col: 0 };
@@ -5571,10 +6411,14 @@
     if (!state.selectedCell) return;
     const raw = parseUserInput(dom.formulaInput.value);
     const { sheetName, row, col } = state.selectedCell;
+    const address = XLSX.utils.encode_cell({ r: row, c: col });
+    const previous = captureBlock(sheetName, row, col, [[undefined]]);
     try {
-      setEngineBlock(sheetName, row, col, [[raw]]);
-      afterWorkbookEdit(sheetName);
-      showToast(`Updated ${sheetName}!${XLSX.utils.encode_cell({ r: row, c: col })}.`);
+      pushHistory(`Cell ${sheetName}!${address} updated`, () => {
+        setEngineBlock(sheetName, row, col, [[raw]]);
+        afterWorkbookEdit(sheetName);
+      }, { restore: () => restoreBlock(sheetName, row, col, previous) });
+      showToast(`Updated ${sheetName}!${address}.`);
     } catch (error) {
       showToast(error.message || 'The cell could not be updated.', true);
     }
@@ -5597,10 +6441,13 @@
         }
         block.push(values);
       }
-      setEngineBlock(state.activeView, range.s.r, range.s.c, block);
-      state.selectedCell = { sheetName: state.activeView, row: range.s.r, col: range.s.c };
-      afterWorkbookEdit(state.activeView);
-      showToast(clear ? 'Range cleared.' : `Formula applied to ${formatNumber(cellCount, 0)} cells.`);
+      const previous = captureBlock(state.activeView, range.s.r, range.s.c, block);
+      pushHistory(clear ? `${state.activeView}!${dom.targetRange.value} cleared` : `${state.activeView}!${dom.targetRange.value} filled`, () => {
+        setEngineBlock(state.activeView, range.s.r, range.s.c, block);
+        state.selectedCell = { sheetName: state.activeView, row: range.s.r, col: range.s.c };
+        afterWorkbookEdit(state.activeView);
+      }, { restore: () => restoreBlock(state.activeView, range.s.r, range.s.c, previous) });
+      showToast(clear ? 'Range cleared. Ctrl+Z restores it.' : `Formula applied to ${formatNumber(cellCount, 0)} cells. Ctrl+Z restores them.`);
     } catch (error) {
       showToast(error.message || 'The range could not be updated.', true);
     }
@@ -5637,6 +6484,26 @@
         updateWorksheetCell(sheetName, row, col, value);
       });
     });
+  }
+
+  /* ---------- Worksheet undo helpers ---------- */
+
+  // Reads the current raw values of a block so an edit can be reversed cell by cell.
+  function captureBlock(sheetName, startRow, startCol, block) {
+    const matrix = state.matrices[sheetName] || [];
+    return block.map((values, rowOffset) => values.map((_, colOffset) => {
+      const row = startRow + rowOffset;
+      const col = startCol + colOffset;
+      const value = matrix[row]?.[col];
+      return value === undefined ? null : value;
+    }));
+  }
+
+  // Puts previously captured values back, rendering once at the end rather than per cell.
+  function restoreBlock(sheetName, startRow, startCol, values) {
+    const block = values.map((row) => [...row]);
+    setEngineBlock(sheetName, startRow, startCol, block);
+    afterWorkbookEdit(sheetName);
   }
 
   function updateWorksheetCell(sheetName, row, col, value) {
@@ -5706,13 +6573,15 @@
     }
     try {
       const expression = parseUserInput(expressionText);
-      state.hf.addNamedExpression(name, expression);
-      state.variables.push({ name, expression: expressionText });
-      markProjectDirty();
+      pushHistory(`Variable ${name} added`, () => {
+        state.hf.addNamedExpression(name, expression);
+        state.variables.push({ name, expression: expressionText });
+        markProjectDirty();
+        renderVariables();
+        renderSheetGrid();
+        rebuildConsolidation();
+      });
       dom.variableForm.reset();
-      renderVariables();
-      renderSheetGrid();
-      rebuildConsolidation();
     } catch (error) {
       showToast(error.message || 'The variable could not be added.', true);
     }
@@ -5744,16 +6613,14 @@
   }
 
   function removeVariable(name) {
-    try {
+    pushHistory(`Variable ${name} removed`, () => {
       state.hf.removeNamedExpression(name);
       state.variables = state.variables.filter((variable) => variable.name !== name);
       markProjectDirty();
       renderVariables();
       renderSheetGrid();
       rebuildConsolidation();
-    } catch (error) {
-      showToast(error.message || `Could not remove ${name}.`, true);
-    }
+    });
   }
 
   function rebuildDependencyIndex() {
@@ -6125,7 +6992,7 @@
       ['USD to output currency', output === 'USD' ? 1 : state.rates.USD ?? null],
       ['NOK to output currency', output === 'NOK' ? 1 : state.rates.NOK ?? null],
       ['Exported at', new Date().toISOString()],
-      ['VAT rate', state.config.vatRate],
+      ['VAT rate', salesVatRate()],
       ['Customs duty', state.freight.dutyRate],
       ['Insurance', state.freight.insuranceRate],
       [`Consolidated shipment (${output})`, toOutput(state.freight.consolidatedShipment, state.freight.consolidatedCurrency) ?? 0],
@@ -6158,7 +7025,7 @@
     return sheet;
   }
 
-  const CONSOLIDATED_EXPORT_COLUMNS = ['sources', 'part', 'description', 'quantity', 'amountOut', 'amountUsd', 'match', 'group', 'salesPerYear', 'currency', 'unitPrice', 'fx', 'unitOut', 'discount', 'purchase', 'multiplier', 'sales', 'kitFreight', 'consFreight', 'importCosts', 'freightImport', 'margin', 'freightWithMargin', 'lineTotal', 'vat', 'lineTotalVat', 'landed', 'pricingSource'];
+  const CONSOLIDATED_EXPORT_COLUMNS = ['sources', 'part', 'description', 'altPart', 'quantity', 'amountOut', 'amountUsd', 'match', 'group', 'salesPerYear', 'currency', 'unitPrice', 'fx', 'unitOut', 'discount', 'purchase', 'multiplier', 'sales', 'kitFreight', 'consFreight', 'importCosts', 'freightImport', 'margin', 'freightWithMargin', 'lineTotal', 'vat', 'lineTotalVat', 'landed', 'pricingSource'];
 
   function buildConsolidatedSheet(assumptionsName) {
     const o = state.config.outputCurrency;
@@ -6166,7 +7033,7 @@
     const L = Object.fromEntries(CONSOLIDATED_EXPORT_COLUMNS.map((key, index) => [key, XLSX.utils.encode_col(index)]));
     const lastCol = CONSOLIDATED_EXPORT_COLUMNS.length - 1;
     const headerLabels = {
-      sources: 'Source Sheets', part: 'Part', description: 'Description', quantity: 'Quantity', amountOut: `Amount in ${o}`, amountUsd: 'Amount in USD',
+      sources: 'Source Sheets', part: 'Part', description: 'Description', altPart: 'Alt. Part No.', quantity: 'Quantity', amountOut: `Amount in ${o}`, amountUsd: 'Amount in USD',
       match: 'Match', group: 'Sales Group', salesPerYear: 'Expected Sales / yr', currency: 'Currency', unitPrice: 'Unit Price', fx: `FX to ${o}`,
       unitOut: `Unit in ${o}`, discount: 'Discount', purchase: `Purchase After Discount in ${o}`, multiplier: 'Price Multiplier', sales: `Sales Price in ${o}`,
       kitFreight: `Kit Freight in ${o}`, consFreight: `Consolidated Shipment in ${o}`, importCosts: `Duty, Insurance & Fees in ${o}`, freightImport: `Freight & Import in ${o}`,
@@ -6202,6 +7069,7 @@
       const key = state.freight.allocation === 'quantity' ? 'quantity' : 'purchase';
       return `IF(SUM(${range(key)})=0,0,${L[key]}${r}/SUM(${range(key)}))`;
     };
+    const uniformImports = state.consolidated.every((item) => item.routeTreatment === 'import' && Math.abs(item.dutyRate - state.freight.dutyRate) < 1e-12);
     const commonRows = [];
     const groupRows = [];
 
@@ -6216,6 +7084,7 @@
         sources: item.sources.join(', '),
         part: item.part,
         description: item.description,
+        altPart: item.altParts.join(', '),
         quantity: item.maxQuantity,
         amountOut: formulaCell(`${L.quantity}${r}*${L.unitOut}${r}`, item.convertedTotal),
         amountUsd: formulaCell(`IF(${A}!$B$6="","",${L.amountOut}${r}/${A}!$B$6)`, item.amountUsd),
@@ -6226,13 +7095,18 @@
         unitPrice: item.unitPrice,
         fx: item.fx,
         unitOut: formulaCell(`${L.unitPrice}${r}*${L.fx}${r}`, item.convertedUnit),
-        discount: formulaCell(`${A}!$B$2`, item.discount),
+        // A kit with its own discount (for example a net price list) cannot follow the project-wide cell.
+        discount: Math.abs(item.discount - state.config.discount) < 1e-12 ? formulaCell(`${A}!$B$2`, item.discount) : item.discount,
         purchase: formulaCell(`${L.amountOut}${r}*(1-${L.discount}${r})`, item.discountedTotal),
         multiplier: item.multiplierOverridden ? item.multiplier : formulaCell(`${A}!$B$3`, item.multiplier),
         sales: formulaCell(`${L.purchase}${r}*${L.multiplier}${r}`, item.sellingTotal),
         kitFreight: item.kitFreight,
         consFreight: formulaCell(`${A}!$B$12*${share(r)}`, item.consolidatedFreight),
-        importCosts: formulaCell(`${L.purchase}${r}*${A}!$B$11+(${L.purchase}${r}+${L.kitFreight}${r}+${L.consFreight}${r}+${L.purchase}${r}*${A}!$B$11)*${A}!$B$10+${A}!$B$13*${share(r)}`, item.importCosts),
+        // The shared duty, insurance and clearance cells describe imports at the project-wide duty. Lines with their own
+        // duty or a route without customs (domestic or intra-EU) are written as values instead of a wrong formula.
+        importCosts: uniformImports
+          ? formulaCell(`${L.purchase}${r}*${A}!$B$11+(${L.purchase}${r}+${L.kitFreight}${r}+${L.consFreight}${r}+${L.purchase}${r}*${A}!$B$11)*${A}!$B$10+${A}!$B$13*${share(r)}`, item.importCosts)
+          : item.importCosts,
         freightImport: formulaCell(`${L.kitFreight}${r}+${L.consFreight}${r}+${L.importCosts}${r}`, item.freightAndImport),
         margin: formulaCell(`${A}!$B$4`, item.shippingMargin),
         freightWithMargin: formulaCell(`${L.freightImport}${r}/(1-${L.margin}${r})`, item.freightWithMargin),
@@ -6258,7 +7132,7 @@
     }));
 
     const sheet = XLSX.utils.aoa_to_sheet(rows);
-    const widths = { sources: 28, part: 18, description: 28, quantity: 10, amountOut: 15, amountUsd: 14, match: 10, group: 16, salesPerYear: 12, currency: 9, unitPrice: 12, fx: 12, unitOut: 13, discount: 10, purchase: 18, multiplier: 11, sales: 16, kitFreight: 14, consFreight: 18, importCosts: 18, freightImport: 16, margin: 11, freightWithMargin: 20, lineTotal: 18, vat: 13, lineTotalVat: 18, landed: 16, pricingSource: 22 };
+    const widths = { sources: 28, part: 18, description: 28, altPart: 18, quantity: 10, amountOut: 15, amountUsd: 14, match: 10, group: 16, salesPerYear: 12, currency: 9, unitPrice: 12, fx: 12, unitOut: 13, discount: 10, purchase: 18, multiplier: 11, sales: 16, kitFreight: 14, consFreight: 18, importCosts: 18, freightImport: 16, margin: 11, freightWithMargin: 20, lineTotal: 18, vat: 13, lineTotalVat: 18, landed: 16, pricingSource: 22 };
     sheet['!cols'] = CONSOLIDATED_EXPORT_COLUMNS.map((key) => ({ wch: widths[key] || 14 }));
     sheet['!autofilter'] = { ref: `A3:${XLSX.utils.encode_col(lastCol)}${last}` };
     sheet['!freeze'] = { xSplit: 0, ySplit: 3, topLeftCell: 'A4', activePane: 'bottomLeft', state: 'frozen' };
@@ -6296,7 +7170,7 @@
       [`Outbound freight per unit sold (${o})`, model.perUnit.outboundPerUnit ?? 0, model.manual.outboundPerUnit ? 'Manual' : 'Parcel freight ÷ units sold'],
       ['Customer pays outbound freight', state.sales.customerPaysOutbound, ''],
       [`Receiving & WMS / year (${o})`, model.fixed, 'Fixed warehouse costs'],
-      ['VAT rate', formulaCell(`${A}!$B$9`, state.config.vatRate), ''],
+      ['VAT rate', formulaCell(`${A}!$B$9`, salesVatRate()), ''],
       [],
       ['Summary', 'Value'],
       [`Annual revenue excl. VAT (${o})`, formulaCell(`SUM(${col('J')})`, model.revenue)],
@@ -6401,6 +7275,8 @@
       ['Kit routes', 'Value', 'Source'],
       ['Warehouse country', destinationConfig().name, 'Selected'],
       ['Customer country', customerConfig().name, 'Selected'],
+      ['VAT treatment (customer country)', VAT_LABELS[vatTreatment()], 'Selected'],
+      ['VAT rate (project setting)', state.config.vatRate, 'Selected'],
       ...Object.entries(state.kits).flatMap(([sheetName, kit]) => [
         [`${sheetName} · manufacturer`, kit.manufacturer || sheetName, 'Kit profile'],
         [`${sheetName} · origin country`, originName(kit.originCountry), 'Kit profile'],
@@ -6604,6 +7480,12 @@
     const number = toNumber(value);
     if (number === null) return 0;
     return Math.abs(number) > 1 ? number / 100 : number;
+  }
+
+  function cleanAltPart(value) {
+    const text = String(value ?? '').trim();
+    // "XXX.539" is a placeholder in the price list, not a number.
+    return text === '0' || /^x{2,}/i.test(text) ? '' : text;
   }
 
   function normalizePart(value) {

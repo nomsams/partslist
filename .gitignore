@@ -1,3 +1,15 @@
 # Private, locally supplied warehouse pricing. Export/import through the app.
 warehouse-rates.private.json
 
+# Business documents never go into the repository in readable form. The parts lists are kept only as the
+# encrypted bundle data/bundle.dat (see scripts/encrypt-documents.js).
+*.xlsx
+*.xls
+*.xlsm
+*.xlsb
+*.ods
+*.csv
+*.partslist
+
+# Local tooling
+.claude/

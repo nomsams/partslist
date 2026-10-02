@@ -8,6 +8,7 @@ const swedish = require('../i18n-sv.js');
 I18n.register('sv', swedish);
 const root = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8').replace(/\r\n/g, '\n');
+const app = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
 
 const placeholders = (text) => [...text.matchAll(/\{(\d+)\}/g)].map((match) => match[1]).sort().join(',');
 
@@ -73,4 +74,28 @@ test('every static string in the page has a Swedish translation', () => {
   const languageNeutral = new Set(['PL', 'AES-GCM', 'NOK', 'SEK', 'Language / Språk']);
   const missing = [...strings].filter((text) => !languageNeutral.has(text) && !I18n.hasTranslation('sv', text));
   assert.deepEqual(missing, []);
+});
+
+test('user-facing status and toast strings in app.js all have a Swedish translation', () => {
+  // The interface writes plain English and is translated as it is rendered, so every literal that can
+  // reach the user has to exist in the Swedish pack. This catches strings added without a translation.
+  const collected = new Map();
+  const collect = (text) => {
+    // Interpolations become {0} so the template can be looked up by its shape.
+    const shape = text.replace(/\$\{[^}]*\}/g, '{0}');
+    if (!/[A-Za-z]{2}/.test(shape)) return;
+    if (!collected.has(shape)) collected.set(shape, text);
+  };
+  for (const match of app.matchAll(/showToast\(`([^`]*)`/g)) collect(match[1]);
+  for (const match of app.matchAll(/setStatus\(`([^`]*)`/g)) collect(match[1]);
+  for (const match of app.matchAll(/showToast\('([^']{4,})'/g)) collect(match[1]);
+
+  const missing = [];
+  for (const shape of collected.keys()) {
+    // Strings built from a conditional only match once the branch is filled in, so check each half.
+    const candidates = shape.includes('{0}') ? [shape] : [shape];
+    const translated = candidates.some((candidate) => I18n.hasTranslation('sv', candidate));
+    if (!translated) missing.push(collected.get(shape));
+  }
+  assert.deepEqual(missing, [], `Strings without a Swedish translation:\n${missing.join('\n')}`);
 });

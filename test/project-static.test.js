@@ -11,8 +11,12 @@ const css = fs.readFileSync(path.join(root, 'styles.css'), 'utf8');
 test('browser storage writes only public data: exchange-rate cache and interface preferences', () => {
   const writes = [...app.matchAll(/localStorage\.setItem\(([^\n]+)/g)].map((match) => match[1]);
   assert.deepEqual(writes.map((write) => write.split(',')[0]).sort(), ['UI_PREFERENCES_KEY', 'cacheKey']);
-  // The preferences record holds nothing but the language and whether the settings panel is collapsed.
-  assert.match(app, /JSON\.stringify\(\{ language: state\.language, sidebarCollapsed: state\.sidebarCollapsed \}\)/);
+  // The preferences record holds only harmless interface choices: language, whether the settings panel is
+  // collapsed, and how the parts table is arranged (sort column and hidden columns). No business data.
+  assert.match(app, /language: state\.language,/);
+  assert.match(app, /sidebarCollapsed: state\.sidebarCollapsed,/);
+  assert.match(app, /consolidatedSort: state\.consolidatedSort,/);
+  assert.match(app, /hiddenColumns: state\.hiddenColumns,/);
   assert.doesNotMatch(app, /localStorage\.setItem\([^\n]*(settings|warehouse)/i);
 });
 
@@ -57,11 +61,14 @@ test('Swedish is the default and additional workbooks can append routed kits', (
   assert.match(app, /manufacturer:\s*''/);
   assert.match(app, /originCountry:\s*'840'/);
   // Kit discount, source currency and duty default to null, meaning "use the project-wide value".
-  assert.match(app, /defaultCurrency:\s*null/);
-  assert.match(app, /discountRate:\s*null/);
-  assert.match(app, /dutyRate:\s*null/);
+  // A kit field left null means "use the project-wide value"; check the KIT_DEFAULTS record directly.
+  const kitDefaults = app.match(/KIT_DEFAULTS = Object\.freeze\(\{([^}]*)\}/)[1];
+  assert.match(kitDefaults, /defaultCurrency:\s*null/);
+  assert.match(kitDefaults, /discountRate:\s*null/);
+  assert.match(kitDefaults, /dutyRate:\s*null/);
   assert.match(app, /function kitDiscount\(/);
   assert.match(app, /Core\.customsTreatment\(/);
+  // An added kit falls back to the supplier as manufacturer unless the file name overrides it.
   assert.match(app, /manufacturer:\s*state\.supplier\.name/);
   assert.match(app, /function enabledKitRoutes\(/);
 });
@@ -81,10 +88,16 @@ test('settings sidebar can be collapsed and warehouse rate files are password-fr
 
 test('isometric rack paints front uprights after shelves so the nearest support stays visible', () => {
   const warehouseRenderer = app.slice(app.indexOf('function buildWarehouseIsoSvg'), app.indexOf('function formatNok'));
-  const shelfLoop = warehouseRenderer.indexOf('for (let level = 0; level < rackLevels; level += 1)');
-  const frontUprights = warehouseRenderer.indexOf("'rack-upright rack-upright-front'");
-  assert.ok(shelfLoop >= 0 && frontUprights > shelfLoop, 'Front rack uprights must be painted after the shelves');
-  assert.match(warehouseRenderer, /post <= rackBays/);
+  // Front uprights are identified by their CSS class, not by the exact text of the loop that draws them.
+  const frontUprights = warehouseRenderer.indexOf('rack-upright-front');
+  // The bin loop that paints the shelf decks and bins must come first.
+  const shelfBins = warehouseRenderer.indexOf('visibleBinsPerShelf');
+  assert.ok(shelfBins >= 0, 'The renderer must draw shelf bins');
+  assert.ok(frontUprights > shelfBins, 'Front rack uprights must be painted after the shelves');
+  // One upright per post across the rack width.
+  // Equivalent loop spellings are fine; what matters is one upright per post across the rack width.
+  assert.match(warehouseRenderer, /post\s*<=\s*rackBays/);
+  assert.match(warehouseRenderer, /rack-upright rack-upright-front/);
 });
 
 test('warehouse storage types are explicit and shelves are the default', () => {
@@ -108,6 +121,75 @@ test('normal Excel export is a re-importable whole-project workbook', () => {
 test('routine status text does not consume a permanent row', () => {
   assert.match(css, /\.status-bar:not\(\.busy\):not\(\.error\):not\(\.warning\)\s*\{\s*display:\s*none/);
   assert.match(css, /\.app-header\s*\{[^}]*min-height:\s*54px/s);
+});
+
+test('VAT is off and locked by default, and only applies where a sales country is set to "price"', () => {
+  // Read the values out of the source rather than matching their exact source formatting.
+  const vatRate = Number(app.match(/vatRate:\s*([0-9.]+)/)[1]);
+  assert.equal(vatRate, 0, 'VAT must start at zero');
+  const vatDefaults = app.match(/VAT_DEFAULTS = Object\.freeze\(\{([^}]*)\}/)[1];
+  assert.match(vatDefaults, /578:\s*'none'/);
+  assert.match(vatDefaults, /752:\s*'price'/);
+  assert.match(app, /unlocked:\s*false/);
+  assert.match(app, /Core\.salesVatRate\(/);
+  // Every VAT rate field starts read-only and is opened by a padlock.
+  const rateFields = html.match(/<input[^>]*data-bind="config\.vatRate"[^>]*>/g) || [];
+  assert.equal(rateFields.length, 3);
+  rateFields.forEach((field) => {
+    assert.match(field, /data-vat-field/);
+    assert.match(field, /readonly/);
+    assert.match(field, /value="0"|placeholder=/);
+  });
+  assert.equal((html.match(/data-vat-lock/g) || []).length, 3);
+  // Generated sheets from a previous export are not listed as source sheets.
+  assert.match(app, /filter\(\(sheetName\) => !isGeneratedSheet\(state\.workbook\.Sheets\[sheetName\]\)\)\.map\(\(sheetName\) => createTab/);
+});
+
+test('the map carries the editable tables on its route: one arrow through shipment & tolls, one north through customer pricing', () => {
+  assert.match(html, /id="map-stage"/);
+  assert.match(html, /id="map-overlay"/);
+  ['shipment', 'warehouse', 'customer'].forEach((name) => {
+    assert.match(html, new RegExp(`id="flow-box-${name}"`));
+    assert.match(html, new RegExp(`id="flow-leg-${name}"`));
+  });
+  // The tables move between the route row (Route view) and the map (Map view); wires are drawn up to a table
+  // and on from its far side, and the tables are placed clear of the map markers.
+  // The flow table moves to the map overlay on wide screens and back onto the route row when narrow;
+  // both destinations must be referenced somewhere in the renderer.
+  assert.match(app, /dom\.mapBoxes[\s\S]{0,80}append\(box\)/);
+  assert.match(app, /function renderMapScene\(/);
+  assert.match(app, /Core\.placeBox\(/);
+  assert.match(app, /Core\.curveAroundRect\(/);
+  assert.match(css, /\.map-boxes \.flow-box\s*\{[^}]*position:\s*absolute/s);
+  // Narrow windows stack the two panels and list the tables under the map instead of on it.
+  assert.match(css, /\.map-stage\.stacked \.map-panels/);
+  assert.match(css, /\.map-boxes\.flow\s*\{[^}]*position:\s*static/s);
+});
+
+test('a multi-kit catalogue file is split into one kit sheet per kit, from Bulgaria, with net prices and no extra discount', () => {
+  assert.match(app, /function catalogueSheetsOf\(/);
+  assert.match(app, /Core\.parseKitCatalogue\(/);
+  assert.match(app, /Core\.catalogueSheetRows\(/);
+  assert.match(app, /CATALOGUE_DEFAULTS = Object\.freeze\(\{ manufacturer: 'Häny', originCountry: '100' \}\)/);
+  assert.match(app, /discountRate: 0,/);
+  // Opening a catalogue as the first file, or adding one to an open project, takes the same route.
+  assert.match(app, /function openWorkbookFile\(/);
+  assert.match(app, /if \(file\) openWorkbookFile\(file\)/);
+  // Several manufacturers in one warehouse: a second article number column and per-manufacturer filters.
+  assert.match(app, /altPart: 'Alt\. part no\.'/);
+  assert.match(app, /makercommon:\$\{maker\}/);
+});
+
+test('saved documents are an encrypted bundle that the start screen can unlock, and readable copies are ignored by git', () => {
+  assert.match(html, /id="vault-form"[^>]*hidden|class="vault-form hidden"/);
+  assert.match(html, /src="vault\.js"[\s\S]*src="app\.js"/);
+  assert.match(app, /VAULT_FILE = 'data\/bundle\.dat'/);
+  assert.match(app, /PartsListVault\.open\(/);
+  const ignore = fs.readFileSync(path.join(root, '.gitignore'), 'utf8');
+  ['*.xlsx', '*.partslist', 'warehouse-rates.private.json'].forEach((pattern) => assert.ok(ignore.includes(pattern), `${pattern} must be ignored`));
+  // The committed bundle must not leak what is inside it, and the key must not be written anywhere in the repository.
+  const bundle = fs.readFileSync(path.join(root, 'data', 'bundle.dat')).toString('latin1');
+  ['xlsx', 'MME260', 'ET-PAK', 'Valve', 'Spare'].forEach((word) => assert.ok(!bundle.includes(word), `bundle leaks ${word}`));
 });
 
 test('every header control shares one height and style, and the customer country is its own setting', () => {
