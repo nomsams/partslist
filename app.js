@@ -1593,14 +1593,38 @@
     return control;
   }
 
+  // A small labelled field: the caption sits above the control, so two fields fit side by side in a narrow box.
+  function miniField(label, controls, { wide = false, extra = false, info = false } = {}) {
+    const field = document.createElement('div');
+    field.className = `mini-field${wide ? ' wide' : ''}${extra ? ' maker-extra' : ''}`;
+    const caption = document.createElement('span');
+    caption.className = 'mini-label';
+    caption.textContent = label;
+    const body = document.createElement('div');
+    body.className = 'mini-controls';
+    body.append(...[].concat(controls));
+    field.append(caption, body);
+    if (info) field.dataset.customsInfo = '';
+    return field;
+  }
+
+  function miniLine(label) {
+    const line = document.createElement('div');
+    line.className = 'mini-total';
+    const text = document.createElement('span');
+    text.textContent = label;
+    const value = document.createElement('strong');
+    line.append(text, value);
+    return { line, value };
+  }
+
   function buildKitFreightRow(sheetName) {
-    const row = document.createElement('tr');
-    row.className = 'stack';
-    const th = document.createElement('th');
-    th.scope = 'row';
-    th.textContent = sheetName;
-    th.translate = false;
-    const td = document.createElement('td');
+    const row = document.createElement('div');
+    row.className = 'mini-kit';
+    const name = document.createElement('span');
+    name.className = 'mini-label';
+    name.textContent = sheetName;
+    name.translate = false;
     const wrap = document.createElement('div');
     wrap.className = 'kit-inline';
     const mode = document.createElement('select');
@@ -1619,12 +1643,12 @@
     currency.className = 'kit-currency';
     currency.dataset.kitCurrency = sheetName;
     wrap.append(mode, amount, currency);
-    td.append(wrap);
-    row.append(th, td);
+    row.append(name, wrap);
     return row;
   }
 
-  // The editable "Shipment & tolls" table of one manufacturer's route.
+  // The editable "Shipment & tolls" box of one manufacturer's route. Collapsed it shows the two numbers that matter
+  // most and the total; opened it shows everything, including the freight per kit.
   function buildMakerBox(name) {
     const own = makerHasOwnShipment(name);
     const box = document.createElement('section');
@@ -1635,42 +1659,21 @@
     const heading = document.createElement('h4');
     const title = document.createElement('span');
     title.textContent = 'Shipment & tolls';
-    const toggle = document.createElement('button');
-    toggle.type = 'button';
-    toggle.className = 'box-toggle';
-    toggle.dataset.mapBoxToggle = `ship:${name}`;
-    toggle.setAttribute('aria-expanded', 'false');
-    toggle.setAttribute('aria-label', 'Show or hide the freight per kit');
-    toggle.title = 'Show or hide the freight per kit';
-    heading.append(title, toggle);
+    heading.append(title, buildBoxToggle(`ship:${name}`, 'Show or hide the freight per kit'));
     const who = document.createElement('p');
     who.className = 'maker-box-name';
-    who.textContent = name;
     who.translate = false;
+    who.textContent = name;
 
-    const table = document.createElement('table');
-    table.className = 'flow-table';
-    const head = document.createElement('tbody');
-    head.append(flowRow('Consolidated shipment', makerCell(name, 'shipmentMode', { kind: 'select', caption: 'Consolidated shipment', options: MAKER_SHIPMENT_OPTIONS })));
-    if (own) {
-      head.append(
-        flowRow('Shipment', amountWithCurrency(makerCell(name, 'shipmentAmount', { kind: 'number', caption: 'Shipment', step: '1' }), makerCell(name, 'shipmentCurrency', { kind: 'currency', caption: 'Shipment currency' }))),
-      );
-    } else {
-      head.append(flowRow('Shipment', amountWithCurrency(
+    const grid = document.createElement('div');
+    grid.className = 'mini-grid';
+    const shipment = own
+      ? amountWithCurrency(makerCell(name, 'shipmentAmount', { kind: 'number', caption: 'Shipment', step: '1' }), makerCell(name, 'shipmentCurrency', { kind: 'currency', caption: 'Shipment currency' }))
+      : amountWithCurrency(
         boundControl('freight.consolidatedShipment', { label: 'Consolidated shipment amount' }),
         boundControl('freight.consolidatedCurrency', { kind: 'currency', label: 'Consolidated shipment currency' }),
-      )));
-    }
-    const splitRow = flowRow('Split by', boundControl('freight.allocation', { kind: 'select', label: 'Split consolidated shipment by', options: [['value', 'Value'], ['quantity', 'Quantity'], ['lines', 'Lines']] }));
-    head.append(splitRow);
-    const kits = document.createElement('tbody');
-    kits.className = 'maker-kit-rows';
-    makerKits(name).forEach((sheet) => kits.append(buildKitFreightRow(sheet)));
-    const tail = document.createElement('tbody');
-    const dutyRow = flowRow('Customs duty', makerCell(name, 'dutyRate', { kind: 'number', caption: 'Customs duty', suffix: '%', scale: 100, max: 100, step: '0.1' }));
-    dutyRow.dataset.customsInfo = '';
-    const insuranceRow = flowRow('Insurance', own
+      );
+    const insurance = own
       ? makerCell(name, 'insuranceRate', { kind: 'number', caption: 'Insurance', suffix: '%', scale: 100, max: 100, step: '0.1' })
       : (() => {
         const wrap = document.createElement('span');
@@ -1679,24 +1682,33 @@
         unit.textContent = '%';
         wrap.append(boundControl('freight.insuranceRate', { label: 'Insurance', scale: 100, max: 100, step: '0.1' }), unit);
         return wrap;
-      })());
-    const clearanceRow = flowRow('Clearance & broker', own
+      })();
+    const clearance = own
       ? amountWithCurrency(makerCell(name, 'clearanceAmount', { kind: 'number', caption: 'Clearance and broker fees', step: '1' }), makerCell(name, 'clearanceCurrency', { kind: 'currency', caption: 'Clearance fee currency' }))
-      : amountWithCurrency(boundControl('freight.clearanceFee', { label: 'Clearance and broker fees' }), boundControl('freight.clearanceCurrency', { kind: 'currency', label: 'Clearance fee currency' })));
-    clearanceRow.dataset.customsInfo = '';
-    const vatRow = flowRow('Import VAT (deductible)');
-    vatRow.className = 'derived';
-    vatRow.dataset.customsInfo = '';
-    const vatCell = vatRow.querySelector('td');
-    const totalRow = flowRow('Freight & import total');
-    totalRow.className = 'total';
-    const totalCell = totalRow.querySelector('td');
-    // Rows that are only needed now and then fold away when the table is collapsed.
-    [splitRow, insuranceRow, clearanceRow, vatRow].forEach((row) => row.classList.add('maker-extra'));
-    tail.append(dutyRow, insuranceRow, clearanceRow, vatRow, totalRow);
-    table.append(head, kits, tail);
-    box.append(heading, who, table);
-    return { box, vatCell, totalCell };
+      : amountWithCurrency(boundControl('freight.clearanceFee', { label: 'Clearance and broker fees' }), boundControl('freight.clearanceCurrency', { kind: 'currency', label: 'Clearance fee currency' }));
+    const kits = document.createElement('div');
+    kits.className = 'mini-field wide maker-extra maker-kit-rows';
+    const kitsCaption = document.createElement('span');
+    kitsCaption.className = 'mini-label';
+    kitsCaption.textContent = 'Freight per kit';
+    kits.append(kitsCaption, ...makerKits(name).map(buildKitFreightRow));
+    const vat = miniLine('Import VAT (deductible)');
+    vat.line.classList.add('maker-extra');
+    vat.line.dataset.customsInfo = '';
+    const total = miniLine('Freight & import total');
+    grid.append(
+      miniField('Shipment', shipment),
+      miniField('Customs duty', makerCell(name, 'dutyRate', { kind: 'number', caption: 'Customs duty', suffix: '%', scale: 100, max: 100, step: '0.1' }), { info: true }),
+      miniField('Insurance', insurance, { extra: true }),
+      miniField('Consolidated shipment', makerCell(name, 'shipmentMode', { kind: 'select', caption: 'Consolidated shipment', options: MAKER_SHIPMENT_OPTIONS }), { wide: true, extra: true }),
+      miniField('Split by', boundControl('freight.allocation', { kind: 'select', label: 'Split consolidated shipment by', options: [['value', 'Value'], ['quantity', 'Quantity'], ['lines', 'Lines']] }), { extra: true }),
+      miniField('Clearance & broker', clearance, { wide: true, extra: true, info: true }),
+      kits,
+      vat.line,
+      total.line,
+    );
+    box.append(heading, who, grid);
+    return { box, vatCell: vat.value, totalCell: total.value };
   }
 
   function buildMakerLane(name) {
@@ -1705,7 +1717,7 @@
     lane.dataset.maker = name;
 
     const factory = document.createElement('article');
-    factory.className = 'flow-node factory';
+    factory.className = 'flow-node factory compact';
     const kind = document.createElement('div');
     kind.className = 'flow-kind';
     kind.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21V10l5 3V10l5 3V6l8 4v11z"/></svg>';
@@ -1713,26 +1725,29 @@
     const nameField = makerCell(name, 'name', { kind: 'text', caption: 'Manufacturer name' });
     nameField.classList.add('flow-title-input');
     const place = makerCell(name, 'location', { kind: 'text', caption: 'Manufacturer location' });
-    place.classList.add('flow-sub-input');
-    const country = makerControl(name, 'originCountry', { kind: 'country', country: true, caption: 'Country', className: 'flow-field' });
-    country.dataset.customsInfo = '';
-    const discount = makerControl(name, 'discountRate', { kind: 'number', caption: 'Discount', suffix: '%', scale: 100, max: 100, step: '0.1', className: 'flow-field' });
-    const buffer = makerControl(name, 'fxMargin', { kind: 'number', caption: 'Rate buffer', step: '0.01', className: 'flow-field' });
-    const rate = document.createElement('small');
-    rate.className = 'maker-rate';
-    rate.dataset.makerRate = name;
-    const freightMode = makerControl(name, 'shippingMode', { kind: 'select', caption: 'Freight add-on', options: KIT_MODE_OPTIONS(), className: 'flow-field' });
+    const country = makerCell(name, 'originCountry', { kind: 'country', country: true, caption: 'Country' });
     const freightAmount = makerCell(name, 'shippingAmount', { kind: 'number', caption: 'Freight amount', step: '0.01' });
     const freightUnit = document.createElement('small');
     freightUnit.className = 'maker-unit';
     freightUnit.dataset.makerShow = 'percent';
     freightUnit.textContent = '% of the item value';
-    const freightRow = document.createElement('div');
-    freightRow.className = 'flow-field';
-    freightRow.append(freightAmount, freightUnit);
+    const rate = document.createElement('small');
+    rate.className = 'maker-rate';
+    rate.dataset.makerRate = name;
     const stats = document.createElement('dl');
     stats.className = 'stat-list';
-    factory.append(kind, nameField, place, country, discount, buffer, rate, freightMode, freightRow, stats);
+    const grid = document.createElement('div');
+    grid.className = 'mini-grid';
+    const countryField = miniField('Country', country, { info: true });
+    grid.append(
+      miniField('Location', place),
+      countryField,
+      miniField('Discount', makerCell(name, 'discountRate', { kind: 'number', caption: 'Discount', suffix: '%', scale: 100, max: 100, step: '0.1' })),
+      miniField('Rate buffer', makerCell(name, 'fxMargin', { kind: 'number', caption: 'Rate buffer', step: '0.01' })),
+      miniField('Freight add-on', makerCell(name, 'shippingMode', { kind: 'select', caption: 'Freight add-on', options: KIT_MODE_OPTIONS() })),
+      miniField('Amount', [freightAmount, freightUnit]),
+    );
+    factory.append(kind, nameField, grid, rate, stats);
 
     const leg = document.createElement('div');
     leg.className = 'flow-leg';
@@ -1744,7 +1759,7 @@
     leg.append(arrow);
 
     const border = document.createElement('article');
-    border.className = 'flow-node border';
+    border.className = 'flow-node border compact';
     const borderKind = document.createElement('div');
     borderKind.className = 'flow-kind';
     borderKind.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h2v18H5zM8 4h11l-2 4 2 4H8z"/></svg>';
@@ -1765,6 +1780,26 @@
     lane.append(factory, leg, border);
     const { box, vatCell, totalCell } = buildMakerBox(name);
     return { lane, refs: { box, leg, arrowText, destName, landed, factoryStats: stats, borderStats, vatCell, totalCell } };
+  }
+
+  // "More / Less" button that folds a box's rarely used fields away.
+  function buildBoxToggle(key, label) {
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'box-toggle';
+    toggle.dataset.mapBoxToggle = key;
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-label', label);
+    toggle.title = label;
+    toggle.textContent = 'More';
+    return toggle;
+  }
+
+  function setBoxToggle(box, open) {
+    const toggle = box.querySelector('[data-map-box-toggle]');
+    if (!toggle) return;
+    toggle.setAttribute('aria-expanded', String(Boolean(open)));
+    toggle.textContent = open ? 'Less' : 'More';
   }
 
   function allFlowBoxes() {
@@ -1827,7 +1862,7 @@
       // The per-kit rows and the rarely used fields start folded away; the toggle opens them in either view.
       const open = Boolean(state.map.open[`ship:${name}`]);
       refs.box.classList.toggle('is-collapsed', !open);
-      refs.box.querySelector('[data-map-box-toggle]')?.setAttribute('aria-expanded', String(open));
+      setBoxToggle(refs.box, open);
     });
     syncMakerInputs();
   }
@@ -6312,7 +6347,7 @@
     dom.mapBoxes.classList.toggle('flow', !overlay);
     [...[...state.laneRefs.entries()].map(([maker, refs]) => [`ship:${maker}`, refs.box]), ['warehouse', dom.flowBoxWarehouse], ['customer', dom.flowBoxCustomer]].forEach(([name, box]) => {
       box.classList.toggle('is-collapsed', !state.map.open[name]);
-      box.querySelector('[data-map-box-toggle]')?.setAttribute('aria-expanded', String(Boolean(state.map.open[name])));
+      setBoxToggle(box, state.map.open[name]);
     });
     if (!ready) {
       state.map.worldKey = null;
