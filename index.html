@@ -130,6 +130,17 @@
             <button id="reset-settings" class="button small ghost full" type="button">Reset kit, freight &amp; group settings</button>
           </section>
 
+          <section id="makers-panel" class="panel hidden">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Routes</p>
+                <h2>Manufacturers</h2>
+              </div>
+            </div>
+            <p class="panel-copy">Each manufacturer has its own route: country, currency, discount, exchange-rate buffer, freight and shipment. Change one without affecting the others. Only the warehouse is shared.</p>
+            <div id="maker-list" class="maker-list"></div>
+          </section>
+
           <section id="freight-panel" class="panel">
             <div class="section-heading">
               <div>
@@ -137,10 +148,10 @@
                 <h2>Freight &amp; import</h2>
               </div>
             </div>
-            <p class="panel-copy">Kit freight is set per sheet under Parts sheets. Add one shipment for the whole consolidated order plus the import costs paid in the destination country.</p>
+            <p class="panel-copy">Project-wide defaults for every manufacturer that shares the consolidated shipment. A manufacturer can also ship on its own under Manufacturers.</p>
             <div class="settings-grid two">
               <label class="span-2" data-customs-info>
-                Supplier country
+                Country for new manufacturers
                 <select data-bind="supplier.country" data-origin-select aria-label="Supplier country"></select>
               </label>
               <label class="span-2">
@@ -614,44 +625,9 @@
             <aside id="map-info" class="map-info" aria-live="polite"></aside>
           </div>
           <div class="flow-scroll">
-            <div class="flow-track">
-              <article class="flow-node factory">
-                <div class="flow-kind"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21V10l5 3V10l5 3V6l8 4v11z"/></svg>Manufacturer</div>
-                <input class="flow-title-input" data-bind="supplier.name" maxlength="80" aria-label="Manufacturer name">
-                <input class="flow-sub-input" data-bind="supplier.location" maxlength="80" aria-label="Manufacturer location">
-                <label class="flow-field" data-customs-info>Country <select data-bind="supplier.country" data-origin-select aria-label="Supplier country"></select></label>
-                <label class="flow-field">Discount <span class="input-suffix"><input type="number" min="0" max="100" step="0.1" data-bind="config.discount" data-scale="100"><span>%</span></span></label>
-                <dl id="flow-factory-stats" class="stat-list"></dl>
-              </article>
-
-              <div id="flow-leg-shipment" class="flow-leg">
-                <div class="flow-arrow"><span id="flow-ship-destination">Ship to Norway</span></div>
-                <section id="flow-box-shipment" class="flow-box" aria-label="Shipment and tolls">
-                  <h4><span>Shipment &amp; tolls</span><button class="box-toggle" type="button" data-map-box-toggle="shipment" aria-expanded="false" aria-label="Show or hide the freight per kit" title="Show or hide the freight per kit"></button></h4>
-                  <table class="flow-table">
-                    <tbody>
-                      <tr><th scope="row">Consolidated shipment</th><td><span class="amount-currency compact"><input type="number" min="0" step="1" data-bind="freight.consolidatedShipment" aria-label="Consolidated shipment amount"><select data-bind="freight.consolidatedCurrency" data-currency-select aria-label="Consolidated shipment currency"></select></span></td></tr>
-                      <tr><th scope="row">Split by</th><td><select data-bind="freight.allocation" aria-label="Split consolidated shipment by"><option value="value">Value</option><option value="quantity">Quantity</option><option value="lines">Lines</option></select></td></tr>
-                    </tbody>
-                    <tbody id="flow-kit-rows"></tbody>
-                    <tbody>
-                      <tr data-customs-info><th scope="row">Customs duty <button class="customs-info-button" type="button" data-customs-pin aria-label="Show customs and VAT rules for this origin">i</button></th><td><span class="input-suffix"><input type="number" min="0" max="100" step="0.1" data-bind="freight.dutyRate" data-scale="100" aria-label="Customs duty"><span>%</span></span></td></tr>
-                      <tr><th scope="row">Insurance</th><td><span class="input-suffix"><input type="number" min="0" max="100" step="0.1" data-bind="freight.insuranceRate" data-scale="100" aria-label="Insurance"><span>%</span></span></td></tr>
-                      <tr data-customs-info><th scope="row">Clearance &amp; broker</th><td><span class="amount-currency compact"><input type="number" min="0" step="1" data-bind="freight.clearanceFee" aria-label="Clearance and broker fees"><select data-bind="freight.clearanceCurrency" data-currency-select aria-label="Clearance fee currency"></select></span></td></tr>
-                      <tr class="derived" data-customs-info><th scope="row">Import VAT (deductible)</th><td id="flow-import-vat"></td></tr>
-                      <tr class="total"><th scope="row">Freight &amp; import total</th><td id="flow-inbound-total"></td></tr>
-                    </tbody>
-                  </table>
-                </section>
-              </div>
-
-              <article class="flow-node border">
-                <div class="flow-kind"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h2v18H5zM8 4h11l-2 4 2 4H8z"/></svg><span id="flow-destination-name">Norway</span></div>
-                <strong class="flow-title">Customs &amp; import</strong>
-                <span id="flow-landed-destination" class="flow-sub">Landed in Norway</span>
-                <dl id="flow-norway-stats" class="stat-list"></dl>
-              </article>
-
+            <div class="flow-body">
+            <div id="flow-lanes" class="flow-lanes"></div>
+            <div class="flow-track shared">
               <div id="flow-leg-warehouse" class="flow-leg">
                 <div class="flow-arrow"><span>Receive &amp; store</span></div>
                 <section id="flow-box-warehouse" class="flow-box" aria-label="Warehouse costs">
@@ -720,6 +696,7 @@
                 <dl id="flow-customer-stats" class="stat-list"></dl>
                 <p id="flow-customer-note" class="cross-border-note hidden" role="note"></p>
               </article>
+            </div>
             </div>
           </div>
         </section>

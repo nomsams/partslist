@@ -229,6 +229,8 @@ test('a box is placed on its anchor when clear, and otherwise as near as possibl
   assert.ok(moved.ok);
   assert.ok(!rectsOverlap(moved, blocker));
   assert.ok(Math.hypot(moved.x + 100 - 300, moved.y + 50 - 200) < 130);      // still close to where it was wanted
+  const noLeft = placeBox(size, [300, 200], { bounds, blocked: (rect) => rect.x < 250 });   // a region the box must stay out of
+  assert.ok(noLeft.ok && noLeft.x >= 250);
   const edge = placeBox(size, [590, 390], { bounds });                         // wanted outside the panel: pulled inside
   assert.ok(edge.ok && edge.x + edge.w <= 600 && edge.y + edge.h <= 400);
   const crowded = placeBox(size, [300, 200], { bounds, avoid: [{ x: 0, y: 0, w: 600, h: 400 }] });

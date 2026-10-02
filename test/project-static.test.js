@@ -148,15 +148,19 @@ test('VAT is off and locked by default, and only applies where a sales country i
 test('the map carries the editable tables on its route: one arrow through shipment & tolls, one north through customer pricing', () => {
   assert.match(html, /id="map-stage"/);
   assert.match(html, /id="map-overlay"/);
-  ['shipment', 'warehouse', 'customer'].forEach((name) => {
+  ['warehouse', 'customer'].forEach((name) => {
     assert.match(html, new RegExp(`id="flow-box-${name}"`));
     assert.match(html, new RegExp(`id="flow-leg-${name}"`));
   });
+  // Every manufacturer gets its own lane and its own shipment table; only the warehouse side is shared.
+  assert.match(html, /id="flow-lanes"/);
+  assert.match(app, /function buildMakerLane\(/);
+  assert.match(app, /function buildMakerBox\(/);
   // The tables move between the route row (Route view) and the map (Map view); wires are drawn up to a table
   // and on from its far side, and the tables are placed clear of the map markers.
   // The flow table moves to the map overlay on wide screens and back onto the route row when narrow;
   // both destinations must be referenced somewhere in the renderer.
-  assert.match(app, /dom\.mapBoxes[\s\S]{0,80}append\(box\)/);
+  assert.match(app, /dom\.mapBoxes[\s\S]{0,200}append\(refs\.box\)/);
   assert.match(app, /function renderMapScene\(/);
   assert.match(app, /Core\.placeBox\(/);
   assert.match(app, /Core\.curveAroundRect\(/);
@@ -170,7 +174,7 @@ test('a multi-kit catalogue file is split into one kit sheet per kit, from Bulga
   assert.match(app, /function catalogueSheetsOf\(/);
   assert.match(app, /Core\.parseKitCatalogue\(/);
   assert.match(app, /Core\.catalogueSheetRows\(/);
-  assert.match(app, /CATALOGUE_DEFAULTS = Object\.freeze\(\{ manufacturer: 'Häny', originCountry: '100' \}\)/);
+  assert.match(app, /CATALOGUE_DEFAULTS = Object\.freeze\(\{ manufacturer: 'Häny', originCountry: '100', fxMargin: 0\.4, freightPercent: 3 \}\)/);
   assert.match(app, /discountRate: 0,/);
   // Opening a catalogue as the first file, or adding one to an open project, takes the same route.
   assert.match(app, /function openWorkbookFile\(/);
@@ -190,6 +194,17 @@ test('saved documents are an encrypted bundle that the start screen can unlock, 
   // The committed bundle must not leak what is inside it, and the key must not be written anywhere in the repository.
   const bundle = fs.readFileSync(path.join(root, 'data', 'bundle.dat')).toString('latin1');
   ['xlsx', 'MME260', 'ET-PAK', 'Valve', 'Spare'].forEach((word) => assert.ok(!bundle.includes(word), `bundle leaks ${word}`));
+});
+
+test('every manufacturer is its own route: own settings, exchange-rate buffer, percentage freight and an independent shipment', () => {
+  assert.match(html, /id="makers-panel"/);
+  assert.match(app, /function buildMakerCard\(/);
+  assert.match(app, /MAKER_KIT_FIELDS = new Set\(/);
+  assert.match(app, /function effectiveFx\(/);
+  assert.match(app, /percent: 'Percent of item value'/);
+  // Freight pools: a manufacturer that ships on its own does not share the project shipment.
+  assert.match(app, /makerHasOwnShipment\(item\.manufacturer\)/);
+  assert.doesNotMatch(app, /key: 'amountUsd'/);
 });
 
 test('every header control shares one height and style, and the customer country is its own setting', () => {

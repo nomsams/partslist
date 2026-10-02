@@ -202,11 +202,12 @@
   }
 
   // Finds a spot for a box of the given size as close to `anchor` as possible that stays inside `bounds` and
-  // clear of every rectangle in `avoid`, searching outwards in square rings. ok is false when nothing is clear.
-  function placeBox(size, anchor, { bounds, avoid = [], step = 12, gap = 4 }) {
+  // clear of every rectangle in `avoid` (and of anything `blocked(rect)` rejects, such as land), searching outwards in square rings. ok is false when nothing is clear.
+  function placeBox(size, anchor, { bounds, avoid = [], blocked = null, step = 12, gap = 4 }) {
     const fits = (rect) => rect.x >= bounds.x && rect.y >= bounds.y
       && rect.x + rect.w <= bounds.x + bounds.w && rect.y + rect.h <= bounds.y + bounds.h
-      && !avoid.some((other) => rectsOverlap(rect, other, gap));
+      && !avoid.some((other) => rectsOverlap(rect, other, gap))
+      && !(blocked && blocked(rect));
     const maxRing = Math.ceil(Math.max(bounds.w, bounds.h) / step);
     for (let ring = 0; ring <= maxRing; ring += 1) {
       let best = null;
