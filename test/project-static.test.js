@@ -91,7 +91,13 @@ test('isometric rack paints front uprights after shelves so the nearest support 
   // Front uprights are identified by their CSS class, not by the exact text of the loop that draws them.
   const frontUprights = warehouseRenderer.indexOf('rack-upright-front');
   // The bin loop that paints the shelf decks and bins must come first.
-  const shelfBins = warehouseRenderer.indexOf('visibleBinsPerShelf');
+  const shelfBins = warehouseRenderer.indexOf('locationIndex * binsPerLocation');
+  // The rack is taller than its top bins, so no beam or post is painted across a bin: every level leaves room
+  // for the bins under the next deck and the top beams sit above the top level.
+  assert.match(warehouseRenderer, /rackHeight = 5 \+ rackLevels \* levelHeight/);
+  assert.match(warehouseRenderer, /binHeight = \(levelHeight - deckHeight - 4 - binGap \* \(high - 1\)\) \/ high/);
+  // The numbers in the label are the bins in use and the bins available, not the capacity twice.
+  assert.match(warehouseRenderer, /BINS \$\{Math\.round\(model\.shelfBins\)\} USED OF \$\{model\.totalBins\}/);
   assert.ok(shelfBins >= 0, 'The renderer must draw shelf bins');
   assert.ok(frontUprights > shelfBins, 'Front rack uprights must be painted after the shelves');
   // One upright per post across the rack width.
@@ -231,6 +237,27 @@ test('popularity: sales histories per market, popular-in-both, kit ranking and s
   // Storage: one article per bin and bins stacked high and deep are warehouse settings that the stock plan uses.
   assert.ok(html.includes('id="wh-one-per-bin"') && html.includes('id="wh-bins-high"') && html.includes('id="wh-bins-deep"'));
   assert.ok(app.includes('function planStorageFor(') && app.includes('function storageNeeds('));
+});
+
+test('human-machine interface: readable text, reachable targets, keyboard and screen-reader support, plain-language help', () => {
+  const css = fs.readFileSync(path.join(root, 'styles.css'), 'utf8');
+  // No ordinary text below 12 px: only the compact map boxes and drawings may be smaller.
+  const small = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(([, selector, body]) => /font-size:\s*(?:[0-9]|1[01])(?:\.\d+)?px/.test(body) && !/\.map-|\.mini-|\.flow-|\.wire-|\.viz-|\.pop-bar|\bsvg\b|\.warehouse-preview|\.rack|\.kit-quick|\.kit-chip/.test(selector));
+  assert.deepEqual(small.map(([, selector]) => selector.trim()), []);
+  assert.ok(css.includes(':where(a, button, input, select, textarea, summary, [tabindex]):focus-visible'));
+  assert.match(css, /prefers-reduced-motion: reduce/);
+  assert.match(css, /\.skip-link/);
+  assert.match(html, /class="skip-link"/);
+  assert.match(html, /id="view-tabs"[^>]*role="tablist"/);
+  assert.ok(app.includes("setAttribute('role', 'tab')"));
+  assert.ok(app.includes('function handleTabKeydown('));
+  // Messages stay long enough to read, errors longer, and a click dismisses them.
+  assert.ok(app.includes('function toastDuration(') && app.includes('function bindToast('));
+  // Every column has a one-sentence explanation.
+  assert.ok(app.includes('const COLUMN_HELP = Object.freeze('));
+  assert.ok(app.includes('const TAB_HELP = Object.freeze('));
+  assert.ok(app.includes('needs-save'));
 });
 
 test('every manufacturer is its own route: own settings, exchange-rate buffer, percentage freight and an independent shipment', () => {

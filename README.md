@@ -68,6 +68,10 @@ The suggestion also counts storage. **One article per bin** (Warehouse tab, also
 
 The consolidated list gets a **Popularity** column view and the filters *Sold in every market* and *Never sold*. The history is saved with the project and is never written to browser storage. **Save as .xlsx** on the tab exports the lists, the stock suggestion and the kit ranking.
 
+## Ease of use
+
+The interface follows common human-machine-interface guidance: body text is never smaller than 12 px (only the compact map boxes and drawings are smaller), click targets are at least 24 px, every control has a visible keyboard focus ring, there is a skip link, the tab bar works with the arrow keys, messages stay up long enough to read (longer for errors, paused while the pointer is on them, click to dismiss) and respect reduced motion. Column headings and tabs carry a one-sentence explanation in plain words (hover or focus), the Save button is highlighted while there are unsaved changes, and **Ctrl+S** saves the project. A long list of kits is folded behind **Show all kits**.
+
 ## Saved documents (encrypted)
 
 The project's parts lists and warehouse-rate file are not stored in readable form. `data/bundle.dat` is a single encrypted file (AES-256-GCM, key derived with PBKDF2-SHA-256, 600,000 iterations) with no readable header, file names or spreadsheet signature, so search engines and anyone browsing the repository see only random bytes. When the file is present next to the page, the start screen shows **Saved documents**; typing the key and choosing **Unlock and import** decrypts it in the browser and imports every document, rates included. Nothing is decrypted on a server and the key is never stored.

@@ -308,6 +308,7 @@
     consolidatedSort: null,
     hiddenColumns: [...DEFAULT_HIDDEN_COLUMNS],
     columnPreset: 'simple',
+    kitBarOpen: false,
     // Purchase history per market (see "Sales history & popularity"). Business data: never written to browser storage.
     history: defaultHistory(),
     popularity: { mode: 'parts', search: '', filter: 'all', sort: null, open: new Set() },
@@ -625,6 +626,19 @@
     document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !dom.explainPanel.classList.contains('hidden')) closeExplain(); });
     dom.customerExport.addEventListener('click', exportCustomerPriceList);
     bindPopularity();
+    bindToast();
+    document.addEventListener('click', (event) => {
+      if (!event.target.closest?.('[data-kit-bar-toggle]')) return;
+      state.kitBarOpen = !state.kitBarOpen;
+      renderKitBars();
+    });
+    dom.tabs.addEventListener('keydown', handleTabKeydown);
+    // Ctrl+S saves the project instead of the web page.
+    document.addEventListener('keydown', (event) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 's') return;
+      event.preventDefault();
+      if (!dom.exportButton.disabled) dom.exportButton.click();
+    });
     dom.exampleData.addEventListener('click', loadExampleData);
     dom.makerSetup.addEventListener('click', (event) => { if (event.target.closest('[data-maker-setup-done]')) finishMakerSetup(); });
     dom.makerSetup.addEventListener('cancel', () => { state.setupQueue = []; });
@@ -914,8 +928,8 @@
       const svg = dom.warehousePreview.querySelector('svg');
       const rect = svg?.getBoundingClientRect();
       if (!rect?.width || !rect?.height) return;
-      state.warehousePreviewTransform.x += (event.clientX - drag.x) * (760 / rect.width);
-      state.warehousePreviewTransform.y += (event.clientY - drag.y) * (420 / rect.height);
+      state.warehousePreviewTransform.x += (event.clientX - drag.x) * (((state.previewCenter || [380])[0] * 2) / rect.width);
+      state.warehousePreviewTransform.y += (event.clientY - drag.y) * (340 / rect.height);
       drag.x = event.clientX;
       drag.y = event.clientY;
       applyWarehousePreviewTransform();
@@ -3304,6 +3318,7 @@
     }
     dom.guideToggle.disabled = false;
     dom.saveState.textContent = state.projectDirty ? 'Unsaved changes' : state.projectSaveLabel || 'Workbook loaded';
+    dom.exportButton.classList.toggle('needs-save', Boolean(state.projectDirty));
     dom.saveState.className = `save-state ${state.projectDirty ? 'dirty' : 'saved'}`;
   }
 
@@ -3519,7 +3534,8 @@
     const scene = dom.warehousePreview.querySelector('.warehouse-scene');
     if (!scene) return;
     const { scale, x, y } = state.warehousePreviewTransform;
-    scene.setAttribute('transform', `translate(${x.toFixed(2)} ${y.toFixed(2)}) translate(380 210) scale(${scale.toFixed(3)}) translate(-380 -210)`);
+    const [cx, cy] = state.previewCenter || [380, 210];
+    scene.setAttribute('transform', `translate(${x.toFixed(2)} ${y.toFixed(2)}) translate(${cx} ${cy}) scale(${scale.toFixed(3)}) translate(${-cx} ${-cy})`);
     const readout = dom.warehousePreview.querySelector('.preview-zoom-readout');
     if (readout) readout.textContent = `${Math.round(scale * 100)}%`;
   }
@@ -3675,9 +3691,9 @@
     dom.warehousePreview.innerHTML = buildWarehouseIsoSvg(model);
     dom.warehouseStorageLegend.innerHTML = [
       `<span><i class="shelf"></i>${model.shelfLocations} shelf locations</span>`,
-      `<span><i class="shelf"></i>${model.totalBins} bins across ${model.racks} racks</span>`,
-      `<span><i class="drawer"></i>${model.drawerLocations} drawers</span>`,
-      `<span><i class="pallet"></i>${model.pallets} ${state.warehouse.palletType === 'eu' ? 'EU' : 'sea'} pallets ≤${state.warehouse.palletHeight} cm</span>`,
+      `<span><i class="shelf"></i>${formatNumber(Math.round(model.shelfBins), 0)} of ${formatNumber(model.totalBins, 0)} bins in use, ${model.racks} racks</span>`,
+      ...(model.drawerLocations > 0 ? [`<span><i class="drawer"></i>${model.drawerLocations} drawers</span>`] : []),
+      ...(model.pallets > 0 ? [`<span><i class="pallet"></i>${model.pallets} ${state.warehouse.palletType === 'eu' ? 'EU' : 'sea'} pallets ≤${state.warehouse.palletHeight} cm</span>`] : []),
     ].join('');
     dom.warehouseMonthlyTotal.textContent = formatMoney(model.monthlyTotal, model.outputCurrency);
 
@@ -3721,55 +3737,83 @@
       polygon([[x, y, z + height], [x + width, y, z + height], [x + width, y + depth, z + height], [x, y + depth, z + height]], top, '#375246', opacity);
     };
     const label = (x, y, text, anchor = 'middle') => {
-      elements.push(`<text x="${x}" y="${y}" text-anchor="${anchor}" fill="#294437" font-family="Inter,system-ui,sans-serif" font-size="12" font-weight="700">${text}</text>`);
+      elements.push(`<text x="${x}" y="${y}" text-anchor="${anchor}" fill="#294437" font-family="Inter,system-ui,sans-serif" font-size="14" font-weight="700">${text}</text>`);
     };
 
     polygon([[0, 0, 0], [600, 0, 0], [600, 245, 0], [0, 245, 0]], '#e5ece7', '#bccbc1', 0.72);
     for (let grid = 60; grid < 600; grid += 60) line([grid, 0, 0.2], [grid, 245, 0.2], '#c9d5cd', 0.7);
     for (let grid = 60; grid < 245; grid += 60) line([0, grid, 0.2], [600, grid, 0.2], '#c9d5cd', 0.7);
 
+    // rack-clearance: every level has room for its bins below the next deck, and the top beams sit above the top bins,
+    // so nothing is painted over the bins. Back to front: rear posts, then level by level (deck, rear rows, front rows),
+    // then the front posts and beams, which really are in front of the bins.
     const rackX = 25;
     const rackY = 35;
-    const visibleRacks = Math.min(3, model.racks);
-    const rackBays = visibleRacks;
-    const rackLevels = Math.min(6, Math.max(1, state.warehouse.shelvesPerRack));
-    const visibleBinsPerShelf = Math.min(8, Math.max(1, state.warehouse.binsPerShelf));
+    const rackDepth = 40;
+    const warehouse = state.warehouse;
+    const rackBays = Math.min(3, model.racks);
+    const rackLevels = Math.min(8, Math.max(1, warehouse.shelvesPerRack));
+    const levelHeight = rackLevels > 5 ? Math.floor(170 / rackLevels) : 34;
+    const deckHeight = 4;
+    const across = Math.min(12, Math.max(1, warehouse.binsPerShelf));
+    const high = Math.min(10, Math.max(1, warehouse.binsHigh || 1));
+    const deep = Math.min(10, Math.max(1, warehouse.binsDeep || 1));
+    const binsPerLocation = across * high * deep;
     const visibleShelfLocations = Math.min(model.shelfLocations, rackBays * rackLevels);
     const bayWidth = 70;
-    const levelHeight = 34;
     const rackWidth = rackBays * bayWidth;
-    const rackHeight = 9 + (rackLevels - 1) * levelHeight;
-    let shelfCell = 0;
+    const rackHeight = 5 + rackLevels * levelHeight;
+    const binGap = 1.5;
+    const binWidth = (bayWidth - 10 - binGap * (across - 1)) / across;
+    const binDepth = (rackDepth - 10 - binGap * (deep - 1)) / deep;
+    const binHeight = (levelHeight - deckHeight - 4 - binGap * (high - 1)) / high;
+    // Bins that hold stock are green, the rest of the bins in the picture are pale.
+    const usedBins = Math.round(model.shelfBins || 0);
     if (rackBays > 0) {
-      // Paint the rear uprights first so the shelves can sit in front of them.
       for (let post = 0; post <= rackBays; post += 1) {
-        line([rackX + post * bayWidth, rackY + 40, 0], [rackX + post * bayWidth, rackY + 40, rackHeight], '#3b5f8a', 2.5, 'rack-upright rack-upright-rear');
+        line([rackX + post * bayWidth, rackY + rackDepth, 0], [rackX + post * bayWidth, rackY + rackDepth, rackHeight], '#3b5f8a', 2.5, 'rack-upright rack-upright-rear');
       }
+      line([rackX, rackY + rackDepth, rackHeight], [rackX + rackWidth, rackY + rackDepth, rackHeight], '#3b5f8a', 2.5, 'rack-top-beam rack-top-beam-rear');
       for (let level = 0; level < rackLevels; level += 1) {
         const z = 5 + level * levelHeight;
-        box(rackX, rackY, z, rackWidth, 40, 4, '#d9581f', '#af4319', '#ec7440');
+        box(rackX, rackY, z, rackWidth, rackDepth, deckHeight, '#d9581f', '#af4319', '#ec7440');
         for (let bay = 0; bay < rackBays; bay += 1) {
-          if (shelfCell >= visibleShelfLocations) continue;
-          const binGap = 2;
-          const innerWidth = bayWidth - 10;
-          const binWidth = (innerWidth - binGap * (visibleBinsPerShelf - 1)) / visibleBinsPerShelf;
-          for (let bin = 0; bin < visibleBinsPerShelf; bin += 1) {
-            box(rackX + bay * bayWidth + 5 + bin * (binWidth + binGap), rackY + 5, z + 5, binWidth, 30, Math.min(24, levelHeight - 8), '#7b9b84', '#5d7e68', '#9bb6a2', 0.96);
+          // Racks fill one after the other, level by level from the bottom.
+          if (bay * rackLevels + level >= visibleShelfLocations) continue;
+          const locationIndex = bay * rackLevels + level;
+          for (let row = deep - 1; row >= 0; row -= 1) {
+            for (let bin = 0; bin < across; bin += 1) {
+              for (let tier = 0; tier < high; tier += 1) {
+                // Locations are filled one after the other, front row first, left to right, bottom up.
+                const full = locationIndex * binsPerLocation + (row * across + bin) * high + tier < usedBins;
+                box(
+                  rackX + bay * bayWidth + 5 + bin * (binWidth + binGap),
+                  rackY + 5 + row * (binDepth + binGap),
+                  z + deckHeight + tier * (binHeight + binGap),
+                  binWidth, binDepth, binHeight,
+                  full ? '#7b9b84' : '#e7eee9', full ? '#5d7e68' : '#cbd8cf', full ? '#9bb6a2' : '#f4f8f5',
+                );
+              }
+            }
           }
-          shelfCell += 1;
         }
       }
-      // Front uprights are intentionally painted after the shelf decks and bins.
-      // In the isometric projection the right-most one is closest to the viewer.
       for (let post = 0; post <= rackBays; post += 1) {
         line([rackX + post * bayWidth, rackY, 0], [rackX + post * bayWidth, rackY, rackHeight], '#3b5f8a', 3.5, 'rack-upright rack-upright-front');
       }
       line([rackX, rackY, rackHeight], [rackX + rackWidth, rackY, rackHeight], '#3b5f8a', 3.5, 'rack-top-beam rack-top-beam-front');
-      line([rackX, rackY + 40, rackHeight], [rackX + rackWidth, rackY + 40, rackHeight], '#3b5f8a', 2.5, 'rack-top-beam rack-top-beam-rear');
+      const [labelX, labelTop] = project(rackX, rackY, rackHeight);
+      const titleX = Math.max(8, labelX - 30);
+      const titleY = Math.max(20, labelTop - 38);
+      label(titleX, titleY, `RACKS ${model.racks} · SHELVES ${model.shelfLocations}`, 'start');
+      label(titleX, titleY + 17, `BINS ${Math.round(model.shelfBins)} USED OF ${model.totalBins}`, 'start');
+      if (model.shelfLocations > visibleShelfLocations) {
+        const [hiddenX, hiddenY] = project(rackX + rackWidth / 2, rackY, 0);
+        label(hiddenX, hiddenY + 20, `+${model.shelfLocations - visibleShelfLocations} shelf locations not drawn`);
+      }
     }
-    label(190, 38, `RACKS ${model.racks} · SHELVES ${model.shelfLocations} · BINS ${model.totalBins}`);
 
-    const drawerX = 245;
+    const drawerX = 265;
     const drawerY = 58;
     const visibleDrawers = Math.min(7, model.drawerLocations);
     if (visibleDrawers > 0) {
@@ -3780,13 +3824,13 @@
         line([drawerX + 31, drawerY - 0.6, z + 7], [drawerX + 45, drawerY - 0.6, z + 7], '#587263', 1.6);
       }
     }
-    label(385, 76, `DRAWERS · ${model.drawerLocations}`);
+    if (visibleDrawers > 0) label(project(drawerX + 38, drawerY + 23, visibleDrawers * 18 + 10)[0], project(drawerX + 38, drawerY + 23, visibleDrawers * 18 + 10)[1] - 14, `DRAWERS · ${model.drawerLocations}`);
 
     const visiblePallets = Math.min(6, model.pallets);
     for (let pallet = 0; pallet < visiblePallets; pallet += 1) {
       const col = pallet % 3;
       const row = Math.floor(pallet / 3);
-      const x = 375 + col * 66;
+      const x = 395 + col * 66;
       const y = 75 + row * 82;
       box(x, y, 0, 52, 42, 6, '#a56f22', '#80551a', '#cf9b36');
       for (let slat = 5; slat < 50; slat += 11) box(x + slat, y + 3, 6, 6, 36, 3, '#c58c32', '#8c6022', '#e1ad55');
@@ -3794,16 +3838,17 @@
       box(x + 5, y + 5, 9, 42, 32, height, '#b9a176', '#8e7a57', '#d8c59f', 0.96);
       line([x + 26, y + 4.5, 10], [x + 26, y + 4.5, 9 + height], '#8e7a57', 1);
     }
-    label(570, 126, `PALLETS · ${model.pallets}`);
+    if (visiblePallets > 0) label(project(395 + 66, 75 + 21, 80)[0], project(395 + 66, 75 + 21, 80)[1] - 14, `PALLETS · ${model.pallets}`);
 
-    if (model.shelfLocations > visibleShelfLocations) label(235, 232, `+${model.shelfLocations - visibleShelfLocations} shelf locations`, 'start');
     if (model.drawerLocations > visibleDrawers) label(390, 238, `+${model.drawerLocations - visibleDrawers} drawers`, 'start');
     if (model.pallets > visiblePallets) label(545, 267, `+${model.pallets - visiblePallets} pallets`, 'start');
 
     const aria = `${model.shelfLocations} shelf locations, ${model.drawerLocations} drawers, and ${model.pallets} pallets, with capacity for ${formatNumber(model.capacity, 0)} units.`;
+    const previewViewWidth = visiblePallets > 0 ? 740 : visibleDrawers > 0 ? 560 : 430;
+    state.previewCenter = [previewViewWidth / 2, 170];
     const { scale, x, y } = state.warehousePreviewTransform;
-    const transform = `translate(${x.toFixed(2)} ${y.toFixed(2)}) translate(380 210) scale(${scale.toFixed(3)}) translate(-380 -210)`;
-    return `<div class="warehouse-preview-controls" aria-label="Warehouse preview controls"><button type="button" data-preview-action="out" aria-label="Zoom out">−</button><span class="preview-zoom-readout">${Math.round(scale * 100)}%</span><button type="button" data-preview-action="in" aria-label="Zoom in">+</button><button type="button" class="preview-reset" data-preview-action="reset">Reset</button></div><span class="warehouse-preview-hint">Drag to move · wheel to zoom</span><svg viewBox="0 0 760 420" role="img" aria-label="${aria}"><title>Estimated warehouse storage footprint</title><desc>${aria}</desc><g class="warehouse-scene" transform="${transform}">${elements.join('')}</g></svg>`;
+    const transform = `translate(${x.toFixed(2)} ${y.toFixed(2)}) translate(${state.previewCenter[0]} ${state.previewCenter[1]}) scale(${scale.toFixed(3)}) translate(${-state.previewCenter[0]} ${-state.previewCenter[1]})`;
+    return `<div class="warehouse-preview-controls" aria-label="Warehouse preview controls"><button type="button" data-preview-action="out" aria-label="Zoom out">−</button><span class="preview-zoom-readout">${Math.round(scale * 100)}%</span><button type="button" data-preview-action="in" aria-label="Zoom in">+</button><button type="button" class="preview-reset" data-preview-action="reset">Reset</button></div><span class="warehouse-preview-hint">Drag to move · wheel to zoom</span><svg viewBox="0 0 ${previewViewWidth} 340" role="img" aria-label="${aria}"><title>Estimated warehouse storage footprint</title><desc>${aria}</desc><g class="warehouse-scene" transform="${transform}">${elements.join('')}</g></svg>`;
   }
 
   function formatNok(value) {
@@ -3842,7 +3887,7 @@
       { id: 'output.dashboard', label: 'Profitability dashboard', meta: 'Net profit + payback', detail: 'Revenue, landed cost and warehouse costs', category: 'output', x: 765, y: 495 },
       { id: 'warehouse.inventory', label: 'Warehouse units', meta: 'From maximum quantities', detail: `${formatNumber(warehouse.inventoryUnits, 2)} units`, category: 'warehouse', x: 515, y: 35 },
       { id: 'warehouse.mix', label: 'Storage mix', meta: `${formatNumber(warehouse.shelfShare * 100, 0)}% shelf · ${formatNumber(warehouse.drawerShare * 100, 0)}% drawer`, detail: `${formatNumber(warehouse.palletShare * 100, 0)}% pallet`, category: 'warehouse', x: 515, y: 108 },
-      { id: 'warehouse.bins', label: 'Bin capacity', meta: `${state.warehouse.binsPerShelf} bins × ${formatNumber(state.warehouse.unitsPerBin, 0)} units`, detail: `${state.warehouse.shelvesPerRack} shelf levels per rack`, category: 'warehouse', x: 515, y: 181 },
+      { id: 'warehouse.bins', label: 'Bin capacity', meta: `${binsPerLocation(state.warehouse)} bins × ${formatNumber(state.warehouse.unitsPerBin, 0)} units`, detail: `${state.warehouse.shelvesPerRack} shelf levels per rack`, category: 'warehouse', x: 515, y: 181 },
       { id: 'warehouse.locations', label: 'Storage locations', meta: `${warehouse.shelfLocations} shelf · ${warehouse.drawerLocations} drawer`, detail: `${warehouse.pallets} pallets · ${warehouse.racks} racks`, category: 'warehouse', x: 515, y: 254 },
       { id: 'warehouse.operations', label: 'Handling + freight', meta: `${formatNumber(state.warehouse.orders, 0)} orders / month`, detail: 'Receipts, lines, EDI and parcels', category: 'warehouse', x: 515, y: 327 },
       { id: 'warehouse.total', label: 'Warehouse total', meta: `${formatMoney(warehouse.monthlyTotal, warehouse.outputCurrency)} / month`, detail: `${formatMoney(warehouse.annualTotal, warehouse.outputCurrency)} / year`, category: 'warehouse', x: 515, y: 400 },
@@ -3943,7 +3988,7 @@
       { id: 'warehouse.ratesNok', label: 'Quoted rates NOK', meta: 'Private workbook data', detail: 'Pallet, shelf, handling and freight rates', category: 'warehouse', x: 755, y: 180 },
       { id: 'warehouse.nokSek', label: 'NOK → SEK', meta: warehouse.nokToOutput === null ? 'Rate unavailable' : formatNumber(warehouse.nokToOutput, 6), detail: 'Live reference conversion for warehouse costs', category: 'assumption', x: 755, y: 258 },
       { id: 'warehouse.storageMix', label: 'Storage mix', meta: `${formatNumber(warehouse.shelfShare * 100, 0)} / ${formatNumber(warehouse.drawerShare * 100, 0)} / ${formatNumber(warehouse.palletShare * 100, 0)}%`, detail: 'Shelf, drawer and pallet allocation', category: 'warehouse', x: 755, y: 336 },
-      { id: 'warehouse.binCapacity', label: 'Bin + rack capacity', meta: `${state.warehouse.binsPerShelf} bins · ${state.warehouse.shelvesPerRack} levels`, detail: `${formatNumber(state.warehouse.unitsPerBin, 0)} units per bin`, category: 'warehouse', x: 755, y: 414 },
+      { id: 'warehouse.binCapacity', label: 'Bin + rack capacity', meta: `${binsPerLocation(state.warehouse)} bins · ${state.warehouse.shelvesPerRack} levels`, detail: `${formatNumber(state.warehouse.unitsPerBin, 0)} units per bin`, category: 'warehouse', x: 755, y: 414 },
       { id: 'warehouse.locations', label: 'Storage locations', meta: `${warehouse.shelfLocations} shelf · ${warehouse.drawerLocations} drawer`, detail: `${warehouse.pallets} pallets across ${warehouse.racks} racks`, category: 'warehouse', x: 755, y: 492 },
       { id: 'warehouse.activity', label: 'Monthly activity', meta: `${formatNumber(state.warehouse.orders, 0)} orders`, detail: 'Receipts, item lines, EDI and parcels', category: 'warehouse', x: 755, y: 570 },
       { id: 'warehouse.totalNok', label: 'Warehouse total NOK', meta: formatNok(warehouse.monthlyNok), detail: 'Monthly quoted and entered costs', category: 'warehouse', x: 755, y: 648 },
@@ -5501,7 +5546,16 @@
         empty.textContent = 'No kit sheets detected.';
         chips.push(empty);
       }
-      bar.replaceChildren(label, ...quick, ...chips);
+      // Many kits would fill the screen: show the first rows and let the user open the rest.
+      const crowded = chips.length > 8;
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'kit-quick kit-bar-toggle';
+      toggle.dataset.kitBarToggle = 'true';
+      toggle.setAttribute('aria-expanded', String(state.kitBarOpen));
+      toggle.textContent = state.kitBarOpen ? 'Show fewer kits' : 'Show all kits';
+      bar.classList.toggle('kit-bar-collapsed', crowded && !state.kitBarOpen);
+      bar.replaceChildren(label, ...quick, ...(crowded ? [toggle] : []), ...chips);
     });
     renderKitBreakdown();
   }
@@ -5577,6 +5631,47 @@
     ];
   }
 
+  // One plain sentence per column, shown when the pointer rests on the heading and in the Columns menu.
+  const COLUMN_HELP = Object.freeze({
+    sources: 'The kit sheets that contain this part.',
+    part: 'The article number from the parts list.',
+    description: 'What the part is called.',
+    altPart: 'A second article number for the same part, for example the supplier\'s own number.',
+    quantity: 'How many pieces you keep in stock: the highest number found in the kits, unless you changed it.',
+    convertedTotal: 'The list price for all the pieces, converted to your currency.',
+    manufacturer: 'Who makes or supplies the part.',
+    originCountry: 'The country the part is shipped from.',
+    match: 'Common means the part is in more than one kit; unique means it is in one kit only.',
+    salesGroup: 'A group of parts that share the same sales assumptions.',
+    salesPerYear: 'How many pieces you expect to sell in a year.',
+    currency: 'The currency the supplier uses.',
+    unitPrice: 'The supplier\'s price for one piece, in the supplier\'s currency.',
+    fx: 'The exchange rate used to change the supplier\'s currency into yours, including the safety buffer.',
+    convertedUnit: 'The price of one piece in your currency, before any discount.',
+    discount: 'The discount you get from the supplier.',
+    discountedTotal: 'What you pay the supplier for all the pieces, after the discount.',
+    multiplier: 'The number the purchase price is multiplied by to get the sales price.',
+    sellingTotal: 'The sales price for all the pieces, before freight.',
+    kitFreight: 'Freight that the supplier charges for the kit, shared over its parts.',
+    consolidatedFreight: 'This part\'s share of the shipment that carries all the kits together.',
+    importCosts: 'Customs duty, insurance and clearance fees for this part.',
+    shippingMargin: 'An extra percentage added on top of freight and import costs.',
+    freightWithMargin: 'Freight and import costs including that extra percentage.',
+    unitSalesPrice: 'What the customer pays for one piece, before VAT.',
+    lineTotal: 'What the customer pays for all the pieces on this line, before VAT.',
+    vat: 'Value added tax on this line.',
+    lineTotalInclVat: 'What the customer pays for this line, including VAT.',
+    landedCost: 'What the part costs you delivered to your warehouse: purchase price plus freight, duty and fees.',
+    pricingSource: 'Where in the source sheet the price was read from.',
+    popRank: 'Position in the sales history: #1 is the best seller.',
+    soldTotal: 'Pieces sold in all markets together, according to the sales history.',
+  });
+
+  function columnHelp(key) {
+    if (key.startsWith('sold:')) return 'Pieces sold in this market, according to the sales history.';
+    return COLUMN_HELP[key] || '';
+  }
+
   // Columns that show how many pieces each market has bought; only present once a sales history is loaded.
   function historyColumns() {
     const markets = state.history.markets;
@@ -5620,6 +5715,7 @@
       const text = document.createElement('span');
       text.textContent = column.label;
       label.append(box, text);
+      if (columnHelp(column.key)) label.title = columnHelp(column.key);
       if (!box.checked) label.classList.add('is-hidden-column');
       return label;
     }));
@@ -5746,6 +5842,7 @@
       th.className = column.number ? 'number sortable' : 'sortable';
       th.scope = 'col';
       th.dataset.sortKey = column.key;
+      if (columnHelp(column.key)) th.title = columnHelp(column.key);
       const text = document.createElement('span');
       text.textContent = column.label;
       const caret = document.createElement('span');
@@ -8073,14 +8170,41 @@
     );
   }
 
+  // What each main tab is for, in plain words.
+  const TAB_HELP = Object.freeze({
+    [VIEW.consolidated]: 'Every part from all the kits in one list, with prices.',
+    [VIEW.popularity]: 'How well each part and kit sells, and how much to keep in stock.',
+    [VIEW.dashboard]: 'Profit, costs and how long it takes to earn the money back.',
+    [VIEW.warehouse]: 'What it costs to store the parts, and how many shelves and bins you need.',
+    [VIEW.wire]: 'See how every number is connected, and the route of the goods on the map.',
+  });
+
   function createTab(label, view) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = `view-tab${state.activeView === view ? ' active' : ''}${SPECIAL_VIEWS.has(view) ? ' app-tab' : ''}`;
     button.dataset.view = view;
     button.textContent = label;
+    button.setAttribute('role', 'tab');
+    if (TAB_HELP[view]) button.title = TAB_HELP[view];
+    button.setAttribute('aria-selected', String(state.activeView === view));
+    button.tabIndex = state.activeView === view ? 0 : -1;
     button.addEventListener('click', () => showView(view));
     return button;
+  }
+
+  // Arrow keys, Home and End move between the tabs, like in any tab bar; Tab leaves the bar.
+  function handleTabKeydown(event) {
+    const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End'];
+    if (!keys.includes(event.key)) return;
+    const tabs = [...dom.tabs.querySelectorAll('[role="tab"]')];
+    const current = tabs.indexOf(document.activeElement);
+    if (current < 0) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    tabs[next].focus();
+    showView(tabs[next].dataset.view);
+    tabs[next].focus();
   }
 
   // The current view lives in the URL hash (with '#' + name), so views can be bookmarked and linked to,
@@ -8117,7 +8241,12 @@
     dom.warehouseView.classList.toggle('hidden', view !== VIEW.warehouse);
     dom.wireView.classList.toggle('hidden', view !== VIEW.wire);
     dom.sheetView.classList.toggle('hidden', !isSheet);
-    [...dom.tabs.children].forEach((tab) => tab.classList.toggle('active', tab.dataset.view === view));
+    [...dom.tabs.children].forEach((tab) => {
+      const active = tab.dataset.view === view;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', String(active));
+      tab.tabIndex = active ? 0 : -1;
+    });
     hideChartTooltip();
     syncHash(view);
     if (isSheet) {
@@ -9425,12 +9554,32 @@
   }
 
   let toastTimer;
-  function showToast(message, error = false) {
+  let toastHold = 0;
+  // About 60 ms per character (at least 4 s), twice as long for errors, because a message is only useful if it can be read.
+  function toastDuration(message, error) {
+    return clamp((3000 + String(message).length * 60) * (error ? 2 : 1), 4000, 20000);
+  }
+
+  function startToastTimer(duration) {
     clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => dom.toast.classList.remove('show'), duration);
+  }
+
+  function showToast(message, error = false) {
     dom.toast.textContent = message;
     dom.toast.classList.toggle('error', error);
+    // Errors interrupt a screen reader; ordinary confirmations wait their turn.
+    dom.toast.setAttribute('role', error ? 'alert' : 'status');
+    dom.toast.setAttribute('aria-live', error ? 'assertive' : 'polite');
     dom.toast.classList.add('show');
-    toastTimer = setTimeout(() => dom.toast.classList.remove('show'), 3200);
+    toastHold = toastDuration(message, error);
+    startToastTimer(toastHold);
+  }
+
+  function bindToast() {
+    dom.toast.addEventListener('mouseenter', () => clearTimeout(toastTimer));
+    dom.toast.addEventListener('mouseleave', () => { if (dom.toast.classList.contains('show')) startToastTimer(2500); });
+    dom.toast.addEventListener('click', () => { clearTimeout(toastTimer); dom.toast.classList.remove('show'); });
   }
 
   function enabledSheetCount() {

@@ -20,6 +20,7 @@
   <script src="i18n-sv.js"></script>
 </head>
 <body>
+  <a class="skip-link" href="#view-tabs">Skip to the main content</a>
   <header class="app-header">
     <div class="header-left">
       <button id="sidebar-toggle" class="button header-button icon-only" type="button" aria-expanded="true" aria-controls="app-sidebar" aria-label="Hide settings" title="Hide settings">
@@ -256,7 +257,7 @@
     </aside>
 
     <section class="main-panel">
-      <nav id="view-tabs" class="view-tabs hidden" aria-label="Workbook views"></nav>
+      <nav id="view-tabs" class="view-tabs hidden" role="tablist" aria-label="Workbook views"></nav>
 
       <section id="setup-guide" class="setup-guide hidden" aria-labelledby="setup-guide-title">
         <header class="setup-guide-head">
@@ -836,7 +837,7 @@
 
   <div id="chart-tooltip" class="chart-tooltip" role="tooltip" hidden></div>
   <div id="customs-popover" class="customs-popover" role="dialog" aria-label="Customs and VAT rules" hidden></div>
-  <div id="toast" class="toast" role="alert" aria-live="assertive"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" title="Click to dismiss"></div>
   <script src="vault.js"></script>
   <script src="app.js"></script>
 </body>
