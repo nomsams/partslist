@@ -392,6 +392,7 @@
             </label>
             <label>Budget for the stock (optional) <input id="stock-budget" type="number" min="0" step="1000" inputmode="numeric" placeholder="No limit"></label>
             <label class="pop-check"><input id="stock-complete" type="checkbox"> Keep popular kits complete</label>
+            <label class="pop-check" title="Off: several articles can share a bin. On: every article gets its own bin or bins. Set in the Warehouse tab too."><input id="stock-one-per-bin" type="checkbox" data-bind="warehouse.onePerBin"> One article per bin</label>
             <button id="stock-apply" class="button small primary" type="button">Use these quantities in the project</button>
           </div>
           <p id="popularity-stock-summary" class="pop-stock-summary hidden" aria-live="polite"></p>
@@ -556,6 +557,9 @@
                 <label>Bins per shelf <input id="wh-bins-per-shelf" type="number" min="1" max="12" step="1" value="4"></label>
                 <label>Shelf levels per rack <input id="wh-shelves-per-rack" type="number" min="1" max="8" step="1" value="4"></label>
                 <label>Units per bin <input id="wh-units-per-bin" type="number" min="1" step="1" value="5"></label>
+                <label class="bin-rule"><span class="field-caption"><input id="wh-one-per-bin" type="checkbox" data-bind="warehouse.onePerBin"> One article per bin <span class="info-tip" tabindex="0" role="img" aria-label="Information: Off: several articles can share a bin. On: every article gets its own bin or bins, so a part-filled bin is not shared with another article." data-tip="Off: several articles can share a bin. On: every article gets its own bin or bins, so a part-filled bin is not shared with another article.">i</span></span></label>
+                <label>Bins stacked high (advanced) <input id="wh-bins-high" type="number" min="1" max="10" step="1" value="1"></label>
+                <label>Bins deep (advanced) <input id="wh-bins-deep" type="number" min="1" max="10" step="1" value="1"></label>
                 <label>Units per shelf <input id="wh-units-shelf" type="number" value="20" readonly></label>
                 <label>Units per drawer <input id="wh-units-drawer" type="number" min="1" step="1" value="8"></label>
                 <label>Units per pallet <input id="wh-units-pallet" type="number" min="1" step="1" value="60"></label>

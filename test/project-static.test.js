@@ -228,6 +228,9 @@ test('popularity: sales histories per market, popular-in-both, kit ranking and s
   assert.match(app, /history: \{\s*years: state\.history\.years/);
   // Histories chosen through the normal import buttons are recognised, and the saved documents may hold them.
   assert.ok(app.includes('splitHistoryFiles('));
+  // Storage: one article per bin and bins stacked high and deep are warehouse settings that the stock plan uses.
+  assert.ok(html.includes('id="wh-one-per-bin"') && html.includes('id="wh-bins-high"') && html.includes('id="wh-bins-deep"'));
+  assert.ok(app.includes('function planStorageFor(') && app.includes('function storageNeeds('));
 });
 
 test('every manufacturer is its own route: own settings, exchange-rate buffer, percentage freight and an independent shipment', () => {

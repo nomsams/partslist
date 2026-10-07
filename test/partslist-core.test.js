@@ -5,6 +5,8 @@ const {
   buildPopularity,
   parseSalesHistory,
   suggestStock,
+  binsForUnits,
+  planWarehouseStorage: planStorage,
   allocationShares,
   EU_MEMBERS,
   catalogueSheetName,
@@ -409,4 +411,27 @@ test('suggested stock covers the demand of the cover period with a safety margin
   assert.ok(tight.lines.find((line) => line.key === 'a').target < 62);
   // A budget that cannot be met even with nothing stocked is reported.
   assert.equal(suggestStock({ rows, kits, years: 5, budget: 0.5, unitCost: () => 10 }).value, 0);
+});
+
+test('one article per bin needs whole bins per article, several per bin only the pooled space', () => {
+  const units = [3, 3, 3, 12];                 // four articles, 21 pieces, 5 pieces fit in a bin
+  assert.equal(binsForUnits(12, 5, true), 3);
+  assert.equal(binsForUnits(12, 5, false), 2.4);
+  assert.equal(binsForUnits(0, 5, true), 0);
+  const base = { inventoryUnits: 21, itemUnits: units, unitsPerBin: 5, unitsPerShelf: 20, binsPerLocation: 4 };
+  const shared = planStorage({ ...base, onePerBin: false });
+  assert.equal(shared.shelfLocations, 2);       // 21 pieces / 20 per shelf location
+  assert.equal(shared.onePerBin, false);
+  const single = planStorage({ ...base, onePerBin: true });
+  assert.equal(single.shelfBins, 1 + 1 + 1 + 3);  // 3+3+3 pieces need a bin each, 12 pieces three bins
+  assert.equal(single.shelfLocations, 2);       // 6 bins / 4 per location
+  assert.equal(single.binsWasted, 6 * 5 - 21);
+  // Bins stacked high and deep give a shelf location more bins, so fewer locations are needed.
+  const deep = planStorage({ ...base, onePerBin: true, binsPerLocation: 12, unitsPerShelf: 60 });
+  assert.equal(deep.shelfLocations, 1);
+  // Many small articles waste space when they cannot share a bin.
+  const many = planStorage({ inventoryUnits: 40, itemUnits: Array(20).fill(2), unitsPerBin: 5, unitsPerShelf: 20, binsPerLocation: 4, onePerBin: true });
+  assert.equal(many.shelfBins, 20);
+  assert.equal(many.shelfLocations, 5);
+  assert.equal(planStorage({ inventoryUnits: 40, unitsPerBin: 5, unitsPerShelf: 20, binsPerLocation: 4 }).shelfLocations, 2);
 });

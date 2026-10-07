@@ -40,6 +40,10 @@
     binsPerShelf: 4,
     shelvesPerRack: 4,
     unitsPerBin: 5,
+    // Articles may share a bin (default) or get their own bins; bins can also be stacked high and deep (all items the same size).
+    onePerBin: false,
+    binsHigh: 1,
+    binsDeep: 1,
     unitsPerShelf: 20,
     unitsPerDrawer: 8,
     unitsPerPallet: 60,
@@ -429,6 +433,8 @@
     whPalletEnabled: el('wh-pallet-enabled'),
     whPlannedPallets: el('wh-planned-pallets'),
     whBinsPerShelf: el('wh-bins-per-shelf'),
+    whBinsHigh: el('wh-bins-high'),
+    whBinsDeep: el('wh-bins-deep'),
     whShelvesPerRack: el('wh-shelves-per-rack'),
     whUnitsPerBin: el('wh-units-per-bin'),
     whUnitsShelf: el('wh-units-shelf'),
@@ -832,6 +838,8 @@
       [dom.whShelfShare, 'shelfShare', 0],
       [dom.whDrawerShare, 'drawerShare', 0],
       [dom.whBinsPerShelf, 'binsPerShelf', 1],
+      [dom.whBinsHigh, 'binsHigh', 1],
+      [dom.whBinsDeep, 'binsDeep', 1],
       [dom.whShelvesPerRack, 'shelvesPerRack', 1],
       [dom.whUnitsPerBin, 'unitsPerBin', 1],
       [dom.whUnitsDrawer, 'unitsPerDrawer', 1],
@@ -851,9 +859,10 @@
         let value = Math.max(minimum, toNumber(input.value) ?? minimum);
         if (key === 'shelfShare' || key === 'drawerShare') value = clamp(value, 0, 100);
         if (key === 'binsPerShelf') value = clamp(Math.round(value), 1, 12);
+        if (key === 'binsHigh' || key === 'binsDeep') value = clamp(Math.round(value), 1, 10);
         if (key === 'shelvesPerRack') value = clamp(Math.round(value), 1, 8);
         state.warehouse[key] = value;
-        state.warehouse.unitsPerShelf = state.warehouse.binsPerShelf * state.warehouse.unitsPerBin;
+        state.warehouse.unitsPerShelf = shelfUnitCapacity(state.warehouse);
         dom.whUnitsShelf.value = String(state.warehouse.unitsPerShelf);
         if (key === 'shelfShare' || key === 'drawerShare') constrainStorageShares(key);
         saveSettingsSoon();
@@ -1037,7 +1046,7 @@
 
   function onBoundChange(path, options = {}) {
     if (path.startsWith('warehouse.rates.')) persistWarehouseRates();
-    if (path.startsWith('warehouse.')) state.warehouse.unitsPerShelf = state.warehouse.binsPerShelf * state.warehouse.unitsPerBin;
+    if (path.startsWith('warehouse.')) state.warehouse.unitsPerShelf = shelfUnitCapacity(state.warehouse);
     if (path === 'warehouse.plannedPallets') state.warehouse.plannedPallets = Math.max(0, Math.round(state.warehouse.plannedPallets || 0));
     saveSettingsSoon();
     // A deferred change is a text field mid-edit: state is already updated, but the caller schedules
@@ -1662,6 +1671,7 @@
         if (change) span.className = change > 0 ? 'pop-up' : 'pop-down';
         return span;
       } },
+      { key: 'bins', label: 'Bins', number: true, sortValue: (line) => line.bins, cell: (line) => text(line.bins ? formatNumber(line.bins, state.warehouse.onePerBin ? 0 : 1) : '—') },
       { key: 'value', label: `Value in ${state.config.outputCurrency}`, number: true, sortValue: (line) => line.value, cell: (line) => text(money(line.value)) },
       { key: 'reason', label: 'Why', sortValue: (line) => line.reason, cell: (line) => {
         const span = document.createElement('span');
@@ -1681,9 +1691,23 @@
     return true;
   }
 
+  // Bins and shelf locations the suggestion needs, next to what the current quantities need.
+  function storageNeeds(plan) {
+    const warehouse = state.warehouse;
+    plan.lines.forEach((line) => { line.bins = Core.binsForUnits(line.target, warehouse.unitsPerBin, warehouse.onePerBin); });
+    const wanted = planStorageFor(plan.lines.map((line) => line.target));
+    const now = planStorageFor(plan.lines.map((line) => Math.max(0, line.now || 0)));
+    const toOutput = state.config.outputCurrency === 'NOK' ? 1 : state.rates.NOK ?? null;
+    const monthly = (storage) => (toOutput === null ? null : (storage.shelfLocations * warehouse.rates.shelf + storage.drawerLocations * warehouse.rates.drawer) * toOutput);
+    return { wanted, now, cost: monthly(wanted), costNow: monthly(now) };
+  }
+
   function renderStockSummary(plan) {
     const output = state.config.outputCurrency;
     const parts = [`Suggested stock: ${plan.stocked} parts, ${formatQuantity(plan.pieces)} pieces, worth ${formatMoney(plan.value, output)} (now ${formatMoney(plan.valueNow, output)})`];
+    const needs = storageNeeds(plan);
+    parts.push(`Storage: ${formatNumber(needs.wanted.shelfBins, 0)} bins in ${formatNumber(needs.wanted.shelfLocations, 0)} shelf locations (now ${formatNumber(needs.now.shelfLocations, 0)})`);
+    if (needs.cost !== null && needs.costNow !== null) parts.push(`Shelf and drawer storage about ${formatMoney(needs.cost, output)} a month (now ${formatMoney(needs.costNow, output)})`);
     if (plan.unknownCost) parts.push(`${plan.unknownCost} parts have no price yet and count as 0`);
     if (plan.overBudget) parts.push('The budget is too small even for one piece of each part sold');
     dom.popularityStockSummary.textContent = `${parts.join(' · ')}.`;
@@ -3086,7 +3110,9 @@
     state.warehouse.palletHeight = state.warehouse.palletHeight === '220' ? '220' : '120';
     state.warehouse.binsPerShelf = clamp(Math.round(state.warehouse.binsPerShelf) || 1, 1, 12);
     state.warehouse.shelvesPerRack = clamp(Math.round(state.warehouse.shelvesPerRack) || 1, 1, 8);
-    state.warehouse.unitsPerShelf = state.warehouse.binsPerShelf * state.warehouse.unitsPerBin;
+    state.warehouse.binsHigh = clamp(Math.round(state.warehouse.binsHigh) || 1, 1, 10);
+    state.warehouse.binsDeep = clamp(Math.round(state.warehouse.binsDeep) || 1, 1, 10);
+    state.warehouse.unitsPerShelf = shelfUnitCapacity(state.warehouse);
     Object.keys(WAREHOUSE_RATE_DEFAULTS).forEach((key) => {
       if (settings.warehouse?.rates && key in settings.warehouse.rates) {
         state.warehouse.rates[key] = finiteOr(settings.warehouse.rates[key], state.warehouse.rates[key], 0);
@@ -3498,27 +3524,46 @@
     if (readout) readout.textContent = `${Math.round(scale * 100)}%`;
   }
 
-  function calculateWarehouseModel() {
+  // A shelf location holds bins across x bins stacked high x bins deep; every bin holds unitsPerBin pieces.
+  function binsPerLocation(warehouse) {
+    return Math.max(1, warehouse.binsPerShelf * Math.max(1, warehouse.binsHigh || 1) * Math.max(1, warehouse.binsDeep || 1));
+  }
+
+  function shelfUnitCapacity(warehouse) {
+    return Math.max(1, binsPerLocation(warehouse) * warehouse.unitsPerBin);
+  }
+
+  // Fits the given pieces per article into the chosen storage types.
+  function planStorageFor(itemUnits) {
     const warehouse = state.warehouse;
-    const rates = warehouse.rates;
-    const inventoryUnits = state.consolidated.reduce((sum, item) => sum + Math.max(0, item.maxQuantity || 0), 0);
-    const unitsPerShelf = Math.max(1, warehouse.binsPerShelf * warehouse.unitsPerBin);
-    warehouse.unitsPerShelf = unitsPerShelf;
-    const storage = Core.planWarehouseStorage({
-      inventoryUnits,
+    return Core.planWarehouseStorage({
+      inventoryUnits: itemUnits.reduce((sum, units) => sum + Math.max(0, units || 0), 0),
+      itemUnits,
+      onePerBin: warehouse.onePerBin,
+      unitsPerBin: warehouse.unitsPerBin,
+      binsPerLocation: binsPerLocation(warehouse),
       shelfEnabled: warehouse.shelfEnabled,
       drawerEnabled: warehouse.drawerEnabled,
       palletEnabled: warehouse.palletEnabled,
       plannedPallets: warehouse.plannedPallets,
       shelfShare: warehouse.shelfShare,
       drawerShare: warehouse.drawerShare,
-      unitsPerShelf,
+      unitsPerShelf: shelfUnitCapacity(warehouse),
       unitsPerDrawer: warehouse.unitsPerDrawer,
       unitsPerPallet: warehouse.unitsPerPallet,
     });
+  }
+
+  function calculateWarehouseModel() {
+    const warehouse = state.warehouse;
+    const rates = warehouse.rates;
+    const inventoryUnits = state.consolidated.reduce((sum, item) => sum + Math.max(0, item.maxQuantity || 0), 0);
+    const unitsPerShelf = shelfUnitCapacity(warehouse);
+    warehouse.unitsPerShelf = unitsPerShelf;
+    const storage = planStorageFor(state.consolidated.map((item) => Math.max(0, item.maxQuantity || 0)));
     const { shelfEnabled, drawerEnabled, palletEnabled, shelfUnits, drawerUnits, palletUnits, shelfShare, drawerShare, palletShare, shelfLocations, drawerLocations, pallets } = storage;
     const racks = shelfLocations > 0 ? Math.ceil(shelfLocations / warehouse.shelvesPerRack) : 0;
-    const totalBins = shelfLocations * warehouse.binsPerShelf;
+    const totalBins = shelfLocations * binsPerLocation(warehouse);
     const palletRateKey = `${warehouse.palletType}${warehouse.palletHeight}`;
     const palletRate = rates[palletRateKey] || 0;
     const outputCurrency = state.config.outputCurrency;
@@ -3575,6 +3620,8 @@
       pallets,
       racks,
       totalBins,
+      shelfBins: storage.shelfBins,
+      binsWasted: storage.binsWasted,
       unitsPerShelf,
       palletRate,
       nokToOutput,
@@ -4595,7 +4642,7 @@
       assignNumber(state.warehouse, 'unitsPerBin', 'B12', 1);
       assignNumber(state.warehouse, 'unitsPerDrawer', 'B14', 1);
       assignNumber(state.warehouse, 'unitsPerPallet', 'B15', 1);
-      state.warehouse.unitsPerShelf = state.warehouse.binsPerShelf * state.warehouse.unitsPerBin;
+      state.warehouse.unitsPerShelf = shelfUnitCapacity(state.warehouse);
       state.warehouse.palletType = String(sheet.B16?.v ?? '').toUpperCase() === 'SEA' ? 'sea' : 'eu';
       state.warehouse.palletHeight = String(sheet.B17?.v ?? '') === '220' ? '220' : '120';
       const rateCells = {
@@ -8637,7 +8684,7 @@
         ...(payload.warehouse || {}),
         rates: { ...WAREHOUSE_RATE_DEFAULTS, ...(payload.warehouse?.rates || {}) },
       };
-      state.warehouse.unitsPerShelf = state.warehouse.binsPerShelf * state.warehouse.unitsPerBin;
+      state.warehouse.unitsPerShelf = shelfUnitCapacity(state.warehouse);
       state.wireRelations = Array.isArray(payload.wireRelations) ? payload.wireRelations.filter(isValidWireRelation) : [];
       if (payload.settings) applySettings(payload.settings);
       state.pendingDisabledKits = null;
@@ -8681,6 +8728,7 @@
     const bindings = [
       [dom.whShelfShare, 'shelfShare'], [dom.whDrawerShare, 'drawerShare'],
       [dom.whBinsPerShelf, 'binsPerShelf'], [dom.whShelvesPerRack, 'shelvesPerRack'],
+      [dom.whBinsHigh, 'binsHigh'], [dom.whBinsDeep, 'binsDeep'],
       [dom.whUnitsPerBin, 'unitsPerBin'], [dom.whUnitsShelf, 'unitsPerShelf'],
       [dom.whUnitsDrawer, 'unitsPerDrawer'], [dom.whUnitsPallet, 'unitsPerPallet'],
       [dom.whReceipts, 'receipts'], [dom.whReceiptLines, 'receiptLines'],
@@ -9105,6 +9153,9 @@
       ['Pallet storage', state.warehouse.palletEnabled, 'Selected'],
       ['Planned pallet positions', state.warehouse.plannedPallets, 'Assumed'],
       ['Bins per shelf', state.warehouse.binsPerShelf, 'Assumed'],
+      ['Bins stacked high', state.warehouse.binsHigh, 'Assumed'],
+      ['Bins deep', state.warehouse.binsDeep, 'Assumed'],
+      ['One article per bin', state.warehouse.onePerBin, 'Assumed'],
       ['Shelf levels per rack', state.warehouse.shelvesPerRack, 'Assumed'],
       ['Units per bin', state.warehouse.unitsPerBin, 'Assumed'],
       ['Units per drawer', state.warehouse.unitsPerDrawer, 'Assumed'],
@@ -9134,6 +9185,7 @@
     const warehouse = state.warehouse;
     const rates = warehouse.rates;
     const convertedRate = (value) => model.nokToOutput === null ? null : value * model.nokToOutput;
+    const stackedBins = warehouse.binsHigh * warehouse.binsDeep !== 1;
     const rows = [
       ['Warehouse cost estimate'],
       [`Storage quantities use the imported maximum part quantities. Private rates are stored in NOK and converted to ${model.outputCurrency} with the live reference rate.`],
@@ -9147,7 +9199,7 @@
       ['Bins per shelf', warehouse.binsPerShelf, '', 'Drawer location / month', rates.drawer, formulaCell('IF($H$5="","",E10*$H$5)', convertedRate(rates.drawer))],
       ['Shelf levels per rack', warehouse.shelvesPerRack, '', 'EDI label', rates.edi, formulaCell('IF($H$5="","",E11*$H$5)', convertedRate(rates.edi))],
       ['Units per bin', warehouse.unitsPerBin, '', 'Receipt base', rates.receiptBase, formulaCell('IF($H$5="","",E12*$H$5)', convertedRate(rates.receiptBase))],
-      ['Units per shelf', formulaCell('B10*B12', model.unitsPerShelf), '', 'Receipt per item line', rates.receiptLine, formulaCell('IF($H$5="","",E13*$H$5)', convertedRate(rates.receiptLine))],
+      ['Units per shelf', stackedBins ? model.unitsPerShelf : formulaCell('B10*B12', model.unitsPerShelf), '', 'Receipt per item line', rates.receiptLine, formulaCell('IF($H$5="","",E13*$H$5)', convertedRate(rates.receiptLine))],
       ['Units per drawer', warehouse.unitsPerDrawer, '', 'Order base', rates.orderBase, formulaCell('IF($H$5="","",E14*$H$5)', convertedRate(rates.orderBase))],
       ['Units per pallet', warehouse.unitsPerPallet, '', 'Order per item line', rates.orderLine, formulaCell('IF($H$5="","",E15*$H$5)', convertedRate(rates.orderLine))],
       ['Pallet type', warehouse.palletType === 'eu' ? 'EU' : 'Sea', '', 'Parcel ≤35 kg', rates.parcel, formulaCell('IF($H$5="","",E16*$H$5)', convertedRate(rates.parcel))],
@@ -9155,9 +9207,9 @@
       ['Selected pallet rate', formulaCell('IF(B16="EU",IF(B17=120,E5,E6),IF(B17=120,E7,E8))', model.palletRate), '', 'WMS license / month', rates.wms, formulaCell('IF($H$5="","",E18*$H$5)', convertedRate(rates.wms))],
       [],
       ['Calculated capacity', 'Count'],
-      ['Shelf locations', formulaCell('IF(B5=0,0,ROUNDUP(B5*B7/B13,0))', model.shelfLocations)],
+      ['Shelf locations', warehouse.onePerBin ? model.shelfLocations : formulaCell('IF(B5=0,0,ROUNDUP(B5*B7/B13,0))', model.shelfLocations)],
       ['Racks required', formulaCell('IF(B21=0,0,ROUNDUP(B21/B11,0))', model.racks)],
-      ['Total bins', formulaCell('B21*B10', model.totalBins)],
+      ['Total bins', stackedBins || warehouse.onePerBin ? model.totalBins : formulaCell('B21*B10', model.totalBins)],
       ['Drawer locations', formulaCell('IF(B5=0,0,ROUNDUP(B5*B8/B14,0))', model.drawerLocations)],
       ['Pallets', model.pallets],
       ['Total unit capacity', formulaCell('B21*B13+B24*B14+B25*B15', model.capacity)],

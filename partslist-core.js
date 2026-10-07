@@ -323,6 +323,18 @@
     return amount > 0 ? Math.ceil(amount / perLocation) : 0;
   }
 
+  // Bins one article needs. Alone in its bins, an article fills whole bins (a part-filled bin counts as a bin);
+  // sharing bins, it only takes the fraction of a bin that it fills. All items are assumed to be the same size.
+  function binsForUnits(units, unitsPerBin, onePerBin = false) {
+    const amount = Math.max(0, Number(units) || 0);
+    const perBin = Math.max(1, Number(unitsPerBin) || 1);
+    if (amount <= 0) return 0;
+    return onePerBin ? Math.ceil(amount / perBin - 1e-9) : amount / perBin;
+  }
+
+  // options.onePerBin with options.itemUnits (pieces per article) gives every article its own bins; unitsPerShelf
+  // is then bins per shelf location x unitsPerBin, and binsPerLocation says how many bins a shelf location holds
+  // (bins across x bins stacked high x bins deep).
   function planWarehouseStorage(options = {}) {
     const inventoryUnits = Math.max(0, Number(options.inventoryUnits) || 0);
     const shelfEnabled = options.shelfEnabled !== false;
@@ -345,7 +357,18 @@
     const activeWeight = shelfWeight + drawerWeight;
     const shelfUnits = activeWeight ? remainingUnits * shelfWeight / activeWeight : 0;
     const drawerUnits = activeWeight ? remainingUnits * drawerWeight / activeWeight : 0;
-    const shelfLocations = requiredLocations(shelfUnits, unitsPerShelf);
+    const unitsPerBin = Math.max(1, Number(options.unitsPerBin) || 1);
+    const binsPerLocation = Math.max(1, Math.round(Number(options.binsPerLocation) || unitsPerShelf / unitsPerBin));
+    const onePerBin = options.onePerBin === true && Array.isArray(options.itemUnits);
+    let shelfBins;
+    if (onePerBin) {
+      // Pallets and drawers take their share of every article; what is left on the shelves is split into whole bins per article.
+      const fraction = inventoryUnits > 0 ? shelfUnits / inventoryUnits : 0;
+      shelfBins = options.itemUnits.reduce((sum, units) => sum + binsForUnits((Number(units) || 0) * fraction, unitsPerBin, true), 0);
+    } else {
+      shelfBins = binsForUnits(shelfUnits, unitsPerBin, true);
+    }
+    const shelfLocations = onePerBin ? Math.ceil(shelfBins / binsPerLocation) : requiredLocations(shelfUnits, unitsPerShelf);
     const drawerLocations = requiredLocations(drawerUnits, unitsPerDrawer);
     const capacity = shelfLocations * unitsPerShelf + drawerLocations * unitsPerDrawer + palletCapacity;
     return {
@@ -359,6 +382,11 @@
       drawerShare: inventoryUnits ? drawerUnits / inventoryUnits : 0,
       palletShare: inventoryUnits ? palletUnits / inventoryUnits : 0,
       shelfLocations,
+      shelfBins,
+      binsPerLocation,
+      onePerBin,
+      // Room that stays empty because articles do not share bins.
+      binsWasted: onePerBin ? Math.max(0, shelfBins * unitsPerBin - shelfUnits) : 0,
       drawerLocations,
       pallets,
       capacity,
@@ -750,6 +778,7 @@
     historyKey,
     parseSalesHistory,
     allocationShares,
+    binsForUnits,
     compareSortValues,
     EU_MEMBERS,
     catalogueSheetName,
