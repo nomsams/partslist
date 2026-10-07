@@ -55,6 +55,17 @@ A browser-based workbook tool for consolidating parts lists from Excel files.
 - **Save project .xlsx** exports one re-importable workbook with the original source sheets, formula-driven `Consolidated`, `Profitability`, `Warehousing`, and `Assumptions` sheets, a readable `Project data` sheet, and a hidden machine-readable `PartsList settings` sheet. Re-importing restores column mappings, named variables, kit freight, freight and import costs, VAT, warehouse quote rates and assumptions, storage choices, sales groups, item overrides, removed kits, wire relationships, and layout state. Generated sheets remain outside parts consolidation and re-exporting keeps stable sheet names.
 - Keeps business data out of browser storage. Settings are restored from a re-imported consolidated workbook or a password-encrypted `.partslist` project. Legacy Caesar-14 project and warehouse entries are removed automatically.
 
+## Popularity and suggested stock
+
+The **Popularity** tab joins a purchase history (one file per market, for example Sweden and Norway for the last five years) to the kits. A history is any sheet or CSV with a column for the article number and a column for the quantity; "Item No. - description" in one column also works, and several lines for the same article are added up. Articles are matched to kit parts on the article number or the alternative number.
+
+- **All parts** ranks every article by pieces sold, per market and in total, and also lists articles that are in no kit.
+- **Popular in both** shows only articles bought in every market, ranked by the market that buys the least, so one large market cannot carry a part alone.
+- **Kits** ranks the kits by the pieces sold of their parts. A part that sits in several kits counts for each of them. Click a kit to see its parts.
+- **Suggested stock** suggests a quantity per part: the sales of the chosen number of months plus a safety margin for the chosen chance of having the part in stock (demand is treated as random, so the margin grows with the square root of the expected demand), and at least one piece for anything that sold. Parts are in class A, B or C by how much they sell. The suggestion can keep popular kits complete (one piece of unsold parts in kits where most parts sell) and can be fitted to a budget: safety margins go first, then slow sellers, then the rest in proportion. **Use these quantities in the project** writes the suggestion as stock quantities (it can be undone).
+
+The consolidated list gets a **Popularity** column view and the filters *Sold in every market* and *Never sold*. The history is saved with the project and is never written to browser storage. **Save as .xlsx** on the tab exports the lists, the stock suggestion and the kit ranking.
+
 ## Saved documents (encrypted)
 
 The project's parts lists and warehouse-rate file are not stored in readable form. `data/bundle.dat` is a single encrypted file (AES-256-GCM, key derived with PBKDF2-SHA-256, 600,000 iterations) with no readable header, file names or spreadsheet signature, so search engines and anyone browsing the repository see only random bytes. When the file is present next to the page, the start screen shows **Saved documents**; typing the key and choosing **Unlock and import** decrypts it in the browser and imports every document, rates included. Nothing is decrypted on a server and the key is never stored.

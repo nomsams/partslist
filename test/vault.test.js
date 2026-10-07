@@ -28,6 +28,9 @@ test('the sealed file reveals nothing readable: no names, no spreadsheet signatu
   const first = await Vault.seal(files, 'a long key phrase', { iterations: 100000 });
   const second = await Vault.seal(files, 'a long key phrase', { iterations: 100000 });
   const text = Buffer.from(first).toString('latin1');
-  ['Parts list', 'xlsx', 'rates', 'PK', 'shelf'].forEach((word) => assert.ok(!text.includes(word), `leaks ${word}`));
+  // Longer words only: a two-letter sequence such as "PK" shows up in random bytes now and then. The spreadsheet
+  // signature is only meaningful at the very start of the file.
+  ['Parts list', 'xlsx', 'rates', 'shelf', 'workbook'].forEach((word) => assert.ok(!text.includes(word), `leaks ${word}`));
+  assert.ok(!text.startsWith('PK'));
   assert.notDeepEqual(first, second);                 // fresh salt and IV each time
 });

@@ -122,8 +122,10 @@
   const MAX_GROUPS = GROUP_COLORS.length;
   const LEGACY_SETTINGS_STORAGE_PREFIX = 'partslist.settings.caesar14.v1:';
   const SETTINGS_SHEET_MARKER = 'partslist settings';
-  const VIEW = Object.freeze({ consolidated: ':consolidated', dashboard: ':dashboard', warehouse: ':warehouse', wire: ':wire' });
+  const VIEW = Object.freeze({ consolidated: ':consolidated', popularity: ':popularity', dashboard: ':dashboard', warehouse: ':warehouse', wire: ':wire' });
   const SPECIAL_VIEWS = new Set(Object.values(VIEW));
+  // Starting points for the stock suggestion: half a year of sales, a 95 % chance of having a part, no budget.
+  const STOCK_DEFAULTS = Object.freeze({ months: 6, service: 0.95, budget: null, complete: true });
   const WAREHOUSE_RATE_DEFAULTS = Object.freeze({
     eu120: 0,
     eu220: 0,
@@ -302,6 +304,10 @@
     consolidatedSort: null,
     hiddenColumns: [...DEFAULT_HIDDEN_COLUMNS],
     columnPreset: 'simple',
+    // Purchase history per market (see "Sales history & popularity"). Business data: never written to browser storage.
+    history: defaultHistory(),
+    popularity: { mode: 'parts', search: '', filter: 'all', sort: null, open: new Set() },
+    popularityCache: null,
     explainKey: null,
     setupQueue: [],
     setupName: null,
@@ -472,6 +478,29 @@
     consolidatedFilter: el('consolidated-filter'),
     consolidatedCount: el('consolidated-count'),
     consolidatedActions: el('consolidated-actions'),
+    popularityView: el('popularity-view'),
+    popularitySummary: el('popularity-summary'),
+    popularityMarkets: el('popularity-markets'),
+    popularityChips: el('popularity-chips'),
+    popularityFile: el('popularity-file'),
+    popularityYears: el('popularity-years'),
+    popularityEmpty: el('popularity-empty'),
+    popularityBody: el('popularity-body'),
+    popularityModes: el('popularity-modes'),
+    popularitySearch: el('popularity-search'),
+    popularityFilter: el('popularity-filter'),
+    popularityFilterLabel: el('popularity-filter-label'),
+    popularityCount: el('popularity-count'),
+    popularityNote: el('popularity-note'),
+    popularityTable: el('popularity-table'),
+    popularityExport: el('popularity-export'),
+    popularityStock: el('popularity-stock'),
+    popularityStockSummary: el('popularity-stock-summary'),
+    stockMonths: el('stock-months'),
+    stockService: el('stock-service'),
+    stockBudget: el('stock-budget'),
+    stockComplete: el('stock-complete'),
+    stockApply: el('stock-apply'),
     dashboardView: el('dashboard-view'),
     dashboardSubtitle: el('dashboard-subtitle'),
     dashboardBadge: el('dashboard-badge'),
@@ -589,6 +618,7 @@
     dom.explainClose.addEventListener('click', closeExplain);
     document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !dom.explainPanel.classList.contains('hidden')) closeExplain(); });
     dom.customerExport.addEventListener('click', exportCustomerPriceList);
+    bindPopularity();
     dom.exampleData.addEventListener('click', loadExampleData);
     dom.makerSetup.addEventListener('click', (event) => { if (event.target.closest('[data-maker-setup-done]')) finishMakerSetup(); });
     dom.makerSetup.addEventListener('cancel', () => { state.setupQueue = []; });
@@ -1275,6 +1305,693 @@
     return wrapper;
   }
 
+  /* ---------- Sales history & popularity ---------- */
+
+  // A purchase history says how many pieces of each article a market bought. Joined to the kits it shows
+  // which parts and kits sell, and which parts sell in every market. It lives in memory and in the saved
+  // project only; like all business data it is never written to browser storage.
+  const MAX_MARKETS = 6;
+  function defaultHistory() {
+    return { markets: [], years: 5, stock: { ...STOCK_DEFAULTS } };
+  }
+  const HISTORY_SIZE_LIMIT = 2 * 1024 * 1024;
+  const HISTORY_NOISE = /^(?:purchase|purchases|history|sales|sold|orders?|items?|years?|yrs?|xlsx?|csv|ods|last|past|\d+)$/i;
+
+  function formatQuantity(value) {
+    const number = Number(value) || 0;
+    return formatNumber(number, Number.isInteger(number) ? 0 : 2);
+  }
+
+  // "Purchase_History_NORWAY_5years.csv" → "Norway"
+  function guessMarketName(fileName, fallbackIndex = 1) {
+    const words = String(fileName)
+      .replace(/\.(?:xlsx?|xlsm|xlsb|csv|ods)\b/gi, ' ')
+      .replace(/\d+\s*(?:years?|yrs?)/gi, ' ')
+      .split(/[\s_\-.()]+/)
+      .filter((word) => word && !HISTORY_NOISE.test(word));
+    const unique = words.filter((word, index) => words.findIndex((other) => other.toLowerCase() === word.toLowerCase()) === index);
+    if (!unique.length) return `Market ${fallbackIndex}`;
+    return unique.slice(0, 2).map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ').slice(0, 40);
+  }
+
+  function guessYears(fileName) {
+    const match = String(fileName).match(/(\d{1,2})\s*[- ]?\s*(?:years?|yrs?|år)/i);
+    return match ? clamp(Number(match[1]), 1, 50) : null;
+  }
+
+  function restoreHistory(saved) {
+    const history = defaultHistory();
+    if (!saved || typeof saved !== 'object') return history;
+    history.years = finiteOr(saved.years, 5, 1, 50);
+    const stock = saved.stock || {};
+    history.stock = {
+      months: finiteOr(stock.months, STOCK_DEFAULTS.months, 1, 36),
+      service: [0.9, 0.95, 0.99].includes(stock.service) ? stock.service : STOCK_DEFAULTS.service,
+      budget: Number.isFinite(stock.budget) && stock.budget > 0 ? stock.budget : null,
+      complete: stock.complete !== false,
+    };
+    (Array.isArray(saved.markets) ? saved.markets : []).slice(0, MAX_MARKETS).forEach((market, index) => {
+      if (!market || !Array.isArray(market.items)) return;
+      const items = market.items.map((row) => {
+        const itemNo = Array.isArray(row) ? String(row[0] ?? '').trim() : '';
+        const quantity = Array.isArray(row) ? toNumber(row[2]) : null;
+        return { key: Core.historyKey(itemNo), itemNo, description: Array.isArray(row) ? String(row[1] ?? '') : '', quantity };
+      }).filter((entry) => entry.key && Number.isFinite(entry.quantity) && entry.quantity > 0);
+      if (!items.length) return;
+      history.markets.push({ name: String(market.name || '').trim().slice(0, 40) || `Market ${index + 1}`, fileName: String(market.fileName || '').slice(0, 120), items });
+    });
+    return history;
+  }
+
+  // Reads one file as a sales history. Plain text files are decoded as UTF-8 and kept as text so article
+  // numbers such as 0123 or 1E5 are not turned into numbers.
+  async function readHistoryFile(file) {
+    const isText = /\.(?:csv|txt)$/i.test(file.name);
+    const workbook = isText
+      ? XLSX.read((await file.text()).replace(/^﻿/, ''), { type: 'string', raw: true })
+      : await readWorkbookFile(file);
+    for (const sheetName of workbook.SheetNames) {
+      const parsed = Core.parseSalesHistory(XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: null, raw: true }));
+      if (parsed) return { parsed, sheetCount: workbook.SheetNames.length };
+    }
+    return null;
+  }
+
+  // Tells sales histories apart from kit workbooks: a history is a single sheet with article and quantity columns and no prices.
+  async function splitHistoryFiles(files) {
+    const history = [];
+    const other = [];
+    for (const file of files) {
+      let isHistory = false;
+      if (file.size <= HISTORY_SIZE_LIMIT) {
+        try {
+          const found = await readHistoryFile(file);
+          isHistory = Boolean(found && found.sheetCount === 1);
+        } catch (error) {
+          isHistory = false;
+        }
+      }
+      (isHistory ? history : other).push(file);
+    }
+    return { history, other };
+  }
+
+  async function addSalesHistory(files, options = {}) {
+    if (!state.workbook) {
+      showToast('Add the parts lists first, then the sales history.', true);
+      return;
+    }
+    setStatus(files.length === 1 ? 'Reading 1 sales history…' : `Reading ${files.length} sales histories…`, 'busy');
+    const added = [];
+    const failed = [];
+    for (const file of files) {
+      try {
+        const found = await readHistoryFile(file);
+        if (!found) {
+          failed.push(file.name);
+          continue;
+        }
+        const name = guessMarketName(file.name, state.history.markets.length + 1);
+        const market = { name, fileName: file.name, items: found.parsed.items };
+        const existing = state.history.markets.findIndex((entry) => entry.name.toLowerCase() === name.toLowerCase());
+        if (existing >= 0) state.history.markets[existing] = market;
+        else if (state.history.markets.length >= MAX_MARKETS) {
+          failed.push(file.name);
+          continue;
+        } else state.history.markets.push(market);
+        const years = guessYears(file.name);
+        if (years) state.history.years = years;
+        added.push(name);
+      } catch (error) {
+        console.error(error);
+        failed.push(file.name);
+      }
+    }
+    state.popularityCache = null;
+    if (added.length) {
+      markProjectDirty();
+      if (options.show) showView(VIEW.popularity);
+      else refreshViews();
+      const message = `Sales history added: ${added.join(', ')}.`;
+      setStatus(message);
+      showToast(message);
+    } else {
+      setStatus('No sales history was added.', 'warning');
+    }
+    if (failed.length) showToast(`Could not use ${failed.join(', ')}. A sales history needs a column with the article number and a column with the quantity.`, true);
+  }
+
+  function removeMarket(index) {
+    const market = state.history.markets[index];
+    if (!market) return;
+    if (!window.confirm(translateUi(`Remove the sales history of ${market.name}?`))) return;
+    state.history.markets.splice(index, 1);
+    state.popularityCache = null;
+    state.popularity.filter = 'all';
+    markProjectDirty();
+    refreshViews();
+  }
+
+  function renameMarket(index, value) {
+    const market = state.history.markets[index];
+    const name = String(value || '').trim().slice(0, 40);
+    if (!market || !name || name === market.name) return;
+    if (state.history.markets.some((entry, other) => other !== index && entry.name.toLowerCase() === name.toLowerCase())) {
+      showToast('Two markets cannot have the same name.', true);
+      return;
+    }
+    const oldKey = `sold:${market.name}`;
+    market.name = name;
+    // A hidden "Sold in …" column keeps its state under the new name.
+    state.hiddenColumns = state.hiddenColumns.map((key) => (key === oldKey ? `sold:${name}` : key));
+    state.popularityCache = null;
+    markProjectDirty();
+    refreshViews();
+  }
+
+  // The sales joined to the parts that are in the project right now. Cached until the history or the parts change.
+  function popularityResult() {
+    if (state.popularityCache) return state.popularityCache;
+    const kitOrder = state.workbook ? state.workbook.SheetNames.filter((name) => isSourceKit(name) && state.mappings[name]?.enabled) : [];
+    const parts = state.consolidated.map((item) => ({
+      key: item.key,
+      part: item.part,
+      altParts: item.altParts,
+      description: item.description,
+      kits: item.sources,
+      manufacturer: item.manufacturer || '',
+    }));
+    const result = Core.buildPopularity({ parts, markets: state.history.markets, kitOrder });
+    result.byKey = new Map(result.rows.filter((row) => row.inKit).map((row) => [row.key, row]));
+    state.popularityCache = result;
+    return result;
+  }
+
+  function popularityRowOf(item) {
+    if (!state.history.markets.length) return null;
+    return popularityResult().byKey.get(item.key) || null;
+  }
+
+  function popularityKitLabel(row) {
+    if (!row.inKit) return 'Not in a kit';
+    return row.kits.length > 2 ? `${row.kits.slice(0, 2).join(', ')} +${row.kits.length - 2}` : row.kits.join(', ');
+  }
+
+  function renderPopularityMarkets() {
+    const { markets, years } = state.history;
+    const result = markets.length ? popularityResult() : null;
+    dom.popularityChips.replaceChildren(...markets.map((market, index) => {
+      const chip = document.createElement('div');
+      chip.className = 'pop-market';
+      const name = document.createElement('input');
+      name.type = 'text';
+      name.maxLength = 40;
+      name.value = market.name;
+      name.dataset.popName = String(index);
+      name.setAttribute('aria-label', 'Market name');
+      name.setAttribute('translate', 'no');
+      const cover = result.coverage[index];
+      const share = cover.units > 0 ? Math.round((cover.matchedUnits / cover.units) * 100) : 0;
+      const facts = document.createElement('small');
+      facts.textContent = `${formatNumber(cover.articles, 0)} articles · ${formatQuantity(cover.units)} pieces · ${share} % of the pieces are in a kit`;
+      const file = document.createElement('small');
+      file.className = 'pop-file';
+      file.textContent = market.fileName;
+      file.setAttribute('translate', 'no');
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'pop-remove';
+      remove.dataset.popRemove = String(index);
+      remove.textContent = '×';
+      remove.setAttribute('aria-label', 'Remove this sales history');
+      remove.title = 'Remove this sales history';
+      chip.append(name, facts, file, remove);
+      return chip;
+    }));
+    dom.popularityYears.value = String(years);
+  }
+
+  // Columns for the three tables. Each has a label, a sort value and a cell builder.
+  function popularityColumns(mode, rows) {
+    const markets = state.history.markets;
+    const years = state.history.years;
+    const maxOf = (pick) => Math.max(1, ...rows.map(pick));
+    const text = (value) => document.createTextNode(String(value ?? ''));
+    const quantityCell = (value, rank) => {
+      const wrap = document.createElement('span');
+      wrap.append(text(formatQuantity(value)));
+      if (rank) {
+        const small = document.createElement('small');
+        small.className = 'pop-rank';
+        small.textContent = ` #${rank}`;
+        wrap.append(small);
+      }
+      return wrap;
+    };
+    const barCell = (value, max) => {
+      const bar = document.createElement('span');
+      bar.className = 'pop-bar';
+      bar.setAttribute('aria-hidden', 'true');
+      const fill = document.createElement('i');
+      fill.style.width = `${Math.max(0, Math.min(100, (value / max) * 100))}%`;
+      bar.append(fill);
+      return bar;
+    };
+    const rankLabel = (rank) => (rank ? `#${rank}` : '—');
+    if (mode === 'kits') {
+      const maxTotal = maxOf((kit) => kit.total);
+      return [
+        { key: 'rank', label: '#', number: true, sortValue: (kit) => kit.rank, cell: (kit) => text(rankLabel(kit.rank)) },
+        { key: 'kit', label: 'Kit', sortValue: (kit) => kit.name, cell: (kit) => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'pop-kit-toggle';
+          button.dataset.popKit = kit.name;
+          const open = state.popularity.open.has(kit.name);
+          button.setAttribute('aria-expanded', String(open));
+          button.textContent = `${open ? '▾' : '▸'} ${kit.name}`;
+          return button;
+        } },
+        { key: 'maker', label: 'Manufacturer', sortValue: (kit) => kitSettings(kit.name).manufacturer || '', cell: (kit) => text(kitSettings(kit.name).manufacturer || '') },
+        { key: 'parts', label: 'Parts in kit', number: true, sortValue: (kit) => kit.parts, cell: (kit) => text(kit.parts) },
+        { key: 'soldParts', label: 'Parts sold', number: true, sortValue: (kit) => kit.soldParts, cell: (kit) => text(kit.soldParts) },
+        ...markets.map((market, index) => ({ key: `m${index}`, label: `Sold in ${market.name}`, number: true, sortValue: (kit) => kit.sold[index], cell: (kit) => quantityCell(kit.sold[index]) })),
+        { key: 'total', label: 'Total', number: true, strong: true, sortValue: (kit) => kit.total, cell: (kit) => quantityCell(kit.total) },
+        { key: 'top', label: 'Most popular part', sortValue: (kit) => kit.top?.total ?? 0, cell: (kit) => text(kit.top ? `${kit.top.part}${kit.top.description ? ` · ${kit.top.description}` : ''}` : '—') },
+        { key: 'bar', label: 'Popularity', sortValue: (kit) => kit.total, cell: (kit) => barCell(kit.total, maxTotal) },
+      ];
+    }
+    const both = mode === 'both';
+    const hasAlt = rows.some((row) => row.altParts.length);
+    const maxScore = maxOf((row) => (both ? row.weakest : row.total));
+    return [
+      { key: 'rank', label: '#', number: true, sortValue: (row) => (both ? row.bothRank : row.rank), cell: (row) => text(rankLabel(both ? row.bothRank : row.rank)) },
+      { key: 'part', label: 'Article', className: 'part-cell', sortValue: (row) => row.part, cell: (row) => text(row.part) },
+      ...(hasAlt ? [{ key: 'alt', label: 'Alt. part no.', sortValue: (row) => row.altParts.join(', '), cell: (row) => text(row.altParts.join(', ')) }] : []),
+      { key: 'description', label: 'Article name', sortValue: (row) => row.description, cell: (row) => text(row.description) },
+      { key: 'kits', label: 'Kit', sortValue: (row) => (row.inKit ? row.kits.join(', ') : '~'), cell: (row) => {
+        const span = document.createElement('span');
+        if (!row.inKit) span.className = 'pop-muted';
+        span.textContent = popularityKitLabel(row);
+        if (row.kits.length > 2) span.title = row.kits.join(', ');
+        return span;
+      } },
+      ...markets.map((market, index) => ({ key: `m${index}`, label: `Sold in ${market.name}`, number: true, sortValue: (row) => row.sold[index], cell: (row) => quantityCell(row.sold[index], row.marketRanks[index]) })),
+      { key: 'total', label: 'Total', number: true, strong: true, sortValue: (row) => row.total, cell: (row) => quantityCell(row.total) },
+      ...(both
+        ? [{ key: 'weakest', label: 'Weakest market', number: true, sortValue: (row) => row.weakest, cell: (row) => quantityCell(row.weakest) }]
+        : [{ key: 'perYear', label: 'Per year', number: true, sortValue: (row) => row.total, cell: (row) => text(formatNumber(row.total / years, 1)) }]),
+      { key: 'bar', label: 'Popularity', sortValue: (row) => (both ? row.weakest : row.total), cell: (row) => barCell(both ? row.weakest : row.total, maxScore) },
+    ];
+  }
+
+  // The suggestion for the parts in the project, priced at their landed cost per piece.
+  function computeStockPlan() {
+    const result = popularityResult();
+    const stock = state.history.stock;
+    const itemByKey = new Map(state.consolidated.map((item) => [item.key, item]));
+    return Core.suggestStock({
+      rows: result.rows,
+      kits: result.kits,
+      years: state.history.years,
+      monthsCover: stock.months,
+      serviceLevel: stock.service,
+      completeKits: stock.complete,
+      budget: stock.budget,
+      unitCost: (row) => {
+        const item = itemByKey.get(row.key);
+        if (!item) return null;
+        if (item.maxQuantity > 0 && Number.isFinite(item.landedCost)) return item.landedCost / item.maxQuantity;
+        return Number.isFinite(item.convertedUnit) ? item.convertedUnit : null;
+      },
+      current: (row) => itemByKey.get(row.key)?.maxQuantity ?? null,
+    });
+  }
+
+  const STOCK_REASONS = Object.freeze({
+    sales: 'Sales plus a safety margin',
+    trimmed: 'Reduced to fit the budget',
+    cut: 'Left out to fit the budget',
+    kit: 'Keeps a popular kit complete',
+    none: 'Never sold',
+  });
+
+  function stockColumns(rows) {
+    const money = (value) => (value === null || value === undefined ? '—' : formatNumber(value, 0));
+    const hasAlt = rows.some((line) => line.row.altParts.length);
+    const text = (value) => document.createTextNode(String(value ?? ''));
+    const plain = (key, label, pick, extra = {}) => ({ key, label, sortValue: (line) => pick(line), cell: (line) => text(pick(line)), ...extra });
+    return [
+      { key: 'rank', label: '#', number: true, sortValue: (line) => line.row.rank, cell: (line) => text(line.row.rank ? `#${line.row.rank}` : '—') },
+      plain('part', 'Article', (line) => line.row.part, { className: 'part-cell' }),
+      ...(hasAlt ? [plain('alt', 'Alt. part no.', (line) => line.row.altParts.join(', '))] : []),
+      plain('description', 'Article name', (line) => line.row.description),
+      { key: 'cls', label: 'Class', sortValue: (line) => line.cls || '~', cell: (line) => {
+        const span = document.createElement('span');
+        span.textContent = line.cls || '—';
+        if (line.cls) span.title = line.cls === 'A' ? 'Class A: together these parts are about 80 % of all pieces sold' : line.cls === 'B' ? 'Class B: the next 15 % of the pieces sold' : 'Class C: the last 5 % of the pieces sold';
+        return span;
+      } },
+      { key: 'perYear', label: 'Sold per year', number: true, sortValue: (line) => line.perYear, cell: (line) => text(formatNumber(line.perYear, 1)) },
+      { key: 'now', label: 'Quantity now', number: true, sortValue: (line) => line.now, cell: (line) => text(line.now === null ? '—' : formatQuantity(line.now)) },
+      { key: 'target', label: 'Suggested stock', number: true, strong: true, sortValue: (line) => line.target, cell: (line) => text(formatQuantity(line.target)) },
+      { key: 'change', label: 'Change', number: true, sortValue: (line) => (line.now === null ? null : line.target - line.now), cell: (line) => {
+        const change = line.now === null ? null : line.target - line.now;
+        const span = document.createElement('span');
+        span.textContent = change === null ? '—' : change > 0 ? `+${formatQuantity(change)}` : formatQuantity(change);
+        if (change) span.className = change > 0 ? 'pop-up' : 'pop-down';
+        return span;
+      } },
+      { key: 'value', label: `Value in ${state.config.outputCurrency}`, number: true, sortValue: (line) => line.value, cell: (line) => text(money(line.value)) },
+      { key: 'reason', label: 'Why', sortValue: (line) => line.reason, cell: (line) => {
+        const span = document.createElement('span');
+        span.className = line.reason === 'none' ? 'pop-muted' : '';
+        span.textContent = STOCK_REASONS[line.reason] || '';
+        return span;
+      } },
+    ];
+  }
+
+  function stockLineMatches(line, filter, term) {
+    if (term && !`${line.row.part} ${line.row.altParts.join(' ')} ${line.row.description} ${line.row.kits.join(' ')}`.toLowerCase().includes(term)) return false;
+    if (filter === 'stocked') return line.target > 0;
+    if (filter === 'notstocked') return line.target === 0;
+    if (filter === 'more') return line.now !== null && line.target > line.now;
+    if (filter === 'less') return line.now !== null && line.target < line.now;
+    return true;
+  }
+
+  function renderStockSummary(plan) {
+    const output = state.config.outputCurrency;
+    const parts = [`Suggested stock: ${plan.stocked} parts, ${formatQuantity(plan.pieces)} pieces, worth ${formatMoney(plan.value, output)} (now ${formatMoney(plan.valueNow, output)})`];
+    if (plan.unknownCost) parts.push(`${plan.unknownCost} parts have no price yet and count as 0`);
+    if (plan.overBudget) parts.push('The budget is too small even for one piece of each part sold');
+    dom.popularityStockSummary.textContent = `${parts.join(' · ')}.`;
+    dom.popularityStockSummary.classList.toggle('warning', plan.overBudget || plan.unknownCost > 0);
+  }
+
+  function applyStockPlan() {
+    const plan = computeStockPlan();
+    const known = new Set(state.consolidated.map((item) => item.key));
+    const changes = plan.lines.filter((line) => known.has(line.key) && line.target !== line.now);
+    if (!changes.length) {
+      showToast('The project already uses these quantities.');
+      return;
+    }
+    if (!window.confirm(translateUi(`Set the stock quantity of ${changes.length} parts to the suggestion? You can undo this.`))) return;
+    pushHistory('Apply suggested stock', () => {
+      changes.forEach((line) => {
+        const current = { group: null, salesPerYear: null, quantity: null, multiplier: null, excluded: false, ...(state.items[line.key] || {}) };
+        state.items[line.key] = { ...current, quantity: line.target };
+      });
+    });
+    saveSettingsSoon();
+    rebuildConsolidation();
+    updateGroupCounts();
+    showToast(`Stock quantities updated for ${changes.length} parts.`);
+  }
+
+  function popularityFilterOptions(mode) {
+    const markets = state.history.markets;
+    if (mode === 'kits') return [];
+    if (mode === 'stock') return [['all', 'All kit parts'], ['stocked', 'Parts to stock'], ['more', 'Stock more than now'], ['less', 'Stock less than now'], ['notstocked', 'Parts not to stock']];
+    const options = [['all', 'All articles'], ['kit', 'Only articles in a kit'], ['nokit', 'Only articles in no kit']];
+    if (mode === 'parts') {
+      if (markets.length > 1) options.push(['soldall', 'Sold in every market'], ...markets.map((market, index) => [`only:${index}`, `Only sold in ${market.name}`]));
+      options.push(['unsold', 'Kit parts that never sold']);
+    }
+    return options;
+  }
+
+  function popularityRowMatches(row, filter, term) {
+    if (term && !`${row.part} ${row.altParts.join(' ')} ${row.description} ${row.kits.join(' ')}`.toLowerCase().includes(term)) return false;
+    if (filter === 'kit') return row.inKit;
+    if (filter === 'nokit') return !row.inKit;
+    if (filter === 'soldall') return row.inAll;
+    if (filter === 'unsold') return row.inKit && row.total === 0;
+    if (filter.startsWith('only:')) {
+      const index = Number(filter.slice(5));
+      return row.sold[index] > 0 && row.sold.every((value, other) => other === index || value === 0);
+    }
+    return true;
+  }
+
+  function renderPopularity() {
+    const { markets, years } = state.history;
+    const has = markets.length > 0;
+    dom.popularityEmpty.classList.toggle('hidden', has);
+    dom.popularityBody.classList.toggle('hidden', !has);
+    dom.popularityExport.disabled = !has;
+    dom.popularityYears.closest('label').classList.toggle('hidden', !has);
+    renderPopularityMarkets();
+    if (!has) {
+      dom.popularitySummary.textContent = 'No sales history has been added yet.';
+      return;
+    }
+    const result = popularityResult();
+    const keyed = result.rows.filter((row) => row.inKit);
+    const sold = keyed.filter((row) => row.total > 0).length;
+    const inAll = result.rows.filter((row) => row.inAll).length;
+    dom.popularitySummary.textContent = markets.length > 1
+      ? `Markets: ${markets.map((market) => market.name).join(' + ')} · Years: ${years} · Kit parts sold: ${sold} of ${keyed.length} · Sold in every market: ${inAll}`
+      : `Market: ${markets[0].name} · Years: ${years} · Kit parts sold: ${sold} of ${keyed.length}`;
+
+    const popularity = state.popularity;
+    if (popularity.mode === 'both' && markets.length < 2) popularity.mode = 'parts';
+    dom.popularityModes.querySelectorAll('[data-pop-mode]').forEach((button) => {
+      button.setAttribute('aria-pressed', String(button.dataset.popMode === popularity.mode));
+      if (button.dataset.popMode === 'both') button.classList.toggle('hidden', markets.length < 2);
+    });
+    const options = popularityFilterOptions(popularity.mode);
+    if (!options.some(([value]) => value === popularity.filter)) popularity.filter = 'all';
+    dom.popularityFilter.replaceChildren(...options.map(([value, label]) => new Option(label, value, false, value === popularity.filter)));
+    dom.popularityFilter.value = popularity.filter;
+    dom.popularityFilterLabel.classList.toggle('hidden', !options.length);
+    dom.popularitySearch.value = popularity.search;
+    dom.popularityStock.classList.toggle('hidden', popularity.mode !== 'stock');
+    dom.popularityStockSummary.classList.toggle('hidden', popularity.mode !== 'stock');
+    if (popularity.mode === 'stock') {
+      dom.stockMonths.value = String(state.history.stock.months);
+      dom.stockService.value = String(state.history.stock.service);
+      dom.stockBudget.value = state.history.stock.budget === null ? '' : String(state.history.stock.budget);
+      dom.stockComplete.checked = state.history.stock.complete;
+    }
+    dom.popularityNote.textContent = popularity.mode === 'stock'
+      ? 'For each part that sold: the sales of the months you choose, plus a safety margin, and at least one piece. Parts are in class A, B or C by how much they sell. With a budget the plan is trimmed step by step: safety margins first, then slow sellers.'
+      : popularity.mode === 'both'
+      ? 'Only articles that were bought in every market. They are ranked by the market that buys the least, so one big market cannot carry a part alone.'
+      : popularity.mode === 'kits'
+        ? 'A part that sits in several kits counts for each of them, so kits that share parts get similar numbers. Click a kit to see its parts.'
+        : 'Pieces bought in the sales history. Articles that are in no kit are listed too, so you can see what the kits do not cover.';
+
+    const term = popularity.search.trim().toLowerCase();
+    let rows;
+    let stockPlan = null;
+    if (popularity.mode === 'stock') {
+      stockPlan = computeStockPlan();
+      renderStockSummary(stockPlan);
+      rows = stockPlan.lines.filter((line) => stockLineMatches(line, popularity.filter, term));
+    } else if (popularity.mode === 'kits') rows = result.kits.filter((kit) => !term || `${kit.name} ${kitSettings(kit.name).manufacturer || ''}`.toLowerCase().includes(term));
+    else if (popularity.mode === 'both') rows = result.rows.filter((row) => row.inAll && popularityRowMatches(row, popularity.filter, term));
+    else rows = result.rows.filter((row) => popularityRowMatches(row, popularity.filter, term));
+    const total = popularity.mode === 'stock' ? stockPlan.lines.length : popularity.mode === 'kits' ? result.kits.length : popularity.mode === 'both' ? result.rows.filter((row) => row.inAll).length : result.rows.length;
+    dom.popularityCount.textContent = `${rows.length} of ${total} shown`;
+
+    const columns = popularity.mode === 'stock' ? stockColumns(rows) : popularityColumns(popularity.mode, rows);
+    const sortColumn = columns.find((column) => column.key === popularity.sort?.key);
+    if (sortColumn) rows = Core.sortItems(rows, popularity.sort, { keyFor: sortColumn.sortValue, tieBreaker: (row) => row.part || row.name || row.row?.part });
+    else if (popularity.mode === 'both') rows = [...rows].sort((a, b) => a.bothRank - b.bothRank || a.part.localeCompare(b.part, undefined, { numeric: true }));
+
+    const table = document.createElement('table');
+    table.className = 'parts-table pop-table';
+    const headRow = table.createTHead().insertRow();
+    columns.forEach((column) => {
+      const th = document.createElement('th');
+      th.className = column.number ? 'number sortable' : 'sortable';
+      th.scope = 'col';
+      th.dataset.popSort = column.key;
+      const label = document.createElement('span');
+      label.textContent = column.label;
+      const caret = document.createElement('span');
+      caret.className = 'sort-caret';
+      caret.setAttribute('aria-hidden', 'true');
+      th.append(label, caret);
+      const sorted = popularity.sort?.key === column.key;
+      th.setAttribute('aria-sort', sorted ? (popularity.sort.direction === 'asc' ? 'ascending' : 'descending') : 'none');
+      th.tabIndex = 0;
+      headRow.append(th);
+    });
+    const body = table.createTBody();
+    if (!rows.length) {
+      const empty = body.insertRow();
+      empty.className = 'empty-row';
+      const cell = empty.insertCell();
+      cell.colSpan = columns.length;
+      cell.textContent = 'Nothing matches the current search or filter.';
+    }
+    rows.forEach((row) => {
+      const tr = body.insertRow();
+      if (popularity.mode !== 'kits' && popularity.mode !== 'stock' && row.inKit && row.kits.length > 1) tr.classList.add('common');
+      columns.forEach((column) => {
+        const td = tr.insertCell();
+        td.className = [column.number ? 'number' : '', column.className || '', column.strong ? 'strong' : ''].filter(Boolean).join(' ');
+        td.append(column.cell(row));
+      });
+      if (popularity.mode === 'kits' && popularity.open.has(row.name)) {
+        const detail = body.insertRow();
+        detail.className = 'pop-detail';
+        const cell = detail.insertCell();
+        cell.colSpan = columns.length;
+        cell.append(buildKitMembersTable(row));
+      }
+    });
+    dom.popularityTable.replaceChildren(table);
+  }
+
+  function buildKitMembersTable(kit) {
+    const markets = state.history.markets;
+    const table = document.createElement('table');
+    table.className = 'parts-table pop-members';
+    const head = table.createTHead().insertRow();
+    ['Article', 'Article name', ...markets.map((market) => `Sold in ${market.name}`), 'Total'].forEach((label, index) => {
+      const th = document.createElement('th');
+      th.scope = 'col';
+      if (index >= 2) th.className = 'number';
+      th.textContent = label;
+      head.append(th);
+    });
+    const body = table.createTBody();
+    [...kit.members].sort((a, b) => b.total - a.total || a.part.localeCompare(b.part, undefined, { numeric: true })).forEach((member) => {
+      const tr = body.insertRow();
+      if (member.total === 0) tr.classList.add('pop-unsold');
+      [member.part, member.description, ...member.sold.map((value) => formatQuantity(value)), formatQuantity(member.total)].forEach((value, index) => {
+        const td = tr.insertCell();
+        if (index >= 2) td.className = 'number';
+        if (index === 0) td.className = 'part-cell';
+        td.textContent = value;
+      });
+    });
+    return table;
+  }
+
+  function exportPopularity() {
+    const markets = state.history.markets;
+    if (!markets.length) {
+      showToast('Add a sales history first.', true);
+      return;
+    }
+    try {
+      const result = popularityResult();
+      const years = state.history.years;
+      const marketHeads = markets.map((market) => `Sold in ${market.name}`);
+      const round = (value) => Math.round(value * 100) / 100;
+      const partRows = (rows, rankOf) => rows.map((row) => [rankOf(row), row.part, row.altParts.join(', '), row.description, row.inKit ? row.kits.join(', ') : 'Not in a kit', ...row.sold.map(round), round(row.total), round(row.total / years)]);
+      const partHead = ['Rank', 'Article', 'Alt. article no.', 'Article name', 'Kit', ...marketHeads, 'Total', `Per year (${years} years)`];
+      const book = XLSX.utils.book_new();
+      const add = (name, rows, widths) => {
+        const sheet = XLSX.utils.aoa_to_sheet(rows);
+        sheet['!cols'] = widths.map((wch) => ({ wch }));
+        XLSX.utils.book_append_sheet(book, sheet, name);
+      };
+      const widths = [7, 16, 16, 34, 28, ...markets.map(() => 14), 12, 16];
+      add('All parts', [partHead, ...partRows(result.rows, (row) => row.rank)], widths);
+      if (markets.length > 1) {
+        const both = result.rows.filter((row) => row.inAll).sort((a, b) => a.bothRank - b.bothRank);
+        add('Popular in both', [partHead, ...partRows(both, (row) => row.bothRank)], widths);
+      }
+      const plan = computeStockPlan();
+      add('Suggested stock', [
+        ['Rank', 'Article', 'Alt. article no.', 'Article name', 'Class', 'Sold per year', 'Quantity now', 'Suggested stock', `Value in ${state.config.outputCurrency}`, 'Why'],
+        ...plan.lines.map((line) => [line.row.rank, line.row.part, line.row.altParts.join(', '), line.row.description, line.cls, round(line.perYear), line.now, line.target, line.value === null ? null : round(line.value), STOCK_REASONS[line.reason] || '']),
+      ], [7, 16, 16, 34, 7, 13, 13, 15, 16, 30]);
+      add('Kits', [
+        ['Rank', 'Kit', 'Manufacturer', 'Parts in kit', 'Parts sold', ...marketHeads, 'Total', 'Most popular part'],
+        ...result.kits.map((kit) => [kit.rank, kit.name, kitSettings(kit.name).manufacturer || '', kit.parts, kit.soldParts, ...kit.sold.map(round), round(kit.total), kit.top ? `${kit.top.part} ${kit.top.description}`.trim() : '']),
+      ], [7, 26, 18, 12, 12, ...markets.map(() => 14), 12, 40]);
+      const base = state.fileName.replace(/\.[^.]+$/, '').replace(/-(?:consolidated|partslist-project)$/i, '') || 'partslist';
+      XLSX.writeFile(book, `${base}-popularity.xlsx`, { bookType: 'xlsx', compression: true });
+      showToast('The popularity list was saved.');
+    } catch (error) {
+      console.error(error);
+      showToast(error.message || 'The popularity list could not be exported.', true);
+    }
+  }
+
+  function bindPopularity() {
+    dom.popularityFile.addEventListener('change', async (event) => {
+      const files = [...event.target.files];
+      if (files.length) await addSalesHistory(files);
+      event.target.value = '';
+    });
+    dom.popularityExport.addEventListener('click', exportPopularity);
+    const stockChanged = () => {
+      const stock = state.history.stock;
+      stock.months = finiteOr(dom.stockMonths.value, stock.months, 1, 36);
+      stock.service = Number(dom.stockService.value) || stock.service;
+      const budget = toNumber(dom.stockBudget.value);
+      stock.budget = budget !== null && budget > 0 ? budget : null;
+      stock.complete = dom.stockComplete.checked;
+      markProjectDirty();
+      renderPopularity();
+    };
+    [dom.stockMonths, dom.stockService, dom.stockBudget, dom.stockComplete].forEach((input) => input.addEventListener('change', stockChanged));
+    dom.stockApply.addEventListener('click', applyStockPlan);
+    dom.popularityModes.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-pop-mode]');
+      if (!button || button.dataset.popMode === state.popularity.mode) return;
+      state.popularity.mode = button.dataset.popMode;
+      state.popularity.sort = null;
+      state.popularity.filter = 'all';
+      renderPopularity();
+    });
+    dom.popularitySearch.addEventListener('input', () => {
+      state.popularity.search = dom.popularitySearch.value;
+      renderPopularity();
+      dom.popularitySearch.focus();
+    });
+    dom.popularityFilter.addEventListener('change', () => {
+      state.popularity.filter = dom.popularityFilter.value;
+      renderPopularity();
+    });
+    dom.popularityYears.addEventListener('change', () => {
+      state.history.years = finiteOr(dom.popularityYears.value, state.history.years, 1, 50);
+      markProjectDirty();
+      renderPopularity();
+    });
+    dom.popularityChips.addEventListener('change', (event) => {
+      const name = event.target.closest('[data-pop-name]');
+      if (name) renameMarket(Number(name.dataset.popName), name.value);
+    });
+    dom.popularityChips.addEventListener('click', (event) => {
+      const remove = event.target.closest('[data-pop-remove]');
+      if (remove) removeMarket(Number(remove.dataset.popRemove));
+    });
+    const onTable = (event) => {
+      const kit = event.target.closest('[data-pop-kit]');
+      if (kit) {
+        const open = state.popularity.open;
+        if (open.has(kit.dataset.popKit)) open.delete(kit.dataset.popKit);
+        else open.add(kit.dataset.popKit);
+        renderPopularity();
+        return;
+      }
+      const head = event.target.closest('[data-pop-sort]');
+      if (!head) return;
+      const current = state.popularity.sort;
+      state.popularity.sort = current?.key === head.dataset.popSort
+        ? { key: current.key, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+        : { key: head.dataset.popSort, direction: ['rank', 'part', 'alt', 'description', 'kit', 'kits', 'maker', 'cls', 'reason'].includes(head.dataset.popSort) ? 'asc' : 'desc' };
+      renderPopularity();
+    };
+    dom.popularityTable.addEventListener('click', onTable);
+    dom.popularityTable.addEventListener('keydown', (event) => {
+      if ((event.key === 'Enter' || event.key === ' ') && event.target.closest('[data-pop-sort]')) {
+        event.preventDefault();
+        onTable(event);
+      }
+    });
+  }
+
   /* ---------- Ease of use: column presets, price explainer, problem bar, price list, setup dialog, example ---------- */
 
   // Ready-made column sets so nobody has to tick twenty boxes. "simple" is what most people need.
@@ -1283,13 +2000,16 @@
     purchase: { show: ['sources', 'part', 'description', 'altPart', 'quantity', 'manufacturer', 'currency', 'unitPrice', 'convertedTotal', 'discountedTotal', 'kitFreight', 'landedCost'] },
     sales: { show: ['part', 'description', 'altPart', 'quantity', 'match', 'salesGroup', 'salesPerYear', 'sellingTotal', 'freightWithMargin', 'unitSalesPrice', 'lineTotal', 'vat', 'lineTotalInclVat'] },
     full: { hide: DEFAULT_HIDDEN_COLUMNS },
+    // Needs a sales history; without one it falls back to the simple view. The sold-per-market columns are matched by prefix.
+    popularity: { show: ['part', 'description', 'altPart', 'quantity', 'manufacturer', 'popRank', 'soldTotal'], prefix: ['sold:'] },
   };
 
   function currentHiddenColumns() {
-    const preset = COLUMN_PRESETS[state.columnPreset];
+    const preset = state.columnPreset === 'popularity' && !state.history.markets.length ? COLUMN_PRESETS.simple : COLUMN_PRESETS[state.columnPreset];
     if (!preset) return state.hiddenColumns;
     if (preset.hide) return [...preset.hide];
-    return consolidatedColumns().map((column) => column.key).filter((key) => !preset.show.includes(key));
+    return consolidatedColumns().map((column) => column.key)
+      .filter((key) => !preset.show.includes(key) && !(preset.prefix || []).some((prefix) => key.startsWith(prefix)));
   }
 
   function setColumnPreset(name) {
@@ -1301,8 +2021,11 @@
   }
 
   function renderColumnPresets() {
+    const hasHistory = state.history.markets.length > 0;
     document.querySelectorAll('[data-column-preset]').forEach((button) => {
-      button.setAttribute('aria-pressed', String(button.dataset.columnPreset === state.columnPreset));
+      if (button.dataset.columnPreset === 'popularity') button.classList.toggle('hidden', !hasHistory);
+      const active = button.dataset.columnPreset === state.columnPreset && (hasHistory || state.columnPreset !== 'popularity');
+      button.setAttribute('aria-pressed', String(active));
     });
   }
 
@@ -2211,6 +2934,12 @@
       groups: state.groups.map((group) => ({ ...group })),
       items: JSON.parse(JSON.stringify(state.items)),
       sales: { ...state.sales },
+      // The purchase history travels with the saved project so the popularity view can be restored: [article, name, pieces].
+      history: {
+        years: state.history.years,
+        stock: { ...state.history.stock },
+        markets: state.history.markets.map((market) => ({ name: market.name, fileName: market.fileName, items: market.items.map((entry) => [entry.itemNo, entry.description, entry.quantity]) })),
+      },
       scenario: { ...state.scenario },
       supplier: { ...state.supplier },
       customer: { ...state.customer },
@@ -2341,6 +3070,8 @@
     };
     FLOW_OVERRIDE_KEYS.forEach((key) => { state.flowOverrides[key] = nullableNumber(settings.flowOverrides?.[key]); });
     state.wireNodePositions = Core.sanitizeWirePositions(settings.wireNodePositions);
+    state.history = restoreHistory(settings.history);
+    state.popularityCache = null;
 
     const warehouse = settings.warehouse || {};
     Object.keys(WAREHOUSE_DEFAULTS).forEach((key) => {
@@ -3523,7 +4254,7 @@
       const isRates = (document) => /.json$/i.test(document.name);
       const lists = documents.filter((document) => !isRates(document)).map((document) => new File([document.bytes], document.name));
       if (!lists.length) throw new Error('The saved documents contain no parts lists.');
-      await addKitWorkbooks(lists, { review: false });
+      await addKitWorkbooks(lists, { review: false, quiet: true });
       const rates = documents.find(isRates);
       if (rates) await importWarehouseRates(new File([rates.bytes], rates.name, { type: 'application/json' }));
       showToast('Saved documents imported.');
@@ -3537,6 +4268,11 @@
   }
 
   async function openWorkbookFile(file) {
+    const split = await splitHistoryFiles([file]);
+    if (split.history.length) {
+      await addSalesHistory(split.history, { show: true });
+      return;
+    }
     if (state.workbook && state.projectDirty && !window.confirm(translateUi('Replace the open project? Changes since the last save will be lost.'))) return;
     let isCatalogue = false;
     try {
@@ -3549,6 +4285,15 @@
   }
 
   async function addKitWorkbooks(files, options = {}) {
+    // Purchase histories in the selection are not kits: they are added after the kits, as sales history.
+    if (!options.historySplit) {
+      const split = await splitHistoryFiles(files);
+      if (split.history.length) {
+        if (split.other.length) await addKitWorkbooks(split.other, { ...options, historySplit: true });
+        await addSalesHistory(split.history, { show: !options.quiet });
+        return;
+      }
+    }
     if (!state.workbook && !options.fresh) {
       const startsAsCatalogue = catalogueSheetsOf(await readWorkbookFile(files[0])).length > 0;
       if (!startsAsCatalogue) {
@@ -3690,6 +4435,10 @@
       state.pairRates = {};
       state.liveRateCells = [];
       state.selectedCell = null;
+      // A new project starts without sales history; a saved project brings its own back with its settings.
+      state.history = defaultHistory();
+      state.popularity = { mode: 'parts', search: '', filter: 'all', sort: null, open: new Set() };
+      state.popularityCache = null;
       const persistedRates = { ...state.warehouse.rates };
       state.warehouse = {
         ...WAREHOUSE_DEFAULTS,
@@ -4243,6 +4992,7 @@
     items.sort((a, b) => Number(b.common) - Number(a.common) || a.part.localeCompare(b.part, undefined, { numeric: true }));
     state.consolidated = items.filter((item) => !item.excluded);
     state.excludedItems = items.filter((item) => item.excluded);
+    state.popularityCache = null;
     applyLandedCosts(state.consolidated, true);
     applyLandedCosts(state.excludedItems, false);
     state.kitSummaries = buildKitSummaries(kitOccurrences);
@@ -4636,6 +5386,7 @@
     updateKitRouteSummaries();
     renderCustomsGuides();
     if (state.activeView === VIEW.consolidated) renderConsolidated();
+    else if (state.activeView === VIEW.popularity) renderPopularity();
     else if (state.activeView === VIEW.dashboard) renderDashboard();
     else if (state.activeView === VIEW.warehouse) renderWarehouse();
     else if (state.activeView === VIEW.wire) {
@@ -4775,6 +5526,25 @@
       { key: 'lineTotalInclVat', label: `Line total incl. VAT in ${o}`, number: true, vat: true, sortValue: (item) => item.lineTotalInclVat, value: money('lineTotalInclVat'), required: true },
       { key: 'landedCost', label: `Landed cost in ${o}`, number: true, sortValue: (item) => item.landedCost, value: money('landedCost'), required: true },
       { key: 'pricingSource', label: 'Pricing source', sortValue: (item) => `${item.pricingSource} row ${item.pricingRow}`, value: (item) => `${item.pricingSource} row ${item.pricingRow}` },
+      ...historyColumns(),
+    ];
+  }
+
+  // Columns that show how many pieces each market has bought; only present once a sales history is loaded.
+  function historyColumns() {
+    const markets = state.history.markets;
+    if (!markets.length) return [];
+    const rowOf = (item) => popularityRowOf(item);
+    return [
+      { key: 'popRank', label: 'Popularity rank', number: true, sortValue: (item) => rowOf(item)?.rank ?? null, value: (item) => (rowOf(item)?.rank ? `#${rowOf(item).rank}` : '—') },
+      { key: 'soldTotal', label: 'Sold, all markets', number: true, sortValue: (item) => rowOf(item)?.total ?? null, value: (item) => formatQuantity(rowOf(item)?.total ?? 0) },
+      ...markets.map((market, index) => ({
+        key: `sold:${market.name}`,
+        label: `Sold in ${market.name}`,
+        number: true,
+        sortValue: (item) => rowOf(item)?.sold[index] ?? null,
+        value: (item) => formatQuantity(rowOf(item)?.sold[index] ?? 0),
+      })),
     ];
   }
 
@@ -4831,6 +5601,8 @@
     if (filter === 'selected') return state.selectedKeys.has(item.key);
     if (filter === 'overridden') return item.quantityOverridden || item.salesOverridden || item.multiplierOverridden;
     if (filter === 'missing') return Core.hasMissingInputs(item);
+    if (filter === 'soldall') return Boolean(popularityRowOf(item)?.inAll);
+    if (filter === 'notsold') return !popularityRowOf(item)?.total;
     if (filter.startsWith('group:')) return item.groupId === filter.slice(6);
     if (filter.startsWith('maker:')) return makerOf(item) === filter.slice(6);
     if (filter.startsWith('makercommon:')) return item.common && makerOf(item) === filter.slice(12);
@@ -4843,6 +5615,8 @@
     const options = [
       ['all', 'All parts'], ['common', 'Common parts'], ['unique', 'Unique parts'], ['selected', 'Selected'],
       ['overridden', 'With overrides'], ['ungrouped', 'No sales group'], ['missing', 'Missing inputs'],
+      ...(state.history.markets.length > 1 ? [['soldall', 'Sold in every market']] : []),
+      ...(state.history.markets.length ? [['notsold', 'Never sold']] : []),
       ...state.groups.map((group) => [`group:${group.id}`, `Group: ${group.name}`]),
       // With several manufacturers in one warehouse, each one gets its own common and unique lists.
       ...(makers.length > 1 ? makers.flatMap((maker) => [[`maker:${maker}`, `Manufacturer: ${maker}`], [`makercommon:${maker}`, `${maker}: common parts`], [`makerunique:${maker}`, `${maker}: unique parts`]]) : []),
@@ -7243,6 +8017,7 @@
   function renderTabs() {
     dom.tabs.replaceChildren(
       createTab('Consolidated', VIEW.consolidated),
+      createTab('Popularity', VIEW.popularity),
       createTab('Dashboard', VIEW.dashboard),
       createTab('Warehouse', VIEW.warehouse),
       createTab('Wire view', VIEW.wire),
@@ -7290,6 +8065,7 @@
     const isSheet = !SPECIAL_VIEWS.has(view);
     dom.welcome.classList.add('hidden');
     dom.consolidatedView.classList.toggle('hidden', view !== VIEW.consolidated);
+    dom.popularityView.classList.toggle('hidden', view !== VIEW.popularity);
     dom.dashboardView.classList.toggle('hidden', view !== VIEW.dashboard);
     dom.warehouseView.classList.toggle('hidden', view !== VIEW.warehouse);
     dom.wireView.classList.toggle('hidden', view !== VIEW.wire);

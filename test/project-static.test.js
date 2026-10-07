@@ -212,7 +212,22 @@ test('ease of use: column presets, price explainer, problem bar, customer price 
   const customer = app.slice(app.indexOf('function exportCustomerPriceList('), app.indexOf('/* -- A short setup dialog'));
   assert.doesNotMatch(customer, /landedCost|discountedTotal|kitFreight|fxMargin/);
   // The saved documents open without the setup dialog; a file added by hand gets it.
-  assert.match(app, /addKitWorkbooks\(lists, \{ review: false \}\)/);
+  assert.match(app, /addKitWorkbooks\(lists, \{ review: false, quiet: true \}\)/);
+});
+
+test('popularity: sales histories per market, popular-in-both, kit ranking and suggested stock', () => {
+  assert.match(html, /id="popularity-view"/);
+  ['parts', 'both', 'kits', 'stock'].forEach((mode) => assert.match(html, new RegExp(`data-pop-mode="${mode}"`)));
+  assert.match(html, /id="popularity-file"[^>]*multiple/);
+  assert.match(html, /data-column-preset="popularity"/);
+  assert.match(app, /VIEW = Object\.freeze\(\{[^}]*popularity/);
+  ['parseSalesHistory', 'buildPopularity', 'suggestStock'].forEach((name) => assert.ok(app.includes(`Core.${name}(`), name));
+  // The sales history is business data: part of the saved project, never of browser storage.
+  const prefs = app.slice(app.indexOf('function saveUiPreferences('), app.indexOf('function purgeLegacyLocalBusinessData('));
+  assert.doesNotMatch(prefs, /history/);
+  assert.match(app, /history: \{\s*years: state\.history\.years/);
+  // Histories chosen through the normal import buttons are recognised, and the saved documents may hold them.
+  assert.ok(app.includes('splitHistoryFiles('));
 });
 
 test('every manufacturer is its own route: own settings, exchange-rate buffer, percentage freight and an independent shipment', () => {

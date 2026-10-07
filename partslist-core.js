@@ -462,12 +462,293 @@
     return [...new Set(reasons)];
   }
 
+  /* ---------- Sales history: how many pieces of each article a market has bought ---------- */
+
+  // Article numbers are compared without case or spaces, so "2513-ag-11 " matches "2513-AG-11".
+  function historyKey(value) {
+    return cellText(value).toUpperCase().replace(/\s+/g, '');
+  }
+
+  // Quantities arrive as "321.00", "1 234,5" or plain numbers.
+  function historyNumber(value) {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    let text = cellText(value).replace(/[\s ]/g, '');
+    if (!/^-?[\d.,]+$/.test(text)) return null;
+    const comma = text.lastIndexOf(',');
+    const dot = text.lastIndexOf('.');
+    if (comma >= 0 && dot >= 0) text = comma > dot ? text.replace(/\./g, '').replace(',', '.') : text.replace(/,/g, '');
+    else if (comma >= 0) text = text.length - comma - 1 <= 2 ? text.replace(',', '.') : text.replace(/,/g, '');
+    const number = Number(text);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  // Reads a purchase/sales history: one column with the article number (optionally followed by " - description"),
+  // an optional description column and a quantity column. Several lines for the same article are added up.
+  // Returns null when the rows do not look like such a history (price lists are not histories).
+  function parseSalesHistory(rows) {
+    if (!Array.isArray(rows)) return null;
+    let headerRow = -1;
+    let itemColumn = -1;
+    let quantityColumn = -1;
+    let descriptionColumn = -1;
+    for (let index = 0; index < Math.min(rows.length, 12) && headerRow < 0; index += 1) {
+      const cells = (rows[index] || []).map((cell) => cellText(cell).toLowerCase());
+      if (cells.some((cell) => /price|pris|net\b|discount|rabatt/.test(cell))) continue;
+      const item = cells.findIndex((cell) => /^(?:item|article|part|artikel|art\.?)(?:\b|\s|$)/.test(cell));
+      const quantity = cells.findIndex((cell, column) => column !== item && /^(?:quantity|qty|antal|kvantitet|mengde|sold|units)\b/.test(cell));
+      if (item < 0 || quantity < 0) continue;
+      headerRow = index;
+      itemColumn = item;
+      quantityColumn = quantity;
+      descriptionColumn = cells.findIndex((cell, column) => column !== item && /^(?:description|beskrivning|name|artikelnamn|benevnelse)\b/.test(cell));
+    }
+    if (headerRow < 0) return null;
+    // A second header line with price columns means this is a price list, not a history.
+    if ((rows[headerRow + 1] || []).some((cell) => /^(?:list |net |unit |total )?(?:price|pris)\b/i.test(cellText(cell)))) return null;
+    const combined = descriptionColumn < 0;
+    const merged = new Map();
+    let reportedTotal = null;
+    let lines = 0;
+    for (let index = headerRow + 1; index < rows.length; index += 1) {
+      const row = rows[index] || [];
+      const itemText = cellText(row[itemColumn]);
+      const quantity = historyNumber(row[quantityColumn]);
+      if (!itemText || quantity === null) continue;
+      if (/^(?:total|totalt|summa|sum)\b/i.test(itemText)) {
+        reportedTotal = quantity;
+        continue;
+      }
+      let itemNo = itemText;
+      let description = combined ? '' : cellText(row[descriptionColumn]);
+      if (combined) {
+        const split = itemText.match(/^(.+?)\s+-\s+(.*)$/);
+        if (split) {
+          itemNo = split[1].trim();
+          description = split[2].trim();
+        }
+      }
+      const key = historyKey(itemNo);
+      if (!key) continue;
+      lines += 1;
+      const entry = merged.get(key) || { key, itemNo, description, quantity: 0, descriptionQuantity: -Infinity };
+      entry.quantity += quantity;
+      // The description of the line with the most pieces is the one shown.
+      if (quantity > entry.descriptionQuantity && description) {
+        entry.description = description;
+        entry.descriptionQuantity = quantity;
+      }
+      merged.set(key, entry);
+    }
+    const items = [...merged.values()]
+      .filter((entry) => entry.quantity > 0)
+      .map(({ key, itemNo, description, quantity }) => ({ key, itemNo, description, quantity }))
+      .sort((a, b) => b.quantity - a.quantity || a.itemNo.localeCompare(b.itemNo, undefined, { numeric: true }));
+    if (!items.length) return null;
+    return { items, lines, total: items.reduce((sum, entry) => sum + entry.quantity, 0), reportedTotal };
+  }
+
+  // Competition ranking: equal values share a rank (1, 2, 2, 4). Values of zero or less are not ranked.
+  function rankValues(values) {
+    const sorted = [...values].filter((value) => value > 0).sort((a, b) => b - a);
+    return values.map((value) => (value > 0 ? sorted.indexOf(value) + 1 : null));
+  }
+
+  // Joins the parts of the project to the sales of each market and ranks them.
+  //   parts:   [{ key, part, altParts, description, kits: [kit names], manufacturer }]
+  //   markets: [{ name, items: [{ key, itemNo, description, quantity }] }]
+  // A part is found by its article number or by its alternative number; one sale is never counted twice.
+  function buildPopularity({ parts = [], markets = [], kitOrder = [] } = {}) {
+    const lookups = markets.map((market) => new Map((market.items || []).map((entry) => [entry.key, entry])));
+    const matchedKeys = markets.map(() => new Set());
+    const rows = parts.map((part) => {
+      const keys = [...new Set([part.part, ...(part.altParts || [])].map(historyKey).filter(Boolean))];
+      const sold = lookups.map((lookup, marketIndex) => keys.reduce((sum, key) => {
+        const entry = lookup.get(key);
+        if (!entry) return sum;
+        matchedKeys[marketIndex].add(key);
+        return sum + entry.quantity;
+      }, 0));
+      return { key: part.key, part: part.part, altParts: part.altParts || [], description: part.description || '', kits: part.kits || [], manufacturer: part.manufacturer || '', inKit: true, sold };
+    });
+    // Articles that were bought but are in no kit are kept: they show what the kits do not cover.
+    const kitKeys = new Set(rows.flatMap((row) => [row.part, ...row.altParts].map(historyKey)));
+    const outside = new Map();
+    markets.forEach((market, marketIndex) => {
+      (market.items || []).forEach((entry) => {
+        if (kitKeys.has(entry.key)) return;
+        const row = outside.get(entry.key) || { key: entry.key, part: entry.itemNo, altParts: [], description: entry.description, kits: [], manufacturer: '', inKit: false, sold: markets.map(() => 0) };
+        row.sold[marketIndex] += entry.quantity;
+        if (!row.description) row.description = entry.description;
+        outside.set(entry.key, row);
+      });
+    });
+    outside.forEach((row) => rows.push(row));
+
+    const totals = rows.map((row) => row.sold.reduce((sum, value) => sum + value, 0));
+    const totalRanks = rankValues(totals);
+    const marketRanks = markets.map((market, index) => rankValues(rows.map((row) => row.sold[index])));
+    rows.forEach((row, index) => {
+      row.total = totals[index];
+      row.rank = totalRanks[index];
+      row.marketRanks = markets.map((market, marketIndex) => marketRanks[marketIndex][index]);
+      row.inAll = markets.length > 0 && row.sold.every((value) => value > 0);
+      row.weakest = markets.length ? Math.min(...row.sold) : 0;
+      row.bothRank = null;
+    });
+    // "Popular in both": ranked by the market that buys the least, so one big market cannot carry a part alone.
+    rows.filter((row) => row.inAll)
+      .sort((a, b) => b.weakest - a.weakest || b.total - a.total)
+      .forEach((row, index, list) => {
+        const previous = list[index - 1];
+        row.bothRank = previous && previous.weakest === row.weakest && previous.total === row.total ? previous.bothRank : index + 1;
+      });
+    rows.sort((a, b) => b.total - a.total || a.part.localeCompare(b.part, undefined, { numeric: true }));
+
+    const kitNames = kitOrder.length ? kitOrder : [...new Set(rows.flatMap((row) => row.kits))];
+    const kits = kitNames.map((name) => {
+      const members = rows.filter((row) => row.inKit && row.kits.includes(name));
+      const sold = markets.map((market, index) => members.reduce((sum, row) => sum + row.sold[index], 0));
+      const top = members.find((row) => row.total > 0) || null;
+      return {
+        name,
+        parts: members.length,
+        soldParts: members.filter((row) => row.total > 0).length,
+        sold,
+        total: sold.reduce((sum, value) => sum + value, 0),
+        top: top ? { part: top.part, description: top.description, total: top.total } : null,
+        members,
+      };
+    }).sort((a, b) => b.total - a.total || a.name.localeCompare(b.name, undefined, { numeric: true }));
+    const kitRanks = rankValues(kits.map((kit) => kit.total));
+    kits.forEach((kit, index) => { kit.rank = kitRanks[index]; });
+
+    const coverage = markets.map((market, index) => {
+      const entries = market.items || [];
+      const matched = entries.filter((entry) => matchedKeys[index].has(entry.key));
+      return {
+        name: market.name,
+        units: entries.reduce((sum, entry) => sum + entry.quantity, 0),
+        matchedUnits: matched.reduce((sum, entry) => sum + entry.quantity, 0),
+        articles: entries.length,
+        matchedArticles: matched.length,
+      };
+    });
+    return { rows, kits, coverage };
+  }
+
+  /* ---------- Suggested stock from the sales history ---------- */
+
+  // z-values for the share of the demand that should be covered without running out.
+  const SERVICE_LEVELS = { 0.9: 1.282, 0.95: 1.645, 0.99: 2.326 };
+
+  // Suggests how many pieces of each kit part to keep in stock.
+  //   rows:   the kit rows of buildPopularity (inKit, total, key, …); kits: its kit list (members, parts, soldParts)
+  //   a part that sells needs: its demand over the cover period, plus a safety margin for the chance that
+  //   demand runs above average (demand is treated as random "arrivals", so the margin grows with the square
+  //   root of the expected demand), and at least one piece.
+  //   unsold parts get nothing, except in kits that are mostly sold (completeKits) where one piece keeps the kit complete.
+  //   budget (optional, in the same money as unitCost): trims the plan in steps until it fits:
+  //   safety margins first, then the slow sellers down to one piece, then the kit-completing pieces, then the slowest parts.
+  function suggestStock({ rows = [], kits = [], years = 5, monthsCover = 6, serviceLevel = 0.95, completeKits = true, budget = null, unitCost = () => null, current = () => null } = {}) {
+    const z = SERVICE_LEVELS[serviceLevel] ?? SERVICE_LEVELS[0.95];
+    const spanYears = Math.max(years, 0.1);
+    const parts = rows.filter((row) => row.inKit);
+    const sold = parts.filter((row) => row.total > 0).sort((a, b) => b.total - a.total);
+    const grand = sold.reduce((sum, row) => sum + row.total, 0);
+    const classes = new Map();
+    let running = 0;
+    sold.forEach((row) => {
+      classes.set(row.key, grand <= 0 || running / grand < 0.8 ? 'A' : running / grand < 0.95 ? 'B' : 'C');
+      running += row.total;
+    });
+    const completers = new Set();
+    if (completeKits) {
+      kits.forEach((kit) => {
+        if (kit.parts > 0 && kit.soldParts / kit.parts >= 0.5) kit.members.filter((member) => member.total === 0).forEach((member) => completers.add(member.key));
+      });
+    }
+    const lines = parts.map((row) => {
+      const perYear = row.total / spanYears;
+      const cover = (perYear * monthsCover) / 12;
+      const safety = row.total > 0 ? z * Math.sqrt(cover) : 0;
+      const needed = row.total > 0 ? Math.max(1, Math.ceil(cover + safety)) : completers.has(row.key) ? 1 : 0;
+      const cost = unitCost(row);
+      return {
+        row,
+        key: row.key,
+        cls: classes.get(row.key) || '',
+        perYear,
+        cover,
+        safety,
+        target: needed,
+        reason: row.total > 0 ? 'sales' : needed ? 'kit' : 'none',
+        cost: Number.isFinite(cost) ? cost : null,
+        now: current(row),
+      };
+    });
+    const valueOf = () => lines.reduce((sum, line) => sum + (line.cost === null ? 0 : line.cost * line.target), 0);
+    const limit = Number.isFinite(budget) && budget > 0 ? budget : null;
+    if (limit !== null && valueOf() > limit) {
+      const steps = [
+        () => lines.forEach((line) => {
+          const base = line.row.total > 0 ? Math.max(1, Math.ceil(line.cover)) : line.target;
+          if (base < line.target) { line.target = base; line.reason = 'trimmed'; }
+        }),
+        () => lines.forEach((line) => {
+          if (line.cls === 'C' && line.target > 1) { line.target = 1; line.reason = 'trimmed'; }
+        }),
+        () => lines.forEach((line) => {
+          if (line.row.total === 0 && line.target > 0) { line.target = 0; line.reason = 'cut'; }
+        }),
+      ];
+      // The slowest sellers (class C) are dropped before the popular parts are reduced.
+      steps.push(() => lines.forEach((line) => {
+        if (line.cls === 'C' && line.target > 0) { line.target = 0; line.reason = 'cut'; }
+      }));
+      // The popular parts then share the cut in proportion, keeping at least one piece each.
+      steps.push(() => {
+        const factor = limit / valueOf();
+        lines.forEach((line) => {
+          if (line.target > 1) { line.target = Math.max(1, Math.floor(line.target * factor)); line.reason = 'trimmed'; }
+        });
+      });
+      for (const step of steps) {
+        if (valueOf() <= limit) break;
+        step();
+      }
+      if (valueOf() > limit) {
+        [...lines].filter((line) => line.target > 0 && line.cost !== null).sort((a, b) => a.row.total - b.row.total).forEach((line) => {
+          if (valueOf() <= limit) return;
+          line.target = 0;
+          line.reason = 'cut';
+        });
+      }
+    }
+    lines.forEach((line) => {
+      line.value = line.cost === null ? null : line.cost * line.target;
+      line.valueNow = line.cost === null || line.now === null ? null : line.cost * line.now;
+    });
+    lines.sort((a, b) => b.row.total - a.row.total || a.row.part.localeCompare(b.row.part, undefined, { numeric: true }));
+    return {
+      lines,
+      value: valueOf(),
+      valueNow: lines.reduce((sum, line) => sum + (line.valueNow ?? 0), 0),
+      pieces: lines.reduce((sum, line) => sum + line.target, 0),
+      stocked: lines.filter((line) => line.target > 0).length,
+      overBudget: limit !== null && valueOf() > limit,
+      unknownCost: lines.filter((line) => line.target > 0 && line.cost === null).length,
+    };
+  }
+
   function hasMissingInputs(item) {
     return missingInputReasons(item).length > 0;
   }
 
   return {
     assessProfitabilityCompleteness,
+    buildPopularity,
+    historyKey,
+    parseSalesHistory,
     allocationShares,
     compareSortValues,
     EU_MEMBERS,
@@ -493,6 +774,7 @@
     requiredLocations,
     salesVatRate,
     sortItems,
+    suggestStock,
     sanitizeWirePositions,
     summarizeOccurrences,
   };

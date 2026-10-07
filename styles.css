@@ -81,7 +81,7 @@ h3 { margin-bottom: 8px; font-size: 15px; }
 .header-left .brand > div { min-width: 0; }
 .header-left .brand h1, .header-left .brand p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .header-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
-#workbook-file, #add-kit-file { display: none; }
+#workbook-file, #add-kit-file, #popularity-file { display: none; }
 #secure-project-file { display: none; }
 
 /* Every header control shares one height, radius, border and type size. */
@@ -1428,3 +1428,42 @@ input[data-vat-field][readonly] { border-style: dashed; color: var(--ink-2); bac
 .maker-setup-copy { margin: 0 0 10px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
 .maker-setup-body { margin-bottom: 12px; }
 .map-wire-label { fill: #1c4f8a; font-family: inherit; font-size: 10px; font-weight: 800; paint-order: stroke; stroke: #eef4f7; stroke-width: 3.5px; stroke-linejoin: round; pointer-events: none; }
+
+/* ---------- Popularity (sales history per market) ---------- */
+.pop-markets { display: grid; gap: 8px; margin: 4px 0 10px; }
+.pop-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.pop-market { position: relative; display: grid; gap: 2px; min-width: 200px; max-width: 320px; padding: 8px 30px 8px 10px; border: 1px solid var(--line-strong); border-radius: 10px; background: #fff; }
+.pop-market input { min-height: 26px; padding: 2px 6px; font-size: 13px; font-weight: 800; border-color: transparent; background: #f5f8f6; }
+.pop-market input:focus { border-color: var(--green-700); background: #fff; }
+.pop-market small { color: var(--muted); font-size: 11px; line-height: 1.35; }
+.pop-market .pop-file { font-size: 10px; opacity: .8; overflow-wrap: anywhere; }
+.pop-remove { position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; color: var(--muted); background: transparent; font-size: 16px; line-height: 1; cursor: pointer; }
+.pop-remove:hover { color: #fff; background: #b64b3b; }
+.pop-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.pop-years { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 700; }
+.pop-years input { width: 64px; min-height: 30px; font-size: 12px; }
+.pop-empty { max-width: 560px; margin: 8px 0; padding: 14px 16px; border: 1px dashed var(--line-strong); border-radius: 12px; background: #fbfcfb; }
+.pop-empty h3 { margin: 0 0 6px; font-size: 15px; }
+.pop-empty p, .pop-empty li { color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.pop-empty ol { margin: 6px 0; padding-left: 20px; }
+.pop-note { margin: 0 0 8px; }
+.pop-table td.number, .pop-members td.number { font-variant-numeric: tabular-nums; }
+.pop-table td.strong { font-weight: 800; }
+.pop-rank { color: var(--muted); font-size: 10px; font-weight: 700; }
+.pop-muted { color: var(--muted); font-style: italic; }
+.pop-bar { display: block; width: 90px; height: 8px; border-radius: 999px; background: #e8eee9; overflow: hidden; }
+.pop-bar i { display: block; height: 100%; border-radius: 999px; background: var(--green-700); }
+.pop-kit-toggle { padding: 0; border: 0; color: var(--green-800); background: transparent; font: inherit; font-weight: 800; text-align: left; cursor: pointer; }
+.pop-kit-toggle:hover { text-decoration: underline; }
+.pop-detail > td { padding: 4px 8px 10px 26px; background: #fbfcfb; }
+.pop-members { width: auto; min-width: 420px; }
+.pop-members tr.pop-unsold td { color: var(--muted); }
+.pop-stock { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 14px; margin: 0 0 8px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: #fbfcfb; }
+.pop-stock label { display: grid; gap: 3px; color: var(--muted); font-size: 11px; font-weight: 700; }
+.pop-stock input[type="number"], .pop-stock select { width: 130px; min-height: 30px; font-size: 12px; }
+.pop-stock label.pop-check { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; }
+.pop-stock-summary { margin: 0 0 6px; color: var(--green-800); font-size: 12.5px; font-weight: 750; }
+.pop-stock-summary.warning { color: #8a5a12; }
+.pop-up { color: var(--green-800); font-weight: 800; }
+.pop-down { color: #a3452f; font-weight: 800; }
+.pop-stock input[type="checkbox"] { width: 16px; height: 16px; min-height: 0; padding: 0; }

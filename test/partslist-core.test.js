@@ -2,6 +2,9 @@
 const assert = require('node:assert/strict');
 const {
   assessProfitabilityCompleteness,
+  buildPopularity,
+  parseSalesHistory,
+  suggestStock,
   allocationShares,
   EU_MEMBERS,
   catalogueSheetName,
@@ -313,4 +316,97 @@ test('catalogue kits become tidy sheets with safe names', () => {
   const rows = catalogueSheetRows({ title: 'SPARE PART KIT X', number: '1000333', notes: [], lines: [{ quantity: 2, description: 'O-Ring', article: 'D-1', alternate: '100.022', netPrice: 1.5000000001, listPrice: 2 }] }, { manufacturer: 'Häny', currency: 'EUR' });
   assert.deepEqual(rows[3], ['Article no.', 'Alt. article no.', 'Description', 'Quantity', 'Unit price (net)', 'Currency', 'List price (info)']);
   assert.deepEqual(rows[4], ['D-1', '100.022', 'O-Ring', 2, 1.5, 'EUR', 2]);
+});
+test('a sales history is read in both layouts and added up per article', () => {
+  const split = parseSalesHistory([
+    ['Item No.', 'Description', 'Quantity'],
+    ['Total', '', 12],
+    ['A-1', 'Valve seat', '4.00'],
+    ['a-1 ', 'Valve seat (old name)', 5],
+    ['B-2', 'Seal', '1 000,5'],
+    ['', 'no number', 3],
+  ]);
+  assert.equal(split.items.length, 2);
+  assert.deepEqual(split.items.map((entry) => [entry.itemNo, entry.quantity]), [['B-2', 1000.5], ['A-1', 9]]);
+  assert.equal(split.items[1].description, 'Valve seat (old name)');
+  assert.equal(split.reportedTotal, 12);
+
+  const combined = parseSalesHistory([['Item No. / Description', 'Quantity '], ['Total', 7], ['2513-AG-11 - Valve seat ZMP 700', 5], ['D-1', 2]]);
+  assert.deepEqual(combined.items.map((entry) => [entry.itemNo, entry.description, entry.quantity]), [['2513-AG-11', 'Valve seat ZMP 700', 5], ['D-1', '', 2]]);
+
+  // Price lists and empty sheets are not histories.
+  assert.equal(parseSalesHistory([['Item', 'Quantity', 'Net price'], ['A', 1, 2]]), null);
+  assert.equal(parseSalesHistory([['Item No.', 'Quantity'], ['List price', 'Net price'], ['A', 1]]), null);
+  assert.equal(parseSalesHistory([['Item No.', 'Quantity']]), null);
+  assert.equal(parseSalesHistory([['Hello']]), null);
+});
+
+test('popularity joins kit parts to every market and finds what sells in both', () => {
+  const parts = [
+    { key: 'a-1', part: 'A-1', altParts: ['100.001'], description: 'Valve seat', kits: ['Kit 1', 'Kit 2'] },
+    { key: 'b-2', part: 'B-2', altParts: [], description: 'Seal', kits: ['Kit 1'] },
+    { key: 'c-3', part: 'C-3', altParts: ['300.003'], description: 'Never sold', kits: ['Kit 2'] },
+  ];
+  const markets = [
+    { name: 'Norway', items: [{ key: 'A-1', itemNo: 'A-1', description: 'x', quantity: 10 }, { key: 'Z-9', itemNo: 'Z-9', description: 'Hose', quantity: 7 }] },
+    { key: 'unused', name: 'Sweden', items: [{ key: '100.001', itemNo: '100.001', description: 'x', quantity: 5 }, { key: 'B-2', itemNo: 'B-2', description: 'x', quantity: 30 }, { key: 'Z-9', itemNo: 'Z-9', description: 'Hose', quantity: 1 }] },
+  ];
+  const result = buildPopularity({ parts, markets });
+  const byPart = Object.fromEntries(result.rows.map((row) => [row.part, row]));
+  // A part is found by its alternative number too.
+  assert.deepEqual(byPart['A-1'].sold, [10, 5]);
+  assert.deepEqual(byPart['B-2'].sold, [0, 30]);
+  assert.equal(byPart['C-3'].total, 0);
+  assert.equal(byPart['C-3'].rank, null);
+  // Articles that are in no kit are kept and marked.
+  assert.equal(byPart['Z-9'].inKit, false);
+  assert.deepEqual(byPart['Z-9'].sold, [7, 1]);
+  // Popular in both: only articles sold in every market, ranked by the weaker market.
+  const both = result.rows.filter((row) => row.inAll).sort((a, b) => a.bothRank - b.bothRank).map((row) => row.part);
+  assert.deepEqual(both, ['A-1', 'Z-9']);
+  assert.equal(byPart['B-2'].inAll, false);
+  assert.equal(byPart['B-2'].bothRank, null);
+  // Ranks: total first, then per market.
+  assert.deepEqual(result.rows.map((row) => row.part).slice(0, 4), ['B-2', 'A-1', 'Z-9', 'C-3']);
+  assert.equal(byPart['A-1'].rank, 2);
+  assert.deepEqual(byPart['A-1'].marketRanks, [1, 2]);
+  // Kits add up their parts; a part in two kits counts for both, and nothing sold is not ranked.
+  const kit1 = result.kits.find((kit) => kit.name === 'Kit 1');
+  const kit2 = result.kits.find((kit) => kit.name === 'Kit 2');
+  assert.deepEqual(kit1.sold, [10, 35]);
+  assert.equal(kit1.soldParts, 2);
+  assert.equal(kit1.top.part, 'B-2');
+  assert.deepEqual(kit2.sold, [10, 5]);
+  assert.equal(kit2.soldParts, 1);
+  assert.equal(result.kits[0].name, 'Kit 1');
+  // Coverage shows how much of each market's volume the kits explain.
+  assert.deepEqual(result.coverage.map((entry) => [entry.name, entry.units, entry.matchedUnits]), [['Norway', 17, 10], ['Sweden', 36, 35]]);
+});
+
+test('suggested stock covers the demand of the cover period with a safety margin and respects a budget', () => {
+  const part = (key, total, kits = ['K']) => ({ key, part: key.toUpperCase(), altParts: [], description: '', kits, inKit: true, total, sold: [total] });
+  const rows = [part('a', 500), part('b', 100), part('c', 5), part('d', 0), part('e', 0)];
+  const members = (names) => rows.filter((row) => names.includes(row.key));
+  const kits = [{ name: 'K', parts: 4, soldParts: 3, members: members(['a', 'b', 'c', 'd']) }];
+  const plan = suggestStock({ rows, kits, years: 5, monthsCover: 6, serviceLevel: 0.95, unitCost: () => 10, current: () => 2 });
+  const by = Object.fromEntries(plan.lines.map((line) => [line.key, line]));
+  // 500 pieces in 5 years = 100 a year; six months = 50, plus 1.645 * sqrt(50) ≈ 11.6 → 62.
+  assert.equal(by.a.target, 62);
+  assert.equal(by.a.cls, 'A');
+  assert.equal(by.c.target, 2);                       // 0.5 expected + margin rounds up; a slow seller never gets less than one
+  assert.equal(by.c.cls, 'C');
+  assert.equal(by.d.target, 1);                       // unsold, but in a kit where most parts sell
+  assert.equal(by.d.reason, 'kit');
+  assert.equal(by.e.target, 0);                       // unsold and in no kit
+  assert.equal(plan.value, (62 + by.b.target + 2 + 1) * 10);
+  assert.equal(plan.valueNow, 5 * 2 * 10);
+  const without = suggestStock({ rows, kits, years: 5, completeKits: false, unitCost: () => 10 });
+  assert.equal(without.lines.find((line) => line.key === 'd').target, 0);
+  const tight = suggestStock({ rows, kits, years: 5, budget: 300, unitCost: () => 10 });
+  assert.ok(tight.value <= 300);
+  assert.equal(tight.overBudget, false);
+  assert.ok(tight.lines.find((line) => line.key === 'a').target >= 1);
+  assert.ok(tight.lines.find((line) => line.key === 'a').target < 62);
+  // A budget that cannot be met even with nothing stocked is reported.
+  assert.equal(suggestStock({ rows, kits, years: 5, budget: 0.5, unitCost: () => 10 }).value, 0);
 });

@@ -321,6 +321,7 @@
             <button type="button" data-column-preset="purchase" aria-pressed="false">Purchase</button>
             <button type="button" data-column-preset="sales" aria-pressed="false">Sales</button>
             <button type="button" data-column-preset="full" aria-pressed="false">Everything</button>
+            <button type="button" data-column-preset="popularity" aria-pressed="false" class="hidden" title="Show how many pieces each market has bought in the sales history">Popularity</button>
           </div>
           <span id="consolidated-count" class="toolbar-count"></span>
           <button id="customer-export" class="button small" type="button" title="A clean price list with prices only: no costs, margins or internal columns">Customer price list</button>
@@ -339,6 +340,64 @@
         </div>
         <div id="consolidated-actions" class="selection-bar hidden" aria-live="polite"></div>
         <div id="consolidated-table" class="table-shell" tabindex="0" aria-label="Scrollable consolidated parts table"></div>
+      </section>
+
+      <section id="popularity-view" class="content-view hidden">
+        <div class="content-header">
+          <div>
+            <p class="eyebrow">Sales history</p>
+            <h2>Popularity</h2>
+            <p id="popularity-summary" class="content-subtitle"></p>
+          </div>
+          <button id="popularity-export" class="button small" type="button" disabled>Save as .xlsx</button>
+        </div>
+        <div id="popularity-markets" class="pop-markets">
+          <div id="popularity-chips" class="pop-chips"></div>
+          <div class="pop-controls">
+            <label class="button small primary" for="popularity-file" role="button" tabindex="0">Add sales history</label>
+            <input id="popularity-file" type="file" accept=".csv,.xlsx,.xls,.xlsm,.xlsb,.ods" multiple>
+            <label id="popularity-years-label" class="pop-years">Years covered <input id="popularity-years" type="number" min="1" max="50" step="1" inputmode="numeric" aria-label="Years covered by the sales history"></label>
+          </div>
+        </div>
+        <div id="popularity-empty" class="pop-empty">
+          <h3>How popular is each part?</h3>
+          <p>Add the purchase history of one or more markets, for example Sweden and Norway for the last five years. The list needs a column with the article number and a column with the quantity.</p>
+          <ol>
+            <li>Add one file per market.</li>
+            <li>See which parts and kits sell the most.</li>
+            <li>See which parts are popular in both markets.</li>
+          </ol>
+          <p class="fine-print">The files stay in this browser. Articles are matched to the kits on the article number or the alternative number.</p>
+        </div>
+        <div id="popularity-body" class="hidden">
+          <div class="table-toolbar pop-toolbar">
+            <div id="popularity-modes" class="preset-group" role="group" aria-label="What to show">
+              <button type="button" data-pop-mode="parts" aria-pressed="true">All parts</button>
+              <button type="button" data-pop-mode="both" aria-pressed="false">Popular in both</button>
+              <button type="button" data-pop-mode="kits" aria-pressed="false">Kits</button>
+              <button type="button" data-pop-mode="stock" aria-pressed="false" title="Suggested stock levels based on the sales history">Suggested stock</button>
+            </div>
+            <input id="popularity-search" class="search-input" type="search" placeholder="Search article, name or kit" aria-label="Search the popularity list" autocomplete="off">
+            <label id="popularity-filter-label">Show <select id="popularity-filter" aria-label="Filter the popularity list"></select></label>
+            <span id="popularity-count" class="toolbar-count"></span>
+          </div>
+          <div id="popularity-stock" class="pop-stock hidden">
+            <label>Months of sales to keep in stock <input id="stock-months" type="number" min="1" max="36" step="1" inputmode="numeric"></label>
+            <label>Chance of having the part in stock
+              <select id="stock-service">
+                <option value="0.9">90 %</option>
+                <option value="0.95">95 %</option>
+                <option value="0.99">99 %</option>
+              </select>
+            </label>
+            <label>Budget for the stock (optional) <input id="stock-budget" type="number" min="0" step="1000" inputmode="numeric" placeholder="No limit"></label>
+            <label class="pop-check"><input id="stock-complete" type="checkbox"> Keep popular kits complete</label>
+            <button id="stock-apply" class="button small primary" type="button">Use these quantities in the project</button>
+          </div>
+          <p id="popularity-stock-summary" class="pop-stock-summary hidden" aria-live="polite"></p>
+          <p id="popularity-note" class="fine-print pop-note"></p>
+          <div id="popularity-table" class="table-shell" tabindex="0" aria-label="Scrollable popularity table"></div>
+        </div>
       </section>
 
       <section id="dashboard-view" class="content-view hidden">
