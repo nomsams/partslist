@@ -313,9 +313,9 @@ test('a catalogue sheet is split into kits; the first article number identifies 
 });
 
 test('catalogue kits become tidy sheets with safe names', () => {
-  assert.equal(catalogueSheetName('HCM 300/600', 'Häny'), 'Häny HCM 300-600');
-  assert.equal(catalogueSheetName('A very long kit name that cannot fit', 'Häny').length <= 31, true);
-  const rows = catalogueSheetRows({ title: 'SPARE PART KIT X', number: '1000333', notes: [], lines: [{ quantity: 2, description: 'O-Ring', article: 'D-1', alternate: '100.022', netPrice: 1.5000000001, listPrice: 2 }] }, { manufacturer: 'Häny', currency: 'EUR' });
+  assert.equal(catalogueSheetName('KIT 300/600', 'Acme'), 'Acme KIT 300-600');
+  assert.equal(catalogueSheetName('A very long kit name that cannot fit', 'Acme').length <= 31, true);
+  const rows = catalogueSheetRows({ title: 'SPARE PART KIT X', number: '1000333', notes: [], lines: [{ quantity: 2, description: 'O-Ring', article: 'D-1', alternate: '100.022', netPrice: 1.5000000001, listPrice: 2 }] }, { manufacturer: 'Acme', currency: 'EUR' });
   assert.deepEqual(rows[3], ['Article no.', 'Alt. article no.', 'Description', 'Quantity', 'Unit price (net)', 'Currency', 'List price (info)']);
   assert.deepEqual(rows[4], ['D-1', '100.022', 'O-Ring', 2, 1.5, 'EUR', 2]);
 });
@@ -434,4 +434,12 @@ test('one article per bin needs whole bins per article, several per bin only the
   assert.equal(many.shelfBins, 20);
   assert.equal(many.shelfLocations, 5);
   assert.equal(planStorage({ inventoryUnits: 40, unitsPerBin: 5, unitsPerShelf: 20, binsPerLocation: 4 }).shelfLocations, 2);
+});
+
+test('with minimal lists a part is common only when two lists need at least one piece of it', () => {
+  const rows = [{ sheetName: 'A', quantity: 2 }, { sheetName: 'B', quantity: 0 }];
+  assert.equal(summarizeOccurrences(rows).common, true);
+  assert.equal(summarizeOccurrences(rows, { requireStock: true }).common, false);
+  assert.equal(summarizeOccurrences([...rows, { sheetName: 'C', quantity: 1 }], { requireStock: true }).common, true);
+  assert.deepEqual(summarizeOccurrences(rows, { requireStock: true }).sources, ['A', 'B']);
 });

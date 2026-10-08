@@ -82,7 +82,7 @@ h3 { margin-bottom: 8px; font-size: 15px; }
 .header-left .brand > div { min-width: 0; }
 .header-left .brand h1, .header-left .brand p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .header-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
-#workbook-file, #add-kit-file, #popularity-file { display: none; }
+#workbook-file, #add-kit-file, #popularity-file, #minimal-file { display: none; }
 #secure-project-file { display: none; }
 
 /* Every header control shares one height, radius, border and type size. */
@@ -1493,3 +1493,28 @@ input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; min-hei
 }
 .kit-bar-collapsed { max-height: 64px; overflow: hidden; }
 #consolidated-view .summary-card strong { white-space: nowrap; }
+
+/* ---------- Minimal parts lists: comparison with the full list, and the parts mode ---------- */
+.header-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.parts-mode { flex: none; }
+.parts-mode button { min-height: 32px; padding-inline: 12px; }
+.cmp-overview-shell { margin-bottom: 10px; max-height: 220px; }
+.cmp-overview td[data-minimal-rig] { cursor: pointer; text-decoration: underline dotted; }
+.cmp-overview tr.selected td { background: var(--green-100); }
+.cmp-toolbar { margin-top: 4px; }
+.cmp-group { text-align: center; letter-spacing: .04em; }
+.cmp-group-full { background: var(--green-800); }
+.cmp-group-min { background: #2c5e8f; }
+.cmp-group-diff { background: #7a5a12; }
+.cmp-table td.number, .cmp-table th.number { font-variant-numeric: tabular-nums; }
+.cmp-table td.cmp-min { background: #f2f7fb; }
+.cmp-table td.cmp-diff { background: #ffe9a8; color: #5a3d00; font-weight: 800; box-shadow: inset 0 0 0 1px #d8bd45; }
+.cmp-table td.cmp-missing { color: var(--muted); background: repeating-linear-gradient(135deg, #f4f4f4, #f4f4f4 6px, #ececec 6px, #ececec 12px); }
+.cmp-table tr.cmp-onlyFull td:first-child, .cmp-table tr.cmp-onlyMin td:first-child { border-left: 4px solid #a33b32; }
+.cmp-table tr.cmp-qty td:first-child, .cmp-table tr.cmp-price td:first-child, .cmp-table tr.cmp-both td:first-child { border-left: 4px solid #d8bd45; }
+.cmp-status { white-space: nowrap; font-weight: 700; }
+.cmp-status-same { color: var(--muted); font-weight: 600; }
+.cmp-status-onlyFull, .cmp-status-onlyMin { color: #a33b32; }
+.cmp-table tr.cmp-total td { font-weight: 800; background: #eef4f0; }
+.common-summary { margin-top: 0; }
+#common-mode[aria-pressed="true"] { color: #fff; background: var(--green-700); border-color: var(--green-700); }

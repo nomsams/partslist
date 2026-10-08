@@ -303,6 +303,10 @@
             <h2>Consolidated parts</h2>
             <p id="consolidated-summary" class="content-subtitle"></p>
           </div>
+          <div class="preset-group parts-mode hidden" data-parts-mode-group role="group" aria-label="Which parts lists to use">
+              <button type="button" data-parts-mode="full" aria-pressed="true" title="Use the full parts lists">Full parts lists</button>
+              <button type="button" data-parts-mode="minimal" aria-pressed="false" title="Use the minimal parts lists: the least each rig needs">Minimal parts lists</button>
+            </div>
           <div class="legend"><span class="legend-swatch"></span>Common part</div>
         </div>
         <div class="kit-strip">
@@ -314,9 +318,11 @@
         </div>
         <div id="problem-bar" class="problem-bar" aria-live="polite"></div>
         <div id="summary-cards" class="summary-cards"></div>
+        <div id="common-summary" class="summary-cards common-summary hidden" aria-live="polite"></div>
         <div class="table-toolbar">
           <input id="consolidated-search" class="search-input" type="search" placeholder="Search part, description or kit" aria-label="Search consolidated parts" autocomplete="off">
           <label>Show <select id="consolidated-filter" aria-label="Filter consolidated parts"></select></label>
+          <button id="common-mode" class="button small" type="button" aria-pressed="false" title="Only the parts that are in more than one kit, with their prices and shares">Common parts list</button>
           <div id="column-presets" class="preset-group" role="group" aria-label="Column view">
             <button type="button" data-column-preset="simple" aria-pressed="true">Simple</button>
             <button type="button" data-column-preset="purchase" aria-pressed="false">Purchase</button>
@@ -341,6 +347,46 @@
         </div>
         <div id="consolidated-actions" class="selection-bar hidden" aria-live="polite"></div>
         <div id="consolidated-table" class="table-shell" tabindex="0" aria-label="Scrollable consolidated parts table"></div>
+      </section>
+
+      <section id="minimal-view" class="content-view hidden">
+        <div class="content-header">
+          <div>
+            <p class="eyebrow">Minimal parts lists</p>
+            <h2>Minimal vs full</h2>
+            <p id="minimal-summary" class="content-subtitle"></p>
+          </div>
+          <div class="header-tools">
+            <div class="preset-group parts-mode hidden" data-parts-mode-group role="group" aria-label="Which parts lists to use">
+              <button type="button" data-parts-mode="full" aria-pressed="true" title="Use the full parts lists">Full parts lists</button>
+              <button type="button" data-parts-mode="minimal" aria-pressed="false" title="Use the minimal parts lists: the least each rig needs">Minimal parts lists</button>
+            </div>
+            <button id="minimal-export" class="button small" type="button" disabled>Save as .xlsx</button>
+          </div>
+        </div>
+        <div class="pop-controls">
+          <label class="button small primary" for="minimal-file" role="button" tabindex="0">Add minimal lists</label>
+          <input id="minimal-file" type="file" accept=".xlsx,.xls,.xlsm,.xlsb,.ods" multiple>
+        </div>
+        <div id="minimal-empty" class="pop-empty">
+          <h3>What is the least each rig needs?</h3>
+          <p>A minimal parts list says how many pieces of each part a rig needs at least. Add one file per rig. The file name or the title row must name the rig, for example MR-200.</p>
+          <ol>
+            <li>Compare each minimal list with the full list, side by side. Differences are marked.</li>
+            <li>Switch to the minimal parts lists to use them for the common parts, the prices and the warehouse.</li>
+            <li>Switch back to the full lists at any time.</li>
+          </ol>
+        </div>
+        <div id="minimal-body" class="hidden">
+          <div id="minimal-overview" class="table-shell cmp-overview-shell"></div>
+          <div class="table-toolbar cmp-toolbar">
+            <label>Rig <select id="minimal-rig" aria-label="Choose the rig to compare"></select></label>
+            <label class="pop-check"><input id="minimal-only-diff" type="checkbox"> Only parts that differ</label>
+            <input id="minimal-search" class="search-input" type="search" placeholder="Search part or name" aria-label="Search the comparison" autocomplete="off">
+            <span id="minimal-count" class="toolbar-count"></span>
+          </div>
+          <div id="minimal-table" class="table-shell" tabindex="0" aria-label="Scrollable comparison of the full and the minimal list"></div>
+        </div>
       </section>
 
       <section id="popularity-view" class="content-view hidden">

@@ -126,7 +126,7 @@
   const MAX_GROUPS = GROUP_COLORS.length;
   const LEGACY_SETTINGS_STORAGE_PREFIX = 'partslist.settings.caesar14.v1:';
   const SETTINGS_SHEET_MARKER = 'partslist settings';
-  const VIEW = Object.freeze({ consolidated: ':consolidated', popularity: ':popularity', dashboard: ':dashboard', warehouse: ':warehouse', wire: ':wire' });
+  const VIEW = Object.freeze({ consolidated: ':consolidated', minimal: ':minimal', popularity: ':popularity', dashboard: ':dashboard', warehouse: ':warehouse', wire: ':wire' });
   const SPECIAL_VIEWS = new Set(Object.values(VIEW));
   // Starting points for the stock suggestion: half a year of sales, a 95 % chance of having a part, no budget.
   const STOCK_DEFAULTS = Object.freeze({ months: 6, service: 0.95, budget: null, complete: true });
@@ -309,6 +309,9 @@
     hiddenColumns: [...DEFAULT_HIDDEN_COLUMNS],
     columnPreset: 'simple',
     kitBarOpen: false,
+    // 'full' or 'minimal': which version of the rigs' parts lists is in use (see "Minimal parts lists").
+    partsMode: 'full',
+    minimalView: { rig: null, onlyDifferences: true, search: '' },
     // Purchase history per market (see "Sales history & popularity"). Business data: never written to browser storage.
     history: defaultHistory(),
     popularity: { mode: 'parts', search: '', filter: 'all', sort: null, open: new Set() },
@@ -485,6 +488,20 @@
     consolidatedFilter: el('consolidated-filter'),
     consolidatedCount: el('consolidated-count'),
     consolidatedActions: el('consolidated-actions'),
+    minimalView: el('minimal-view'),
+    minimalSummary: el('minimal-summary'),
+    minimalEmpty: el('minimal-empty'),
+    minimalBody: el('minimal-body'),
+    minimalOverview: el('minimal-overview'),
+    minimalRig: el('minimal-rig'),
+    minimalOnlyDiff: el('minimal-only-diff'),
+    minimalSearch: el('minimal-search'),
+    minimalCount: el('minimal-count'),
+    minimalTable: el('minimal-table'),
+    minimalFile: el('minimal-file'),
+    minimalExport: el('minimal-export'),
+    commonMode: el('common-mode'),
+    commonSummary: el('common-summary'),
     popularityView: el('popularity-view'),
     popularitySummary: el('popularity-summary'),
     popularityMarkets: el('popularity-markets'),
@@ -626,6 +643,8 @@
     document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !dom.explainPanel.classList.contains('hidden')) closeExplain(); });
     dom.customerExport.addEventListener('click', exportCustomerPriceList);
     bindPopularity();
+    bindMinimal();
+    dom.commonMode.addEventListener('click', toggleCommonMode);
     bindToast();
     document.addEventListener('click', (event) => {
       if (!event.target.closest?.('[data-kit-bar-toggle]')) return;
@@ -1116,7 +1135,7 @@
 
   /* ---------- Kits (source sheets) ---------- */
 
-  // A new kit starts as a kit from the project's supplier (TEI Rock Drills, USA by default). Discount, source
+  // A new kit starts as a kit from the project's supplier (set in the settings). Discount, source
   // currency and duty stay empty, which means "use the project-wide value", so changing the sidebar still works.
   function newKitSettings(sheetName) {
     return {
@@ -1495,7 +1514,7 @@
   // The sales joined to the parts that are in the project right now. Cached until the history or the parts change.
   function popularityResult() {
     if (state.popularityCache) return state.popularityCache;
-    const kitOrder = state.workbook ? state.workbook.SheetNames.filter((name) => isSourceKit(name) && state.mappings[name]?.enabled) : [];
+    const kitOrder = state.workbook ? state.workbook.SheetNames.filter((name) => isSourceKit(name) && isActiveSheet(name)) : [];
     const parts = state.consolidated.map((item) => ({
       key: item.key,
       part: item.part,
@@ -2030,13 +2049,463 @@
     });
   }
 
+  /* ---------- Minimal parts lists: the least a rig needs, next to the full list ---------- */
+
+  // A minimal list is a second version of a rig's parts list (same part numbers, fewer pieces). It is kept as its own sheet
+  // ("<rig> min") that remembers which full sheet it belongs to. The parts mode decides which of the two versions is used
+  // for the consolidated list, the prices, the warehouse and everything built on them.
+  function minimalSheetFor(base) {
+    if (!state.workbook) return null;
+    const found = Object.entries(state.kits).find(([name, kit]) => kit.minimalOf === base && state.workbook.SheetNames.includes(name));
+    return found ? found[0] : null;
+  }
+
+  function minimalPairs() {
+    if (!state.workbook) return [];
+    return Object.entries(state.kits)
+      .filter(([name, kit]) => kit.minimalOf && state.workbook.SheetNames.includes(name) && state.workbook.SheetNames.includes(kit.minimalOf))
+      .map(([name, kit]) => ({ base: kit.minimalOf, minimal: name }));
+  }
+
+  // A sheet is out of play when its other version is the one in use.
+  function isHiddenByMode(sheetName) {
+    const kit = state.kits[sheetName];
+    if (kit?.minimalOf) return state.partsMode !== 'minimal';
+    return state.partsMode === 'minimal' && Boolean(minimalSheetFor(sheetName));
+  }
+
+  function isActiveSheet(sheetName) {
+    return Boolean(state.mappings[sheetName]?.enabled) && !isHiddenByMode(sheetName);
+  }
+
+  function setPartsMode(mode) {
+    const next = mode === 'minimal' ? 'minimal' : 'full';
+    if (next === state.partsMode) return;
+    state.partsMode = next;
+    markProjectDirty();
+    rebuildConsolidation();
+    renderTabs();
+    showToast(next === 'minimal' ? 'Using the minimal parts lists.' : 'Using the full parts lists.');
+  }
+
+  function renderPartsModeControls() {
+    const has = minimalPairs().length > 0;
+    document.querySelectorAll('[data-parts-mode-group]').forEach((group) => group.classList.toggle('hidden', !has));
+    document.querySelectorAll('[data-parts-mode]').forEach((button) => {
+      button.setAttribute('aria-pressed', String(button.dataset.partsMode === state.partsMode));
+    });
+  }
+
+  // Which rig a file belongs to: its name or its title row names one of the full sheets.
+  function guessRigOf(file, sheet, bases) {
+    const title = String(sheet?.A1?.v ?? '');
+    const words = `${file.name} ${title}`.toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
+    return bases.find((base) => words.includes(String(base).toUpperCase())) || null;
+  }
+
+  async function addMinimalLists(files, options = {}) {
+    if (!state.workbook) {
+      showToast('Add the parts lists first, then the minimal lists.', true);
+      return;
+    }
+    setStatus(files.length === 1 ? 'Reading 1 minimal list…' : `Reading ${files.length} minimal lists…`, 'busy');
+    try {
+      const merged = XLSX.utils.book_new();
+      state.workbook.SheetNames.forEach((name) => {
+        if (!isGeneratedSheet(state.workbook.Sheets[name])) XLSX.utils.book_append_sheet(merged, state.workbook.Sheets[name], uniqueWorkbookSheetName(merged, name));
+      });
+      const bases = state.workbook.SheetNames.filter((name) => isSourceKit(name) && !state.kits[name]?.minimalOf);
+      const newKits = {};
+      const added = [];
+      const failed = [];
+      for (const file of files) {
+        const incoming = await readWorkbookFile(file);
+        const sheetName = incoming.SheetNames.find((name) => (XLSX.utils.sheet_to_json(incoming.Sheets[name], { header: 1, defval: null }).filter((row) => row.some((cell) => cell !== null)).length > 2));
+        const base = sheetName ? guessRigOf(file, incoming.Sheets[sheetName], bases) : null;
+        if (!sheetName || !base) {
+          failed.push(file.name);
+          continue;
+        }
+        // A new version of the same rig's minimal list replaces the old one.
+        const existing = minimalSheetFor(base);
+        if (existing && merged.SheetNames.includes(existing)) {
+          const at = merged.SheetNames.indexOf(existing);
+          merged.SheetNames.splice(at, 1);
+          delete merged.Sheets[existing];
+        }
+        const target = uniqueWorkbookSheetName(merged, `${base} min`);
+        XLSX.utils.book_append_sheet(merged, incoming.Sheets[sheetName], target);
+        // The minimal list is bought the same way as the full list of that rig.
+        newKits[target] = { ...JSON.parse(JSON.stringify(kitSettings(base))), minimalOf: base };
+        added.push(base);
+      }
+      if (!added.length) throw new Error('None of the files matched a rig in the project. The file name or the title row must name the rig, for example MR-200.');
+      const settingsName = uniqueWorkbookSheetName(merged, 'PartsList settings');
+      XLSX.utils.book_append_sheet(merged, buildSettingsSheet(), settingsName);
+      merged.Workbook = merged.Workbook || {};
+      merged.Workbook.Sheets = merged.SheetNames.map((name) => ({ Hidden: name === settingsName ? 1 : 0 }));
+      const bytes = XLSX.write(merged, { type: 'array', bookType: 'xlsx', cellStyles: true, bookSST: true });
+      const projectName = state.fileName || 'parts-list.xlsx';
+      await importWorkbook(new File([bytes], projectName, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), { review: false, displayName: projectName, kitSettings: newKits });
+      const message = `Minimal lists added: ${added.join(', ')}.`;
+      setStatus(message);
+      showToast(failed.length ? `${message} Not recognised: ${failed.join(', ')}.` : message, failed.length > 0);
+      if (!options.quiet) showView(VIEW.minimal);
+    } catch (error) {
+      console.error(error);
+      setStatus(`Could not add the minimal lists: ${error.message}`, 'error');
+      showToast(error.message || 'The minimal lists could not be added.', true);
+    }
+  }
+
+  // The lines of a kit sheet as the consolidation reads them: one entry per part number.
+  function kitLines(sheetName) {
+    const mapping = state.mappings[sheetName];
+    const matrix = state.matrices[sheetName];
+    const lines = new Map();
+    if (!mapping || mapping.part === null || mapping.quantity === null || !matrix) return lines;
+    for (let row = mapping.dataStartRow; row < matrix.length; row += 1) {
+      const partValue = readCalculatedValue(sheetName, row, mapping.part);
+      const part = partValue === null || partValue === undefined ? '' : String(partValue).trim();
+      if (!part || /^(?:total(?:s)?|effective\b|confidential\b)/i.test(part)) continue;
+      const quantity = toNumber(readCalculatedValue(sheetName, row, mapping.quantity));
+      if (quantity === null) continue;
+      const key = normalizePart(part);
+      const price = mapping.price === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.price));
+      const description = mapping.description === null ? '' : displayValue(readCalculatedValue(sheetName, row, mapping.description));
+      const line = lines.get(key);
+      if (line) {
+        line.quantity += quantity;
+        if (line.price === null) line.price = price;
+      } else {
+        lines.set(key, { key, part, description, quantity, price });
+      }
+    }
+    return lines;
+  }
+
+  // Freight per part as the full list gives it, by part number.
+  function inheritedFreight(baseSheet) {
+    const mapping = state.mappings[baseSheet];
+    const matrix = state.matrices[baseSheet];
+    const found = new Map();
+    if (!mapping || !matrix || mapping.part === null) return found;
+    for (let row = mapping.dataStartRow; row < matrix.length; row += 1) {
+      const partValue = readCalculatedValue(baseSheet, row, mapping.part);
+      const part = partValue === null || partValue === undefined ? '' : String(partValue).trim();
+      if (!part) continue;
+      const key = normalizePart(part);
+      if (found.has(key)) continue;
+      found.set(key, {
+        shipping: mapping.shipping === null ? null : toNumber(readCalculatedValue(baseSheet, row, mapping.shipping)),
+        withMargin: mapping.shippingWithMargin === null ? null : toNumber(readCalculatedValue(baseSheet, row, mapping.shippingWithMargin)),
+      });
+    }
+    return found;
+  }
+
+  const sameNumber = (a, b) => (a === null || b === null ? a === b : Math.abs(a - b) < 0.005);
+
+  const COMPARE_STATUS = Object.freeze({
+    same: 'Same',
+    qty: 'Different quantity',
+    price: 'Different price',
+    both: 'Different quantity and price',
+    onlyFull: 'Only in the full list',
+    onlyMin: 'Only in the minimal list',
+  });
+
+  // Full and minimal list of one rig, part by part.
+  function compareRig(base) {
+    const minimal = minimalSheetFor(base);
+    const full = kitLines(base);
+    const mini = minimal ? kitLines(minimal) : new Map();
+    const keys = [...full.keys(), ...[...mini.keys()].filter((key) => !full.has(key))];
+    const kit = kitSettings(base);
+    const fx = effectiveFx(kitCurrency(kit), kitFxMargin(kit));
+    const value = (line) => (line && line.price !== null ? line.quantity * line.price : null);
+    const rows = keys.map((key) => {
+      const a = full.get(key) || null;
+      const b = mini.get(key) || null;
+      let status = 'same';
+      if (!b) status = 'onlyFull';
+      else if (!a) status = 'onlyMin';
+      else {
+        const qty = !sameNumber(a.quantity, b.quantity);
+        const price = !sameNumber(a.price, b.price);
+        status = qty && price ? 'both' : qty ? 'qty' : price ? 'price' : 'same';
+      }
+      return {
+        key,
+        part: (a || b).part,
+        description: (a || b).description,
+        fullQty: a ? a.quantity : null,
+        fullPrice: a ? a.price : null,
+        fullTotal: value(a),
+        minQty: b ? b.quantity : null,
+        minPrice: b ? b.price : null,
+        minTotal: value(b),
+        status,
+      };
+    });
+    const sum = (list, pick) => list.reduce((total, row) => total + (pick(row) || 0), 0);
+    const toOutputValue = (amount) => (fx === null ? null : amount * fx * (1 - kitDiscount(kit)));
+    const summary = {
+      base,
+      minimal,
+      currency: kitCurrency(kit),
+      fullParts: full.size,
+      minParts: mini.size,
+      fullStocked: [...full.values()].filter((line) => line.quantity > 0).length,
+      minStocked: [...mini.values()].filter((line) => line.quantity > 0).length,
+      fullUnits: sum(rows, (row) => row.fullQty),
+      minUnits: sum(rows, (row) => row.minQty),
+      fullValue: sum(rows, (row) => row.fullTotal),
+      minValue: sum(rows, (row) => row.minTotal),
+      differing: rows.filter((row) => row.status !== 'same').length,
+    };
+    summary.fullValueOut = toOutputValue(summary.fullValue);
+    summary.minValueOut = toOutputValue(summary.minValue);
+    return { summary, rows };
+  }
+
+  function percentChange(from, to) {
+    return from > 0 ? (to - from) / from : null;
+  }
+
+  function formatPercentChange(value) {
+    return value === null ? '—' : `${value > 0 ? '+' : ''}${formatPercent(value)}`;
+  }
+
+  function renderMinimalView() {
+    renderPartsModeControls();
+    const pairs = minimalPairs();
+    const has = pairs.length > 0;
+    dom.minimalEmpty.classList.toggle('hidden', has);
+    dom.minimalBody.classList.toggle('hidden', !has);
+    dom.minimalExport.disabled = !has;
+    if (!has) {
+      dom.minimalSummary.textContent = 'No minimal lists have been added yet.';
+      return;
+    }
+    const output = state.config.outputCurrency;
+    const comparisons = pairs.map((pair) => compareRig(pair.base));
+    const rigs = comparisons.map((comparison) => comparison.summary.base);
+    const minimalState = state.minimalView;
+    if (!rigs.includes(minimalState.rig)) minimalState.rig = rigs[0];
+    dom.minimalSummary.textContent = `Rigs: ${rigs.length} · Using: ${state.partsMode === 'minimal' ? 'minimal parts lists' : 'full parts lists'}`;
+
+    // One line per rig: how much smaller the minimal list is.
+    const table = document.createElement('table');
+    table.className = 'parts-table cmp-overview';
+    const head = table.createTHead().insertRow();
+    ['Rig', 'Parts (full / minimal)', 'Pieces (full / minimal)', 'Pieces change', `Purchase value (${output})`, 'Value change', 'Differences'].forEach((label, index) => {
+      const th = document.createElement('th');
+      th.scope = 'col';
+      if (index > 0) th.className = 'number';
+      th.textContent = label;
+      head.append(th);
+    });
+    const body = table.createTBody();
+    comparisons.forEach(({ summary }) => {
+      const row = body.insertRow();
+      if (summary.base === minimalState.rig) row.classList.add('selected');
+      const cells = [
+        summary.base,
+        `${summary.fullStocked} / ${summary.minStocked}`,
+        `${formatQuantity(summary.fullUnits)} / ${formatQuantity(summary.minUnits)}`,
+        formatPercentChange(percentChange(summary.fullUnits, summary.minUnits)),
+        summary.fullValueOut === null ? '—' : `${formatNumber(summary.fullValueOut, 0)} / ${formatNumber(summary.minValueOut, 0)}`,
+        formatPercentChange(percentChange(summary.fullValue, summary.minValue)),
+        String(summary.differing),
+      ];
+      cells.forEach((value, index) => {
+        const td = row.insertCell();
+        td.textContent = value;
+        if (index > 0) td.className = 'number';
+        if (index === 0) {
+          td.className = 'part-cell';
+          td.dataset.minimalRig = summary.base;
+          td.tabIndex = 0;
+          td.setAttribute('role', 'button');
+          td.setAttribute('aria-label', `Compare ${summary.base}`);
+        }
+      });
+    });
+    dom.minimalOverview.replaceChildren(table);
+
+    dom.minimalRig.replaceChildren(...rigs.map((rig) => new Option(rig, rig, false, rig === minimalState.rig)));
+    dom.minimalRig.value = minimalState.rig;
+    dom.minimalOnlyDiff.checked = minimalState.onlyDifferences;
+    dom.minimalSearch.value = minimalState.search;
+
+    const { summary, rows } = comparisons.find((comparison) => comparison.summary.base === minimalState.rig);
+    const term = minimalState.search.trim().toLowerCase();
+    const shown = rows.filter((row) => (!minimalState.onlyDifferences || row.status !== 'same') && (!term || `${row.part} ${row.description}`.toLowerCase().includes(term)));
+    dom.minimalCount.textContent = `${shown.length} of ${rows.length} shown`;
+
+    const money = (value) => (value === null || value === undefined ? '—' : formatNumber(value, 2));
+    const compare = document.createElement('table');
+    compare.className = 'parts-table cmp-table';
+    const groups = compare.createTHead().insertRow();
+    [['', 2, ''], ['Full list', 3, 'cmp-group-full'], ['Minimal list', 3, 'cmp-group-min'], ['Difference', 2, 'cmp-group-diff']].forEach(([label, span, className]) => {
+      const th = document.createElement('th');
+      th.colSpan = span;
+      th.className = `cmp-group ${className}`.trim();
+      th.textContent = label;
+      groups.append(th);
+    });
+    const labels = compare.createTHead().insertRow();
+    ['Part', 'Article name', 'Quantity', `Price (${summary.currency})`, 'Line total', 'Quantity', `Price (${summary.currency})`, 'Line total', 'Quantity change', 'Status'].forEach((label, index) => {
+      const th = document.createElement('th');
+      th.scope = 'col';
+      if (index >= 2 && index < 9) th.className = 'number';
+      th.textContent = label;
+      labels.append(th);
+    });
+    const tbody = compare.createTBody();
+    if (!shown.length) {
+      const empty = tbody.insertRow();
+      empty.className = 'empty-row';
+      const cell = empty.insertCell();
+      cell.colSpan = 10;
+      cell.textContent = minimalState.onlyDifferences ? 'The two lists are the same for these parts.' : 'Nothing matches the search.';
+    }
+    shown.forEach((row) => {
+      const tr = tbody.insertRow();
+      tr.className = `cmp-${row.status}`;
+      const qtyDiff = row.fullQty !== null && row.minQty !== null ? row.minQty - row.fullQty : null;
+      const priceDiffers = row.status === 'price' || row.status === 'both';
+      const qtyDiffers = row.status === 'qty' || row.status === 'both';
+      const cells = [
+        [row.part, 'part-cell'],
+        [row.description, ''],
+        [row.fullQty === null ? '—' : formatQuantity(row.fullQty), `number${qtyDiffers ? ' cmp-diff' : ''}${row.status === 'onlyMin' ? ' cmp-missing' : ''}`],
+        [money(row.fullPrice), `number${priceDiffers ? ' cmp-diff' : ''}${row.status === 'onlyMin' ? ' cmp-missing' : ''}`],
+        [money(row.fullTotal), `number${row.status === 'onlyMin' ? ' cmp-missing' : ''}`],
+        [row.minQty === null ? '—' : formatQuantity(row.minQty), `number cmp-min${qtyDiffers ? ' cmp-diff' : ''}${row.status === 'onlyFull' ? ' cmp-missing' : ''}`],
+        [money(row.minPrice), `number cmp-min${priceDiffers ? ' cmp-diff' : ''}${row.status === 'onlyFull' ? ' cmp-missing' : ''}`],
+        [money(row.minTotal), `number cmp-min${row.status === 'onlyFull' ? ' cmp-missing' : ''}`],
+        [qtyDiff === null ? '—' : qtyDiff > 0 ? `▲ +${formatQuantity(qtyDiff)}` : qtyDiff < 0 ? `▼ ${formatQuantity(qtyDiff)}` : '=', `number${qtyDiff ? ' cmp-diff' : ''}`],
+        [COMPARE_STATUS[row.status], `cmp-status cmp-status-${row.status}`],
+      ];
+      cells.forEach(([value, className]) => {
+        const td = tr.insertCell();
+        td.textContent = value;
+        if (className) td.className = className;
+      });
+    });
+    const totalRow = tbody.insertRow();
+    totalRow.className = 'cmp-total';
+    [['Total', ''], ['', ''], [formatQuantity(summary.fullUnits), 'number'], ['', ''], [money(summary.fullValue), 'number'], [formatQuantity(summary.minUnits), 'number cmp-min'], ['', ''], [money(summary.minValue), 'number cmp-min'], [formatPercentChange(percentChange(summary.fullUnits, summary.minUnits)), 'number'], [`Value ${formatPercentChange(percentChange(summary.fullValue, summary.minValue))}`, '']].forEach(([value, className]) => {
+      const td = totalRow.insertCell();
+      td.textContent = value;
+      if (className) td.className = className;
+    });
+    dom.minimalTable.replaceChildren(compare);
+  }
+
+  function exportMinimalComparison() {
+    const pairs = minimalPairs();
+    if (!pairs.length) {
+      showToast('Add the minimal lists first.', true);
+      return;
+    }
+    try {
+      const book = XLSX.utils.book_new();
+      const comparisons = pairs.map((pair) => compareRig(pair.base));
+      const round = (value) => (value === null || value === undefined ? null : Math.round(value * 100) / 100);
+      const overview = [['Rig', 'Parts in full list', 'Parts in minimal list', 'Pieces full', 'Pieces minimal', 'Pieces change', 'Value full', 'Value minimal', 'Value change', 'Currency', 'Parts that differ']];
+      comparisons.forEach(({ summary }) => overview.push([summary.base, summary.fullStocked, summary.minStocked, round(summary.fullUnits), round(summary.minUnits), percentChange(summary.fullUnits, summary.minUnits), round(summary.fullValue), round(summary.minValue), percentChange(summary.fullValue, summary.minValue), summary.currency, summary.differing]));
+      const overviewSheet = XLSX.utils.aoa_to_sheet(overview);
+      overviewSheet['!cols'] = [14, 12, 12, 12, 12, 12, 14, 14, 12, 10, 12].map((wch) => ({ wch }));
+      XLSX.utils.book_append_sheet(book, overviewSheet, 'Overview');
+      comparisons.forEach(({ summary, rows }) => {
+        const sheet = XLSX.utils.aoa_to_sheet([
+          ['Part', 'Article name', 'Quantity full', `Price full (${summary.currency})`, 'Line total full', 'Quantity minimal', `Price minimal (${summary.currency})`, 'Line total minimal', 'Quantity change', 'Status'],
+          ...rows.map((row) => [row.part, row.description, row.fullQty, round(row.fullPrice), round(row.fullTotal), row.minQty, round(row.minPrice), round(row.minTotal), row.fullQty !== null && row.minQty !== null ? row.minQty - row.fullQty : null, COMPARE_STATUS[row.status]]),
+        ]);
+        sheet['!cols'] = [16, 32, 12, 14, 14, 12, 14, 14, 12, 28].map((wch) => ({ wch }));
+        XLSX.utils.book_append_sheet(book, sheet, uniqueWorkbookSheetName(book, summary.base));
+      });
+      const base = state.fileName.replace(/\.[^.]+$/, '').replace(/-(?:consolidated|partslist-project)$/i, '') || 'partslist';
+      XLSX.writeFile(book, `${base}-minimal-vs-full.xlsx`, { bookType: 'xlsx', compression: true });
+      showToast('The comparison was saved.');
+    } catch (error) {
+      console.error(error);
+      showToast(error.message || 'The comparison could not be exported.', true);
+    }
+  }
+
+  function bindMinimal() {
+    document.addEventListener('click', (event) => {
+      const button = event.target.closest?.('[data-parts-mode]');
+      if (button) setPartsMode(button.dataset.partsMode);
+    });
+    dom.minimalFile.addEventListener('change', async (event) => {
+      const files = [...event.target.files];
+      if (files.length) await addMinimalLists(files);
+      event.target.value = '';
+    });
+    dom.minimalExport.addEventListener('click', exportMinimalComparison);
+    dom.minimalRig.addEventListener('change', () => { state.minimalView.rig = dom.minimalRig.value; renderMinimalView(); });
+    dom.minimalOnlyDiff.addEventListener('change', () => { state.minimalView.onlyDifferences = dom.minimalOnlyDiff.checked; renderMinimalView(); });
+    dom.minimalSearch.addEventListener('input', () => {
+      state.minimalView.search = dom.minimalSearch.value;
+      renderMinimalView();
+      dom.minimalSearch.focus();
+    });
+    const pick = (event) => {
+      const cell = event.target.closest?.('[data-minimal-rig]');
+      if (!cell) return;
+      state.minimalView.rig = cell.dataset.minimalRig;
+      renderMinimalView();
+    };
+    dom.minimalOverview.addEventListener('click', pick);
+    dom.minimalOverview.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); pick(event); } });
+  }
+
+  /* -- Common parts list: the parts that are in more than one kit, with their prices and shares -- */
+
+  function commonModeOn() {
+    return state.consolidatedFilter === 'common';
+  }
+
+  function toggleCommonMode() {
+    state.consolidatedFilter = commonModeOn() ? 'all' : 'common';
+    renderConsolidated();
+  }
+
+  // Cards for the common parts: how many, how much they cost and sell for, and what share of everything they are.
+  function renderCommonSummary() {
+    const on = commonModeOn();
+    dom.commonMode.setAttribute('aria-pressed', String(on));
+    dom.commonSummary.classList.toggle('hidden', !on);
+    if (!on) return;
+    const output = state.config.outputCurrency;
+    const all = state.consolidated;
+    const common = all.filter((item) => item.common);
+    const sum = (list, field) => list.reduce((total, item) => total + (item[field] ?? 0), 0);
+    const share = (part, whole) => (whole > 0 ? part / whole : 0);
+    const purchase = sum(common, 'discountedTotal');
+    const selling = sum(common, 'sellingTotal');
+    dom.commonSummary.replaceChildren(
+      summaryCard('Common parts', `${common.length} of ${all.length}`),
+      summaryCard('Share of the pieces', formatPercent(share(sum(common, 'maxQuantity'), sum(all, 'maxQuantity')))),
+      summaryCard(`Purchase value (${output})`, formatNumber(purchase, 2)),
+      summaryCard(`Sales value (${output})`, formatNumber(sum(common, 'lineTotal'), 2)),
+      summaryCard('Share of all sales', formatPercent(share(sum(common, 'lineTotal'), sum(all, 'lineTotal')))),
+      summaryCard('Margin on the purchase price', formatPercent(share(selling - purchase, selling))),
+    );
+  }
+
   /* ---------- Ease of use: column presets, price explainer, problem bar, price list, setup dialog, example ---------- */
 
   // Ready-made column sets so nobody has to tick twenty boxes. "simple" is what most people need.
   const COLUMN_PRESETS = {
     simple: { show: ['part', 'description', 'altPart', 'quantity', 'manufacturer', 'unitSalesPrice', 'lineTotal'] },
     purchase: { show: ['sources', 'part', 'description', 'altPart', 'quantity', 'manufacturer', 'currency', 'unitPrice', 'convertedTotal', 'discountedTotal', 'kitFreight', 'landedCost'] },
-    sales: { show: ['part', 'description', 'altPart', 'quantity', 'match', 'salesGroup', 'salesPerYear', 'sellingTotal', 'freightWithMargin', 'unitSalesPrice', 'lineTotal', 'vat', 'lineTotalInclVat'] },
+    sales: { show: ['part', 'description', 'altPart', 'quantity', 'match', 'salesGroup', 'salesPerYear', 'sellingTotal', 'marginPct', 'freightWithMargin', 'unitSalesPrice', 'lineTotal', 'shareOfTotal', 'vat', 'lineTotalInclVat'] },
     full: { hide: DEFAULT_HIDDEN_COLUMNS },
     // Needs a sales history; without one it falls back to the simple view. The sold-per-market columns are matched by prefix.
     popularity: { show: ['part', 'description', 'altPart', 'quantity', 'manufacturer', 'popRank', 'soldTotal'], prefix: ['sold:'] },
@@ -2214,7 +2683,7 @@
       const header = ['Article no.', 'Alt. article no.', 'Article name', 'Quantity', `Unit price (${output}${withVat ? ', excl. VAT' : ''})`, `Total (${output}${withVat ? ', excl. VAT' : ''})`];
       if (withVat) header.push(`Total incl. VAT (${output})`);
       const rows = [header];
-      [...state.consolidated].sort((a, b) => a.part.localeCompare(b.part, undefined, { numeric: true })).forEach((item) => {
+      (commonModeOn() ? state.consolidated.filter((item) => item.common) : [...state.consolidated]).sort((a, b) => a.part.localeCompare(b.part, undefined, { numeric: true })).forEach((item) => {
         const row = [item.part, item.altParts.join(', '), item.description, item.maxQuantity, item.unitSalesPrice === null ? null : Math.round(item.unitSalesPrice * 100) / 100, item.lineTotal === null ? null : Math.round(item.lineTotal * 100) / 100];
         if (withVat) row.push(item.lineTotalInclVat === null ? null : Math.round(item.lineTotalInclVat * 100) / 100);
         rows.push(row);
@@ -2958,6 +3427,7 @@
       format: 'partslist-settings',
       version: 3,
       language: state.language,
+      partsMode: state.partsMode,
       config: {
         discount: state.config.discount,
         multiplier: state.config.multiplier,
@@ -3043,8 +3513,10 @@
         discountRate: nullableFraction(kit.discountRate),
         dutyRate: nullableFraction(kit.dutyRate),
         fxMargin: nullableNumber(kit.fxMargin),
+        ...(typeof kit.minimalOf === 'string' && kit.minimalOf ? { minimalOf: kit.minimalOf.slice(0, 80) } : {}),
       };
     });
+    state.partsMode = settings.partsMode === 'minimal' ? 'minimal' : 'full';
     state.makers = {};
     Object.entries(settings.makers || {}).forEach(([name, maker]) => {
       if (!maker || typeof maker !== 'object') return;
@@ -3866,7 +4338,7 @@
   function buildOverviewWireModel() {
     const warehouse = calculateWarehouseModel();
     const enabledSheets = state.workbook
-      ? state.workbook.SheetNames.filter((name) => state.mappings[name]?.enabled)
+      ? state.workbook.SheetNames.filter((name) => isActiveSheet(name))
       : [];
     const nodes = [];
     enabledSheets.forEach((name, index) => {
@@ -3936,7 +4408,7 @@
 
   function buildUnderhoodWireModel() {
     const warehouse = calculateWarehouseModel();
-    const enabledSheets = state.workbook.SheetNames.filter((name) => state.mappings[name]?.enabled);
+    const enabledSheets = state.workbook.SheetNames.filter((name) => isActiveSheet(name));
     const nodes = [];
     const edges = [];
     const sourceFields = [
@@ -4311,7 +4783,7 @@
     });
   }
 
-  // The only multi-kit price list supported so far is Häny's spare-part catalogue; its kits ship from Bulgaria.
+  // The only multi-kit price list supported so far is one supplier's spare-part catalogue; the defaults below are its starting values.
   const CATALOGUE_DEFAULTS = Object.freeze({ manufacturer: 'Häny', originCountry: '100', fxMargin: 0.4, freightPercent: 3 });
 
   // Sheets that hold several kits one after another (see Core.parseKitCatalogue).
@@ -4344,9 +4816,12 @@
       const documents = await window.PartsListVault.open(state.vaultBytes, key);
       dom.vaultKey.value = '';
       const isRates = (document) => /.json$/i.test(document.name);
-      const lists = documents.filter((document) => !isRates(document)).map((document) => new File([document.bytes], document.name));
+      const isMinimal = (document) => /^minimal parts list/i.test(document.name);
+      const lists = documents.filter((document) => !isRates(document) && !isMinimal(document)).map((document) => new File([document.bytes], document.name));
       if (!lists.length) throw new Error('The saved documents contain no parts lists.');
       await addKitWorkbooks(lists, { review: false, quiet: true });
+      const minimalLists = documents.filter(isMinimal).map((document) => new File([document.bytes], document.name));
+      if (minimalLists.length) await addMinimalLists(minimalLists, { quiet: true });
       const rates = documents.find(isRates);
       if (rates) await importWarehouseRates(new File([rates.bytes], rates.name, { type: 'application/json' }));
       showToast('Saved documents imported.');
@@ -4529,6 +5004,8 @@
       state.selectedCell = null;
       // A new project starts without sales history; a saved project brings its own back with its settings.
       state.history = defaultHistory();
+      state.partsMode = 'full';
+      state.minimalView = { rig: null, onlyDifferences: true, search: '' };
       state.popularity = { mode: 'parts', search: '', filter: 'all', sort: null, open: new Set() };
       state.popularityCache = null;
       const persistedRates = { ...state.warehouse.rates };
@@ -4618,7 +5095,7 @@
       renderAllSelectionBars();
       saveSettingsSoon();
 
-      const enabled = Object.values(state.mappings).filter((mapping) => mapping.enabled).length;
+      const enabled = enabledSheetCount();
       const restoredNote = restoredWorkbook ? ' Saved settings were restored from the workbook.' : '';
       const warningNote = state.importWarnings.length ? ` Warning: ${state.importWarnings.join(' ')}` : '';
       const addedNote = options.addedKits ? ` Added ${options.addedKits} new kit sheet${options.addedKits === 1 ? '' : 's'}.` : '';
@@ -5006,8 +5483,10 @@
 
     state.workbook.SheetNames.forEach((sheetName) => {
       const mapping = state.mappings[sheetName];
-      if (!mapping.enabled || mapping.part === null || mapping.quantity === null) return;
+      if (!isActiveSheet(sheetName) || mapping.part === null || mapping.quantity === null) return;
       const kit = kitSettings(sheetName);
+      // A minimal list has no freight columns of its own: each part keeps the freight of the same part in the full list.
+      const inherited = kit.minimalOf && (mapping.shipping === null || mapping.shippingWithMargin === null) ? inheritedFreight(kit.minimalOf) : null;
       const matrix = state.matrices[sheetName];
       const priceHeader = matrix
         .slice(mapping.headerRow, mapping.dataStartRow)
@@ -5043,8 +5522,8 @@
           price: mapping.price === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.price)),
           sourceDiscountedTotal: mapping.discountedTotal === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.discountedTotal)),
           sourceSellingTotal: mapping.sellingTotal === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.sellingTotal)),
-          shipping: mapping.shipping === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.shipping)),
-          sourceShippingWithMargin: mapping.shippingWithMargin === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.shippingWithMargin)),
+          shipping: mapping.shipping === null ? (inherited?.get(key)?.shipping ?? null) : toNumber(readCalculatedValue(sheetName, row, mapping.shipping)),
+          sourceShippingWithMargin: mapping.shippingWithMargin === null ? (inherited?.get(key)?.withMargin ?? null) : toNumber(readCalculatedValue(sheetName, row, mapping.shippingWithMargin)),
           currency,
           fxMargin: kitFxMargin(kit),
           freightPercent: kit.shippingMode === 'percent' ? Math.max(0, kit.shippingAmount) / 100 : null,
@@ -5144,7 +5623,7 @@
   }
 
   function buildConsolidatedItem(occurrences) {
-    const occurrenceSummary = Core.summarizeOccurrences(occurrences);
+    const occurrenceSummary = Core.summarizeOccurrences(occurrences, { requireStock: state.partsMode === 'minimal' });
     const sources = occurrenceSummary.sources;
     const ordered = [...occurrences].sort((a, b) => {
       const qtyDiff = (b.quantity ?? -Infinity) - (a.quantity ?? -Infinity);
@@ -5347,7 +5826,7 @@
   }
 
   function setupGuideSteps() {
-    const enabledMappings = Object.values(state.mappings).filter((mapping) => mapping.enabled);
+    const enabledMappings = Object.entries(state.mappings).filter(([name]) => isActiveSheet(name)).map(([, mapping]) => mapping);
     const mapped = enabledMappings.filter((mapping) => (
       mapping.part !== null
       && mapping.quantity !== null
@@ -5469,6 +5948,7 @@
     renderSaveState();
     renderSetupGuide();
     renderKitBars();
+    renderPartsModeControls();
     renderMakers();
     renderFreightSummary();
     updateGroupCounts();
@@ -5478,6 +5958,7 @@
     updateKitRouteSummaries();
     renderCustomsGuides();
     if (state.activeView === VIEW.consolidated) renderConsolidated();
+    else if (state.activeView === VIEW.minimal) renderMinimalView();
     else if (state.activeView === VIEW.popularity) renderPopularity();
     else if (state.activeView === VIEW.dashboard) renderDashboard();
     else if (state.activeView === VIEW.warehouse) renderWarehouse();
@@ -5511,7 +5992,7 @@
         button.textContent = text;
         return button;
       }) : [];
-      const chips = state.workbook.SheetNames.filter(isSourceKit).map((sheetName) => {
+      const chips = state.workbook.SheetNames.filter((name) => isSourceKit(name) && !isHiddenByMode(name)).map((sheetName) => {
         const enabled = state.mappings[sheetName].enabled;
         const summary = state.kitSummaries.find((item) => item.sheetName === sheetName);
         const chip = document.createElement(enabled ? 'span' : 'button');
@@ -5625,6 +6106,8 @@
       { key: 'lineTotal', label: salesVatRate() > 0 ? `Line total excl. VAT in ${o}` : `Line total in ${o}`, number: true, sortValue: (item) => item.lineTotal, value: money('lineTotal'), required: true, strong: true },
       { key: 'vat', label: `VAT in ${o}`, number: true, vat: true, sortValue: (item) => item.vat, value: money('vat') },
       { key: 'lineTotalInclVat', label: `Line total incl. VAT in ${o}`, number: true, vat: true, sortValue: (item) => item.lineTotalInclVat, value: money('lineTotalInclVat'), required: true },
+      { key: 'marginPct', label: 'Margin on the purchase price', number: true, sortValue: (item) => marginShare(item), value: (item) => (marginShare(item) === null ? '—' : formatPercent(marginShare(item))) },
+      { key: 'shareOfTotal', label: 'Share of all sales', number: true, sortValue: (item) => salesShare(item), value: (item) => (salesShare(item) === null ? '—' : formatPercent(salesShare(item))) },
       { key: 'landedCost', label: `Landed cost in ${o}`, number: true, sortValue: (item) => item.landedCost, value: money('landedCost'), required: true },
       { key: 'pricingSource', label: 'Pricing source', sortValue: (item) => `${item.pricingSource} row ${item.pricingRow}`, value: (item) => `${item.pricingSource} row ${item.pricingRow}` },
       ...historyColumns(),
@@ -5663,6 +6146,8 @@
     lineTotalInclVat: 'What the customer pays for this line, including VAT.',
     landedCost: 'What the part costs you delivered to your warehouse: purchase price plus freight, duty and fees.',
     pricingSource: 'Where in the source sheet the price was read from.',
+    marginPct: 'How much of the sales price is margin: (sales price - purchase price) / sales price.',
+    shareOfTotal: 'This line\'s share of the sales of all the parts in the list.',
     popRank: 'Position in the sales history: #1 is the best seller.',
     soldTotal: 'Pieces sold in all markets together, according to the sales history.',
   });
@@ -5688,6 +6173,16 @@
         value: (item) => formatQuantity(rowOf(item)?.sold[index] ?? 0),
       })),
     ];
+  }
+
+  // How much of the sales price is margin, and how much of all sales this line is.
+  function marginShare(item) {
+    return item.sellingTotal > 0 && item.discountedTotal !== null ? (item.sellingTotal - item.discountedTotal) / item.sellingTotal : null;
+  }
+
+  function salesShare(item) {
+    const total = state.consolidated.reduce((sum, entry) => sum + (entry.lineTotal ?? 0), 0);
+    return total > 0 && item.lineTotal !== null ? item.lineTotal / total : null;
   }
 
   // Columns the user has not hidden, minus the VAT columns when VAT is off.
@@ -5774,6 +6269,8 @@
     renderConsolidatedFilter();
     renderColumnPresets();
     renderProblemBar();
+    renderPartsModeControls();
+    renderCommonSummary();
     const output = state.config.outputCurrency;
     const items = state.consolidated;
     const common = items.filter((item) => item.common);
@@ -7517,11 +8014,11 @@
     renderMapInfo();
   }
 
-  // Kits from the same manufacturer and country share one route, e.g. four TEI kits from the USA.
+  // Kits from the same manufacturer and country share one route.
   function enabledKitRoutes() {
     if (!state.workbook) return [];
     const routes = new Map();
-    state.workbook.SheetNames.filter((name) => state.mappings[name]?.enabled && isSourceKit(name)).forEach((sheetName) => {
+    state.workbook.SheetNames.filter((name) => isActiveSheet(name) && isSourceKit(name)).forEach((sheetName) => {
       const kit = kitSettings(sheetName);
       const manufacturer = kit.manufacturer || sheetName;
       const key = `${manufacturer}|${kit.originCountry}`;
@@ -8055,7 +8552,7 @@
     const target = state.config.outputCurrency;
     const sources = [...new Set(state.consolidated.map((item) => item.currency).filter(Boolean))];
     const kitCurrencies = state.workbook.SheetNames
-      .filter((name) => state.mappings[name]?.enabled)
+      .filter((name) => isActiveSheet(name))
       .flatMap((name) => [kitSettings(name).shippingCurrency, kitCurrency(kitSettings(name))]);
     const requestedPairs = uniqueBy([
       ...sources.map((source) => ({ from: source, to: target })),
@@ -8161,6 +8658,7 @@
   function renderTabs() {
     dom.tabs.replaceChildren(
       createTab('Consolidated', VIEW.consolidated),
+      createTab('Minimal vs full', VIEW.minimal),
       createTab('Popularity', VIEW.popularity),
       createTab('Dashboard', VIEW.dashboard),
       createTab('Warehouse', VIEW.warehouse),
@@ -8173,6 +8671,7 @@
   // What each main tab is for, in plain words.
   const TAB_HELP = Object.freeze({
     [VIEW.consolidated]: 'Every part from all the kits in one list, with prices.',
+    [VIEW.minimal]: 'Compare the minimal parts lists with the full ones, and choose which to use.',
     [VIEW.popularity]: 'How well each part and kit sells, and how much to keep in stock.',
     [VIEW.dashboard]: 'Profit, costs and how long it takes to earn the money back.',
     [VIEW.warehouse]: 'What it costs to store the parts, and how many shelves and bins you need.',
@@ -8236,6 +8735,7 @@
     const isSheet = !SPECIAL_VIEWS.has(view);
     dom.welcome.classList.add('hidden');
     dom.consolidatedView.classList.toggle('hidden', view !== VIEW.consolidated);
+    dom.minimalView.classList.toggle('hidden', view !== VIEW.minimal);
     dom.popularityView.classList.toggle('hidden', view !== VIEW.popularity);
     dom.dashboardView.classList.toggle('hidden', view !== VIEW.dashboard);
     dom.warehouseView.classList.toggle('hidden', view !== VIEW.warehouse);
@@ -8996,7 +9496,7 @@
       ...state.consolidated.map((item) => item.currency),
       state.freight.consolidatedCurrency,
       state.freight.clearanceCurrency,
-      ...state.workbook.SheetNames.filter((name) => state.mappings[name]?.enabled).flatMap((name) => [kitSettings(name).shippingCurrency, kitCurrency(kitSettings(name))]),
+      ...state.workbook.SheetNames.filter((name) => isActiveSheet(name)).flatMap((name) => [kitSettings(name).shippingCurrency, kitCurrency(kitSettings(name))]),
     ]);
     [...currencies].filter(Boolean).sort().forEach((currency) => {
       rows.push([currency, currency === output ? 1 : state.rates[currency] ?? null, state.rateDates[currency] ?? null]);
@@ -9583,7 +10083,7 @@
   }
 
   function enabledSheetCount() {
-    return Object.values(state.mappings).filter((mapping) => mapping.enabled).length;
+    return Object.keys(state.mappings).filter((name) => isActiveSheet(name)).length;
   }
 
   function uniqueSheetName(base, usedNames) {

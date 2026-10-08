@@ -199,7 +199,7 @@ test('saved documents are an encrypted bundle that the start screen can unlock, 
   ['*.xlsx', '*.partslist', 'warehouse-rates.private.json'].forEach((pattern) => assert.ok(ignore.includes(pattern), `${pattern} must be ignored`));
   // The committed bundle must not leak what is inside it, and the key must not be written anywhere in the repository.
   const bundle = fs.readFileSync(path.join(root, 'data', 'bundle.dat')).toString('latin1');
-  ['xlsx', 'MME260', 'ET-PAK', 'Valve', 'Spare'].forEach((word) => assert.ok(!bundle.includes(word), `bundle leaks ${word}`));
+  ['xlsx', 'Valve', 'Spare', 'Minimal', 'PART NUMBER'].forEach((word) => assert.ok(!bundle.includes(word), `bundle leaks ${word}`));
 });
 
 test('ease of use: column presets, price explainer, problem bar, customer price list, setup dialog and example data', () => {
@@ -258,6 +258,26 @@ test('human-machine interface: readable text, reachable targets, keyboard and sc
   assert.ok(app.includes('const COLUMN_HELP = Object.freeze('));
   assert.ok(app.includes('const TAB_HELP = Object.freeze('));
   assert.ok(app.includes('needs-save'));
+});
+
+test('minimal parts lists: paired with the full list, compared side by side, switchable, common parts list with percentages', () => {
+  assert.match(html, /id="minimal-view"/);
+  assert.match(html, /data-parts-mode="full"/);
+  assert.match(html, /data-parts-mode="minimal"/);
+  assert.match(html, /id="minimal-file"[^>]*multiple/);
+  assert.match(html, /id="common-mode"/);
+  assert.match(html, /id="common-summary"/);
+  ['minimalSheetFor', 'isActiveSheet', 'isHiddenByMode', 'addMinimalLists', 'compareRig', 'setPartsMode', 'renderCommonSummary', 'inheritedFreight'].forEach((name) => assert.ok(app.includes(`function ${name}(`), name));
+  // The parts mode and the pairing travel with the saved project.
+  assert.ok(app.includes('partsMode: state.partsMode'));
+  assert.ok(app.includes('minimalOf'));
+  // Everything that reads the sheets in play goes through isActiveSheet, not the raw enabled flag.
+  assert.ok(!app.includes('state.mappings[name]?.enabled'));
+  // The saved documents add the minimal lists after the full lists.
+  assert.ok(app.includes('addMinimalLists(minimalLists'));
+  // The README gives no supplier names or item numbers (example names only).
+  const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
+  assert.doesNotMatch(readme, /TEI|Häny|ET-PAK|Rock Drills/);
 });
 
 test('every manufacturer is its own route: own settings, exchange-rate buffer, percentage freight and an independent shipment', () => {

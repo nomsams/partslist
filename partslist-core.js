@@ -296,12 +296,17 @@
     };
   }
 
-  function summarizeOccurrences(occurrences = []) {
+  // A part is common when it is in more than one list. With requireStock only lists that need at least one piece of it
+  // count, which is how a minimal list works: a part with 0 pieces is listed there but not required.
+  function summarizeOccurrences(occurrences = [], { requireStock = false } = {}) {
     const sources = [...new Set(occurrences.map((item) => item.sheetName).filter(Boolean))];
     const quantities = occurrences.map((item) => Number(item.quantity)).filter(Number.isFinite);
+    const counted = requireStock
+      ? [...new Set(occurrences.filter((item) => Number(item.quantity) > 0).map((item) => item.sheetName).filter(Boolean))]
+      : sources;
     return {
       sources,
-      common: sources.length > 1,
+      common: counted.length > 1,
       maxQuantity: quantities.length ? Math.max(...quantities) : 0,
     };
   }
