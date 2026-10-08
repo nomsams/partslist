@@ -305,8 +305,17 @@ test('canvas: grouped compact tables, flowing wires in and out, editing, and one
   assert.ok(html.includes('id="cv-arrow-in"') && html.includes('id="cv-arrow-out"'));
   ['buildCanvasModel', 'cvNeighbours', 'cvResolve', 'cvDraw', 'cvCommit', 'cvStartEdit', 'openWorkspaceDialog', 'runWorkspace', 'bindCanvas'].forEach((name) => assert.ok(app.includes(`function ${name}(`), name));
   assert.match(app, /VIEW = Object\.freeze\(\{[^}]*canvas/);
-  // The compact table has the five columns asked for; the open table has the rest.
-  assert.ok(app.includes("const CV_COMPACT = Object.freeze(['part', 'name', 'qty', 'price', 'after'])"));
+  // The list tables show the starting prices only (no price after discount); the start table has the prices after each step when opened.
+  assert.ok(app.includes("const CV_SHEET_COMPACT = Object.freeze(['part', 'name', 'qty', 'price'])"));
+  assert.ok(!/CV_SHEET_(?:COMPACT|OPEN) = Object\.freeze\([^)]*'after'/.test(app));
+  assert.ok(app.includes("const CV_CHAIN = Object.freeze(['start', 'disc', 'frt', 'mult', 'wh', 'out', 'cust'])"));
+  ['cvStepCards', 'cvLayout', 'cvPipes', 'cvCustomerUnit'].forEach((name) => assert.ok(app.includes(`function ${name}(`), name));
+  // The incoming freight says plainly what it is based on, and any card can be dragged from anywhere.
+  assert.ok(app.includes("'of the discounted price, for each item'"));
+  assert.ok(app.includes("event.target.closest('.cv-card')"));
+  // The customer step is optional: nothing is added unless it is switched on.
+  assert.ok(app.includes('function defaultOutgoing()') && app.includes('outgoing: state.outgoing'));
+  assert.match(html, /data-parts-mode="minimal"[^>]*>Minimal kits/);
   // The layout and the view are part of the saved settings, so a workspace file restores the canvas as it was left.
   assert.ok(app.includes('canvas: { positions: state.canvas.positions'));
   assert.ok(app.includes('state.canvas = restoreCanvas(settings.canvas)'));

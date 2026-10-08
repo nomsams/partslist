@@ -926,6 +926,10 @@
         <button id="cv-zoom-in" class="button small" type="button" aria-label="Zoom in">+</button>
         <button id="cv-fit" class="button small" type="button" title="Show all tables (0)">Fit all</button>
       </div>
+      <div class="preset-group parts-mode hidden" data-parts-mode-group role="group" aria-label="Which kits to use">
+        <button type="button" data-parts-mode="full" aria-pressed="true" title="Use the normal kits">Normal kits</button>
+        <button type="button" data-parts-mode="minimal" aria-pressed="false" title="Use the minimal kits: the least each rig needs">Minimal kits</button>
+      </div>
       <button id="cv-edit" class="button small" type="button" aria-pressed="false" title="Type new values straight into the tables">Edit values</button>
       <button id="cv-open-all" class="button small" type="button">Open all tables</button>
       <button id="cv-compact-all" class="button small" type="button">Compact all tables</button>
@@ -941,13 +945,14 @@
         <svg id="cv-wires" class="cv-wires" width="1" height="1" aria-hidden="true">
           <defs>
             <marker id="cv-arrow-in" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1f6fd4"/></marker>
+            <marker id="cv-arrow-pipe" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3d8b66"/></marker>
             <marker id="cv-arrow-out" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#e0620a"/></marker>
           </defs>
         </svg>
       </div>
     </div>
     <aside id="cv-inspector" class="cv-inspector hidden" aria-live="polite"></aside>
-    <p class="cv-hint">Drag the background to move around · scroll to zoom · drag a title to move a table · click a title to open it · click a value to follow it</p>
+    <p class="cv-hint">Drag the background to move around · scroll to zoom · drag any table or card to move it · click a title to open a table · click a value to follow it</p>
   </section>
 
   <dialog id="workspace-dialog" class="maker-setup" aria-labelledby="workspace-title">

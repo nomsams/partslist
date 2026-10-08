@@ -134,7 +134,7 @@
   const STOCK_DEFAULTS = Object.freeze({ months: 6, service: 0.95, budget: null, complete: true });
   // The currency add-on: an amount in the output currency added to today's rate, one per foreign currency and the same for every manufacturer.
   const FX_ADDON_CURRENCIES = Object.freeze(['USD', 'EUR', 'NOK', 'DKK']);
-  const FX_ADDON_DEFAULTS = Object.freeze({ USD: 0, EUR: 0.4, NOK: 0, DKK: 0 });
+  const FX_ADDON_DEFAULTS = Object.freeze({ USD: 0.5, EUR: 0.4, NOK: 0, DKK: 0 });
   const WAREHOUSE_RATE_DEFAULTS = Object.freeze({
     eu120: 0,
     eu220: 0,
@@ -315,6 +315,7 @@
     columnPreset: 'simple',
     kitBarOpen: false,
     canvas: defaultCanvas(),
+    outgoing: defaultOutgoing(),
     cvModel: null,
     fxAddons: { ...FX_ADDON_DEFAULTS },
     // 'full' or 'minimal': which version of the rigs' parts lists is in use (see "Minimal parts lists").
@@ -1577,19 +1578,38 @@
     });
   }
 
-  /* ---------- Canvas: every parts table on one pannable, zoomable surface, with the values followed by wires ---------- */
+  /* ---------- Canvas: the whole price chain on one pannable, zoomable surface ---------- */
 
-  // The tables of all lists sit on one large surface in groups (one group per manufacturer, the minimal lists in a group of
-  // their own). A compact table shows article, name, quantity, original price and the price after discount; a click on its title
-  // opens it. A click on a value follows it: wires flow IN from what made the value and OUT to what uses it.
+  // From left to right: the tables of the lists in use (with their starting prices), the start table with one row per article,
+  // the discount, the incoming freight, the multiplier, the warehouse, what happens when the goods go out, and the customer.
+  // A click on a value follows it: wires flow IN (blue) from what made it and OUT (orange) to what uses it.
   const CV_SEP = '§';
-  const CV_COMPACT = Object.freeze(['part', 'name', 'qty', 'price', 'after']);
-  const CV_EXPANDED = Object.freeze(['part', 'name', 'alt', 'qty', 'currency', 'price', 'conv', 'after', 'afterTotal', 'salesUnit', 'salesTotal']);
+  const CV_SHEET_COMPACT = Object.freeze(['part', 'name', 'qty', 'price']);
+  const CV_SHEET_OPEN = Object.freeze(['part', 'name', 'alt', 'qty', 'currency', 'price']);
+  const CV_START_COMPACT = Object.freeze(['part', 'name', 'qty', 'price']);
+  const CV_START_OPEN = Object.freeze(['part', 'name', 'qty', 'price', 'after', 'freight', 'cust', 'total']);
+  const CV_CUSTOMER = Object.freeze(['part', 'name', 'qty', 'price', 'total']);
   const CV_EDITABLE = Object.freeze({ part: 'part', name: 'description', alt: 'altPart', qty: 'quantity', price: 'price' });
+  const CV_CHAIN = Object.freeze(['start', 'disc', 'frt', 'mult', 'wh', 'out', 'cust']);
   const CV_MAX_WIRES = 70;
+  const cvElements = new Map();
 
   function defaultCanvas() {
-    return { positions: {}, expanded: [], view: { x: 40, y: 40, scale: 0.6 }, selected: null, edit: false, fitted: false };
+    return { positions: {}, expanded: [], view: { x: 40, y: 40, scale: 0.6 }, selected: null, edit: false, fitted: false, shelves: false };
+  }
+
+  function defaultOutgoing() {
+    return { transport: { on: false, amount: 0 }, toll: { on: false, rate: 0 }, other: { on: false, amount: 0 } };
+  }
+
+  function restoreOutgoing(saved) {
+    const outgoing = defaultOutgoing();
+    if (!saved || typeof saved !== 'object') return outgoing;
+    ['transport', 'other'].forEach((key) => {
+      if (saved[key]) outgoing[key] = { on: saved[key].on === true, amount: finiteOr(saved[key].amount, 0, 0) };
+    });
+    if (saved.toll) outgoing.toll = { on: saved.toll.on === true, rate: finiteOr(saved.toll.rate, 0, 0, 1) };
+    return outgoing;
   }
 
   function restoreCanvas(saved) {
@@ -1602,23 +1622,16 @@
     const view = saved.view || {};
     if (Number.isFinite(view.x) && Number.isFinite(view.y) && Number.isFinite(view.scale)) canvas.view = { x: view.x, y: view.y, scale: clamp(view.scale, 0.08, 3) };
     canvas.fitted = saved.fitted === true;
+    canvas.shelves = saved.shelves === true;
     canvas.selected = typeof saved.selected === 'string' ? saved.selected.slice(0, 200) : null;
     return canvas;
   }
 
   const cvId = (kind, ...parts) => [kind, ...parts].join(CV_SEP);
 
-  function cvLabel(column) {
-    const output = state.config.outputCurrency;
-    return {
-      part: 'Article', name: 'Article name', alt: 'Alt. part no.', qty: 'Quantity', currency: 'Currency', price: 'Original price',
-      conv: `Price in ${output}`, after: 'After discount', afterTotal: 'Total after discount', salesUnit: 'Sales price / unit', salesTotal: 'Sales total',
-    }[column];
-  }
+  // ---------- the data behind the surface ----------
 
-  // The lines of every kit sheet with the numbers the canvas shows, calculated the same way as the consolidated list.
   function buildCanvasModel() {
-    const output = state.config.outputCurrency;
     const sheets = state.workbook.SheetNames.filter((name) => isSourceKit(name));
     const groups = new Map();
     const tables = new Map();
@@ -1629,7 +1642,6 @@
       const matrix = state.matrices[sheetName];
       const priceHeader = matrix.slice(mapping.headerRow, mapping.dataStartRow).map((row) => displayValue(row?.[mapping.price])).filter(Boolean).join(' ');
       const groupKey = `${kit.manufacturer || sheetName}${kit.minimalOf ? ' · minimal' : ''}`;
-      const discount = kitDiscount(kit);
       const lines = [];
       for (let row = mapping.dataStartRow; row < matrix.length; row += 1) {
         const partValue = readCalculatedValue(sheetName, row, mapping.part);
@@ -1638,23 +1650,14 @@
         const qty = toNumber(readCalculatedValue(sheetName, row, mapping.quantity));
         if (qty === null) continue;
         const key = normalizePart(part);
-        const price = mapping.price === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.price));
         const currencyValue = mapping.currency === null ? null : readCalculatedValue(sheetName, row, mapping.currency);
         const currency = normalizeCurrency(currencyValue) || kit.defaultCurrency || currencyFromText(priceHeader) || state.config.sourceCurrency;
-        const fx = effectiveFx(currency, fxAddonFor(currency));
-        const conv = price !== null && fx !== null ? price * fx : null;
-        const after = conv === null ? null : conv * (1 - discount);
-        const multiplier = effectiveMultiplier(key);
-        const salesUnit = after === null ? null : after * multiplier;
         const line = {
-          sheet: sheetName, row, key, group: groupKey, currency, foreign: currency !== output, fx, fxLive: fxToOutput(currency), fxAddon: fxAddonFor(currency), discount, multiplier,
-          part,
+          sheet: sheetName, row, key, group: groupKey, currency, foreign: currency !== state.config.outputCurrency,
+          part, qty,
           name: mapping.description === null ? '' : displayValue(readCalculatedValue(sheetName, row, mapping.description)),
           alt: mapping.altPart === null ? '' : cleanAltPart(displayValue(readCalculatedValue(sheetName, row, mapping.altPart))),
-          qty, price, conv, after,
-          afterTotal: after === null ? null : after * qty,
-          salesUnit,
-          salesTotal: salesUnit === null ? null : salesUnit * qty,
+          price: mapping.price === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.price)),
         };
         lines.push(line);
         if (!byKey.has(key)) byKey.set(key, []);
@@ -1665,58 +1668,126 @@
       if (!groups.has(groupKey)) groups.set(groupKey, { key: groupKey, minimal: table.minimal, maker: kit.manufacturer || sheetName, tables: [] });
       groups.get(groupKey).tables.push(table);
     });
-    // Each manufacturer's full lists first, then its minimal lists.
     const ordered = [];
-    const makers = [...new Set([...groups.values()].map((group) => group.maker))];
-    makers.forEach((maker) => {
-      const full = groups.get(maker);
-      const minimal = groups.get(`${maker} · minimal`);
-      if (full) ordered.push(full);
-      if (minimal) ordered.push(minimal);
+    [...new Set([...groups.values()].map((group) => group.maker))].forEach((maker) => {
+      [groups.get(maker), groups.get(`${maker} · minimal`)].filter(Boolean).forEach((group) => {
+        group.tables = group.tables.filter((table) => table.active);
+        if (group.tables.length) ordered.push(group);
+      });
     });
+    const items = state.consolidated;
+    const itemByKey = new Map(items.map((item) => [item.key, item]));
+    const makers = [...new Set(items.map((item) => item.manufacturer || '').filter(Boolean))];
     const lineAt = (sheet, row) => tables.get(sheet)?.lines.find((line) => line.row === Number(row)) || null;
-    return { groups: ordered, tables, byKey, lineAt };
+    return { groups: ordered, tables, byKey, items, itemByKey, makers, lineAt };
   }
 
-  // Which values a value is made from (in) and which values use it (out). Nodes that are not on screen (a closed table has
-  // fewer columns) are passed through, so the wires always join things that can be seen.
+  // What the customer pays per item: the price of the consolidated list plus what has been switched on for the way out.
+  function cvCustomerUnit(item) {
+    if (item.unitSalesPrice === null || item.unitSalesPrice === undefined) return null;
+    const out = state.outgoing;
+    let price = item.unitSalesPrice;
+    if (out.transport.on) price += out.transport.amount;
+    if (out.other.on) price += out.other.amount;
+    if (out.toll.on) price += item.unitSalesPrice * out.toll.rate;
+    return price;
+  }
+
+  function cvOutgoingOn() {
+    const out = state.outgoing;
+    return out.transport.on || out.toll.on || out.other.on;
+  }
+
+  // per item in the output currency
+  function cvUnit(item, field) {
+    if (!(item.maxQuantity > 0)) return null;
+    const value = item[field];
+    return value === null || value === undefined ? null : value / item.maxQuantity;
+  }
+
+  function cvStartValue(item, column) {
+    switch (column) {
+      case 'part': return item.part;
+      case 'name': return item.description;
+      case 'qty': return formatQuantity(item.maxQuantity);
+      case 'price': return fmtNum(item.convertedUnit);
+      case 'after': return fmtNum(item.convertedUnit === null ? null : item.convertedUnit * (1 - item.discount));
+      case 'freight': return fmtNum(cvUnit(item, 'freightWithMargin'));
+      case 'cust': return fmtNum(item.unitSalesPrice);
+      default: return fmtNum(item.lineTotal);
+    }
+  }
+
+  function fmtNum(value) {
+    return value === null || value === undefined || !Number.isFinite(value) ? '—' : formatNumber(value, 2);
+  }
+
+  // ---------- which value is made from which (in) and used by which (out) ----------
+
   function cvNeighbours(model, id, direction) {
     const [kind, a, b, c] = id.split(CV_SEP);
-    if (kind === 'cons') {
-      if (direction === 'in') return (model.byKey.get(a) || []).filter((line) => model.tables.get(line.sheet).active).map((line) => cvId('c', line.sheet, line.row, 'qty'));
-      return [cvId('sink', 'warehouse'), cvId('sink', 'consolidated')];
+    const out = direction === 'out';
+    if (kind === 'c') {
+      const line = model.lineAt(a, b);
+      const item = line && model.itemByKey.get(line.key);
+      if (!line || !item || !model.tables.get(a).active) return [];
+      if (!out) return [];
+      if (c === 'price') return item.pricingSource === a && item.pricingRow - 1 === line.row ? [cvId('s', line.key, 'price')] : [];
+      if (c === 'qty') return [cvId('s', line.key, 'qty')];
+      if (c === 'part') return [cvId('s', line.key, 'part')];
+      if (c === 'name') return item.pricingSource === a ? [cvId('s', line.key, 'name')] : [];
+      return [];
     }
-    if (kind !== 'c') return [];
-    const line = model.lineAt(a, b);
-    if (!line) return [];
-    const cell = (column) => cvId('c', a, b, column);
-    const fx = line.foreign ? [cvId('fx', line.currency, line.group)] : [];
-    const disc = cvId('disc', line.group);
-    const mult = cvId('mult', line.group);
-    const active = model.tables.get(a).active;
-    const rules = {
-      part: { in: [], out: [] },
-      name: { in: [], out: [] },
-      alt: { in: [], out: [] },
-      currency: { in: [], out: [cell('conv')] },
-      qty: { in: [], out: [cell('afterTotal'), cell('salesTotal'), ...(active ? [cvId('cons', line.key)] : [])] },
-      price: { in: [], out: [cell('conv')] },
-      conv: { in: [cell('price'), cell('currency'), ...fx], out: [cell('after')] },
-      after: { in: [cell('conv'), disc], out: [cell('afterTotal'), cell('salesUnit')] },
-      afterTotal: { in: [cell('after'), cell('qty')], out: active ? [cvId('sink', 'consolidated')] : [] },
-      salesUnit: { in: [cell('after'), mult], out: [cell('salesTotal')] },
-      salesTotal: { in: [cell('salesUnit'), cell('qty')], out: active ? [cvId('sink', 'consolidated')] : [] },
-    };
-    return (rules[c] || { in: [], out: [] })[direction];
+    if (kind === 's') {
+      const item = model.itemByKey.get(a);
+      if (!item) return [];
+      const cell = (column) => cvId('s', a, column);
+      const maker = item.manufacturer || '';
+      const pricing = model.byKey.get(a)?.find((line) => line.sheet === item.pricingSource && line.row === item.pricingRow - 1);
+      const sourceCells = (column) => (model.byKey.get(a) || []).filter((line) => model.tables.get(line.sheet).active).map((line) => cvId('c', line.sheet, line.row, column));
+      const rules = {
+        part: { in: sourceCells('part'), out: [cvId('u', a, 'part')] },
+        name: { in: pricing ? [cvId('c', pricing.sheet, pricing.row, 'name')] : [], out: [cvId('u', a, 'name')] },
+        qty: { in: sourceCells('qty'), out: [cell('total'), cvId('wh'), cvId('u', a, 'qty')] },
+        price: { in: [...(pricing ? [cvId('c', pricing.sheet, pricing.row, 'price')] : []), ...(pricing?.foreign ? [cvId('fx', pricing.currency, pricing.group)] : [])], out: [cell('after')] },
+        after: { in: [cell('price'), cvId('disc', maker)], out: [cell('freight'), cell('cust')] },
+        freight: { in: [cell('after'), cvId('frt', maker)], out: [cell('cust')] },
+        cust: { in: [cell('after'), cell('freight'), cvId('mult')], out: [cell('total'), cvId('u', a, 'price')] },
+        total: { in: [cell('cust'), cell('qty')], out: [cvId('u', a, 'total')] },
+      };
+      return (rules[b] || { in: [], out: [] })[direction];
+    }
+    if (kind === 'u') {
+      const cell = (column) => cvId('u', a, column);
+      const rules = {
+        part: { in: [cvId('s', a, 'part')], out: [] },
+        name: { in: [cvId('s', a, 'name')], out: [] },
+        qty: { in: [cvId('s', a, 'qty')], out: [cell('total')] },
+        price: { in: [cvId('s', a, 'cust'), ...(cvOutgoingOn() ? [cvId('out')] : [])], out: [cell('total')] },
+        total: { in: [cell('price'), cell('qty')], out: [] },
+      };
+      return (rules[b] || { in: [], out: [] })[direction];
+    }
+    if (kind === 'fx' && out) {
+      return model.items.filter((item) => {
+        const line = model.byKey.get(item.key)?.find((entry) => entry.sheet === item.pricingSource && entry.row === item.pricingRow - 1);
+        return line && line.currency === a && line.group === b;
+      }).map((item) => cvId('s', item.key, 'price'));
+    }
+    if (kind === 'disc' && out) return model.items.filter((item) => (item.manufacturer || '') === a).map((item) => cvId('s', item.key, 'after'));
+    if (kind === 'frt' && out) return model.items.filter((item) => (item.manufacturer || '') === a).map((item) => cvId('s', item.key, 'freight'));
+    if (kind === 'mult' && out) return model.items.map((item) => cvId('s', item.key, 'cust'));
+    if (kind === 'wh' && !out) return model.items.map((item) => cvId('s', item.key, 'qty'));
+    if (kind === 'out' && out) return model.items.map((item) => cvId('u', item.key, 'price'));
+    return [];
   }
 
   function cvVisible(id) {
-    const [kind] = id.split(CV_SEP);
-    if (kind === 'cons') return false;
     return Boolean(cvElements.get(id));
   }
 
-  // The visible values reached from a value, going through the ones that are hidden, but not beyond a visible one.
+  // The visible values reached from a value, going through the ones that are hidden (a closed table has fewer columns),
+  // but not beyond a visible one.
   function cvResolve(model, id, direction) {
     const found = new Set();
     const seen = new Set([id]);
@@ -1731,197 +1802,397 @@
     return [...found];
   }
 
-  const cvElements = new Map();
+  // ---------- building the surface ----------
 
-  function cvColumns(table) {
-    return state.canvas.expanded.includes(table.sheet) ? CV_EXPANDED : CV_COMPACT;
+  function cvNode(tag, className, text) {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text !== undefined) element.textContent = text;
+    return element;
   }
 
-  function cvCellText(line, column) {
-    const number = (value) => (value === null || value === undefined ? '—' : formatNumber(value, 2));
-    switch (column) {
-      case 'part': return line.part;
-      case 'name': return line.name;
-      case 'alt': return line.alt;
-      case 'qty': return formatQuantity(line.qty);
-      case 'currency': return line.currency;
-      case 'price': return number(line.price);
-      case 'conv': return number(line.conv);
-      case 'after': return number(line.after);
-      case 'afterTotal': return number(line.afterTotal);
-      case 'salesUnit': return number(line.salesUnit);
-      default: return number(line.salesTotal);
-    }
+  function cvChip(id, label, value, tip) {
+    const chip = cvNode('button', 'cv-chip');
+    chip.type = 'button';
+    chip.dataset.node = id;
+    chip.title = tip;
+    chip.append(cvNode('small', '', label), cvNode('strong', '', value));
+    return chip;
+  }
+
+  function cvCard(id, className = '') {
+    const card = cvNode('article', `cv-card ${className}`.trim());
+    card.dataset.card = id;
+    return card;
+  }
+
+  function cvHead(title, sub = '', step = '') {
+    const head = cvNode('header', 'cv-head');
+    if (step) head.append(cvNode('span', 'cv-step', step));
+    head.append(cvNode('strong', '', title));
+    if (sub) head.append(cvNode('small', '', sub));
+    return head;
+  }
+
+  // A small labelled number the user can change right on the surface.
+  function cvField(label, setting, value, { suffix = '', step = '1', min = '0', max = '', wide = false } = {}) {
+    const wrapper = cvNode('label', `cv-field${wide ? ' cv-wide' : ''}`);
+    wrapper.append(cvNode('span', '', label));
+    const row = cvNode('span', 'cv-input');
+    const input = cvNode('input');
+    input.type = 'number';
+    input.step = step;
+    input.min = min;
+    if (max) input.max = max;
+    input.value = String(Math.round(value * 10000) / 10000);
+    input.dataset.cvSet = setting;
+    input.setAttribute('aria-label', label);
+    row.append(input);
+    if (suffix) row.append(cvNode('em', '', suffix));
+    wrapper.append(row);
+    return wrapper;
+  }
+
+  function cvToggle(label, setting, checked) {
+    const wrapper = cvNode('label', 'cv-check');
+    const input = cvNode('input');
+    input.type = 'checkbox';
+    input.checked = checked;
+    input.dataset.cvSet = setting;
+    wrapper.append(input, cvNode('span', '', label));
+    return wrapper;
   }
 
   function renderCanvas() {
     if (!state.workbook) return;
     const model = buildCanvasModel();
     state.cvModel = model;
+    const scrolls = {};
+    dom.cvWorld.querySelectorAll('.cv-scroll').forEach((element) => { scrolls[element.dataset.scrollOf] = element.scrollTop; });
     cvElements.clear();
     const world = dom.cvWorld;
     [...world.children].forEach((child) => { if (child !== dom.cvWires) child.remove(); });
     const output = state.config.outputCurrency;
+    const cards = new Map();
 
-    const frames = new Map();
+    // 1. the lists in use, one frame per manufacturer, with their starting prices
     model.groups.forEach((group) => {
-      const frame = document.createElement('section');
-      frame.className = `cv-frame${group.minimal ? ' cv-minimal' : ''}`;
+      const frame = cvNode('section', `cv-frame${group.minimal ? ' cv-minimal' : ''}`);
       frame.dataset.group = group.key;
-      const head = document.createElement('header');
-      head.className = 'cv-frame-head';
+      const head = cvNode('header', 'cv-frame-head');
       head.dataset.dragGroup = group.key;
-      const title = document.createElement('strong');
-      title.textContent = group.key;
+      const title = cvNode('strong', '', group.key);
       title.setAttribute('translate', 'no');
-      const inUse = group.tables.some((table) => table.active);
-      const badge = document.createElement('small');
-      badge.className = 'cv-badge';
-      badge.textContent = inUse ? `${group.tables.length} tables` : group.minimal ? 'Not in use: the full lists are used' : 'Not in use: the minimal lists are used';
-      head.append(title, badge);
-      const chips = document.createElement('div');
-      chips.className = 'cv-chips';
-      const sample = group.tables[0].lines[0];
-      const currencies = [...new Set(group.tables.flatMap((table) => table.currencies))];
-      currencies.forEach((currency) => {
-        const line = group.tables.flatMap((table) => table.lines).find((entry) => entry.currency === currency);
-        chips.append(cvChip(cvId('fx', currency, group.key), `${currency} → ${output}`, line.fxLive === null ? '—' : `${formatNumber(line.fxLive, 4)} + ${formatNumber(line.fxAddon, 2)} = ${formatNumber(line.fx, 4)}`, 'Today\'s rate plus the currency add-on'));
+      head.append(title, cvNode('small', 'cv-badge', `${group.tables.length} tables`));
+      const chips = cvNode('div', 'cv-chips');
+      [...new Set(group.tables.flatMap((table) => table.currencies))].forEach((currency) => {
+        const rate = effectiveFx(currency, fxAddonFor(currency));
+        const live = fxToOutput(currency);
+        chips.append(cvChip(cvId('fx', currency, group.key), `${currency} → ${output}`, live === null ? '—' : `${formatNumber(live, 4)} + ${formatNumber(fxAddonFor(currency), 2)} = ${formatNumber(rate, 4)}`, "Today's rate plus the currency add-on"));
       });
-      if (sample) {
-        chips.append(cvChip(cvId('disc', group.key), 'Discount', formatPercent(sample.discount), 'The manufacturer\'s discount'));
-        chips.append(cvChip(cvId('mult', group.key), 'Price multiplier', `× ${formatNumber(sample.multiplier, 2)}`, 'The sales price is the price after discount times this number'));
-      }
       frame.append(head, chips);
-      frame.classList.toggle('cv-unused', !inUse);
       world.append(frame);
-      frames.set(group.key, frame);
+      group.tables.forEach((table) => {
+        const open = state.canvas.expanded.includes(table.sheet);
+        const card = cvCard(table.sheet, `cv-table${open ? ' cv-open' : ''}${table.minimal ? ' cv-minimal' : ''}`);
+        const header = cvHead(table.sheet, `${table.lines.length} lines`);
+        header.dataset.node = cvId('table', table.sheet);
+        header.prepend(cvNode('span', 'cv-toggle', open ? '▾' : '▸'));
+        header.firstElementChild.setAttribute('aria-hidden', 'true');
+        header.title = open ? 'Click to make the table compact. Drag to move it.' : 'Click to show more columns. Drag to move it.';
+        header.querySelector('strong').setAttribute('translate', 'no');
+        const grid = document.createElement('table');
+        const columns = open ? CV_SHEET_OPEN : CV_SHEET_COMPACT;
+        const currencies = [...new Set(table.lines.map((line) => line.currency))];
+        const labels = { part: 'Article', name: 'Article name', alt: 'Alt. part no.', qty: 'Quantity', currency: 'Currency', price: currencies.length === 1 ? `Price (${currencies[0]})` : 'Price' };
+        const headRow = grid.createTHead().insertRow();
+        columns.forEach((column) => {
+          const th = cvNode('th', ['part', 'name', 'alt', 'currency'].includes(column) ? '' : 'number', labels[column]);
+          th.scope = 'col';
+          headRow.append(th);
+        });
+        const body = grid.createTBody();
+        table.lines.forEach((line) => {
+          const tr = body.insertRow();
+          if (line.qty === 0) tr.className = 'cv-zero';
+          columns.forEach((column) => {
+            const td = tr.insertCell();
+            const id = cvId('c', line.sheet, line.row, column);
+            td.dataset.node = id;
+            td.textContent = { part: line.part, name: line.name, alt: line.alt, qty: formatQuantity(line.qty), currency: line.currency, price: fmtNum(line.price) }[column];
+            if (!['part', 'name', 'alt', 'currency'].includes(column)) td.className = 'number';
+            if (state.canvas.edit && CV_EDITABLE[column] && table.mapping[CV_EDITABLE[column]] !== null) {
+              td.contentEditable = 'plaintext-only';
+              td.classList.add('cv-editable');
+              td.dataset.edit = `${line.sheet}${CV_SEP}${line.row}${CV_SEP}${column}`;
+              td.spellcheck = false;
+            }
+            cvElements.set(id, td);
+          });
+        });
+        card.append(header, grid);
+        world.append(card);
+        cards.set(table.sheet, card);
+      });
     });
 
-    const tableElements = new Map();
-    model.groups.forEach((group) => group.tables.forEach((table) => {
-      const box = document.createElement('article');
-      const open = state.canvas.expanded.includes(table.sheet);
-      box.className = `cv-table${open ? ' cv-open' : ''}${table.active ? '' : ' cv-unused'}${table.minimal ? ' cv-minimal' : ''}`;
-      box.dataset.sheet = table.sheet;
-      const head = document.createElement('header');
-      head.className = 'cv-table-head';
-      head.dataset.dragTable = table.sheet;
-      head.dataset.node = cvId('table', table.sheet);
-      head.title = open ? 'Click to make the table compact. Drag to move it.' : 'Click to show more columns. Drag to move it.';
-      const title = document.createElement('strong');
-      title.textContent = table.sheet;
-      title.setAttribute('translate', 'no');
-      const count = document.createElement('small');
-      count.textContent = `${table.lines.length} lines`;
-      const toggle = document.createElement('span');
-      toggle.className = 'cv-toggle';
-      toggle.setAttribute('aria-hidden', 'true');
-      toggle.textContent = open ? '▾' : '▸';
-      head.append(toggle, title, count);
-      cvElements.set(cvId('table', table.sheet), head);
-      const grid = document.createElement('table');
-      const columns = cvColumns(table);
-      const header = grid.createTHead().insertRow();
-      columns.forEach((column) => {
-        const th = document.createElement('th');
-        th.scope = 'col';
-        th.textContent = cvLabel(column);
-        if (!['part', 'name', 'alt', 'currency'].includes(column)) th.className = 'number';
-        header.append(th);
+    // 2. the start table: one row per article, with the price of the list that sets it
+    const startOpen = state.canvas.expanded.includes(`${CV_SEP}start`);
+    const startColumns = startOpen ? CV_START_OPEN : CV_START_COMPACT;
+    const startLabels = { part: 'Article', name: 'Article name', qty: 'Quantity', price: `Starting price (${output})`, after: 'After discount', freight: 'Freight', cust: 'Price to customer', total: 'Line total' };
+    const start = cvCard('start', `cv-start${startOpen ? ' cv-open' : ''}`);
+    const startHead = cvHead('Start table', `${model.items.length} articles`, '0');
+    startHead.dataset.node = cvId('table', 'start');
+    startHead.title = startOpen ? 'Click to make the table compact. Drag to move it.' : 'Click to show the prices after each step. Drag to move it.';
+    const startScroll = cvNode('div', 'cv-scroll');
+    startScroll.dataset.scrollOf = 'start';
+    const startGrid = document.createElement('table');
+    const startRow = startGrid.createTHead().insertRow();
+    startColumns.forEach((column) => { const th = cvNode('th', ['part', 'name'].includes(column) ? '' : 'number', startLabels[column]); th.scope = 'col'; startRow.append(th); });
+    const startBody = startGrid.createTBody();
+    model.items.forEach((item) => {
+      const tr = startBody.insertRow();
+      if (item.common) tr.className = 'cv-common';
+      startColumns.forEach((column) => {
+        const td = tr.insertCell();
+        const id = cvId('s', item.key, column);
+        td.dataset.node = id;
+        td.textContent = cvStartValue(item, column);
+        if (!['part', 'name'].includes(column)) td.className = 'number';
+        if (['after', 'freight', 'cust', 'total'].includes(column)) td.classList.add('cv-calc');
+        cvElements.set(id, td);
       });
-      const body = grid.createTBody();
-      table.lines.forEach((line) => {
-        const tr = body.insertRow();
-        if (line.qty === 0) tr.className = 'cv-zero';
-        columns.forEach((column) => {
-          const td = tr.insertCell();
-          const id = cvId('c', line.sheet, line.row, column);
-          td.dataset.node = id;
-          td.textContent = cvCellText(line, column);
-          if (!['part', 'name', 'alt', 'currency'].includes(column)) td.className = 'number';
-          if (column === 'after' || column === 'afterTotal' || column === 'salesTotal') td.classList.add('cv-calc');
-          if (state.canvas.edit && CV_EDITABLE[column] && table.mapping[CV_EDITABLE[column]] !== null) {
-            td.contentEditable = 'plaintext-only';
-            td.classList.add('cv-editable');
-            td.dataset.edit = `${line.sheet}${CV_SEP}${line.row}${CV_SEP}${column}`;
-            td.spellcheck = false;
-          }
-          cvElements.set(id, td);
-        });
+    });
+    startScroll.append(startGrid);
+    start.append(startHead, startScroll);
+    world.append(start);
+    cards.set('start', start);
+
+    // 3. the steps
+    const stepCards = cvStepCards(model);
+    Object.entries(stepCards).forEach(([id, card]) => { world.append(card); cards.set(id, card); });
+
+    // 4. the customer
+    const customer = cvCard('cust', 'cv-customer');
+    const withVat = salesVatRate() > 0;
+    const custHead = cvHead('Customer', `${model.items.length} articles`, '6');
+    custHead.dataset.node = cvId('table', 'cust');
+    const custScroll = cvNode('div', 'cv-scroll');
+    custScroll.dataset.scrollOf = 'cust';
+    const custGrid = document.createElement('table');
+    const custLabels = { part: 'Article', name: 'Article name', qty: 'Quantity', price: `Price to customer (${output})`, total: withVat ? 'Total incl. VAT' : 'Total' };
+    const custRow = custGrid.createTHead().insertRow();
+    CV_CUSTOMER.forEach((column) => { const th = cvNode('th', ['part', 'name'].includes(column) ? '' : 'number', custLabels[column]); th.scope = 'col'; custRow.append(th); });
+    const custBody = custGrid.createTBody();
+    let customerTotal = 0;
+    model.items.forEach((item) => {
+      const unit = cvCustomerUnit(item);
+      const total = unit === null ? null : unit * item.maxQuantity * (1 + salesVatRate());
+      customerTotal += total ?? 0;
+      const tr = custBody.insertRow();
+      CV_CUSTOMER.forEach((column) => {
+        const td = tr.insertCell();
+        const id = cvId('u', item.key, column);
+        td.dataset.node = id;
+        td.textContent = { part: item.part, name: item.description, qty: formatQuantity(item.maxQuantity), price: fmtNum(unit), total: fmtNum(total) }[column];
+        if (!['part', 'name'].includes(column)) td.className = 'number';
+        if (['price', 'total'].includes(column)) td.classList.add('cv-calc');
+        cvElements.set(id, td);
       });
-      box.append(head, grid);
-      world.append(box);
-      tableElements.set(table.sheet, box);
-    }));
+    });
+    custScroll.append(custGrid);
+    const foot = cvNode('footer', 'cv-foot');
+    foot.append(cvNode('span', '', withVat ? 'Total incl. VAT' : 'Total'), cvNode('strong', '', `${formatNumber(customerTotal, 0)} ${output}`));
+    customer.append(custHead, custScroll, foot);
+    world.append(customer);
+    cards.set('cust', customer);
 
-    // Results: where the values end up.
-    const results = document.createElement('article');
-    results.className = 'cv-table cv-results';
-    results.dataset.sheet = `${CV_SEP}results`;
-    const resultsHead = document.createElement('header');
-    resultsHead.className = 'cv-table-head';
-    resultsHead.dataset.dragTable = `${CV_SEP}results`;
-    const resultsTitle = document.createElement('strong');
-    resultsTitle.textContent = 'Results';
-    resultsHead.append(resultsTitle);
-    const totals = state.consolidated.reduce((sum, item) => ({ purchase: sum.purchase + (item.discountedTotal ?? 0), sales: sum.sales + (item.lineTotal ?? 0), units: sum.units + (item.maxQuantity ?? 0) }), { purchase: 0, sales: 0, units: 0 });
-    const warehouse = calculateWarehouseModel();
-    results.append(
-      resultsHead,
-      cvChip(cvId('sink', 'consolidated'), 'Consolidated list', `${formatNumber(totals.purchase, 0)} → ${formatNumber(totals.sales, 0)} ${output}`, 'Purchase value and sales value of the consolidated list'),
-      cvChip(cvId('sink', 'warehouse'), 'Warehouse', `${formatNumber(totals.units, 0)} pieces · ${formatNumber(warehouse.shelfLocations + warehouse.drawerLocations + warehouse.pallets, 0)} locations`, 'The stock quantities decide how much room and how many locations the warehouse needs'),
-    );
-    world.append(results);
-    tableElements.set(`${CV_SEP}results`, results);
-    results.querySelectorAll('[data-node]').forEach((element) => cvElements.set(element.dataset.node, element));
-    frames.forEach((frame) => frame.querySelectorAll('[data-node]').forEach((element) => cvElements.set(element.dataset.node, element)));
-
-    cvLayout(model, frames, tableElements);
+    world.querySelectorAll('[data-node]').forEach((element) => cvElements.set(element.dataset.node, element));
+    dom.cvWorld.querySelectorAll('.cv-scroll').forEach((element) => { if (scrolls[element.dataset.scrollOf]) element.scrollTop = scrolls[element.dataset.scrollOf]; });
+    cvLayout(model, cards);
     cvApplyView();
     cvSelect(state.canvas.selected && cvElements.has(state.canvas.selected) ? state.canvas.selected : null);
-    // The first time, show everything once the surface has its size.
     if (!state.canvas.fitted) requestAnimationFrame(() => requestAnimationFrame(() => { if (!state.canvas.fitted && cvFit()) { state.canvas.fitted = true; cvDraw(); } }));
   }
 
-  function cvChip(id, label, value, tip) {
-    const chip = document.createElement('button');
-    chip.type = 'button';
-    chip.className = 'cv-chip';
-    chip.dataset.node = id;
-    chip.title = tip;
-    const name = document.createElement('small');
-    name.textContent = label;
-    const number = document.createElement('strong');
-    number.textContent = value;
-    chip.append(name, number);
-    return chip;
+  // The cards between the start table and the customer: discount, incoming freight, multiplier, warehouse and the way out.
+  function cvStepCards(model) {
+    const output = state.config.outputCurrency;
+    const warehouseCountry = destinationConfig().name;
+    const cards = {};
+    const sum = (field) => model.items.reduce((total, item) => total + (item[field] ?? 0), 0);
+    const kitOf = (maker) => kitSettings(makerKits(maker)[0] || maker);
+
+    // 1 · discount
+    const disc = cvCard('disc', 'cv-step-card');
+    disc.append(cvHead('Discount', 'off the starting price', '1'));
+    const discBody = cvNode('div', 'cv-body');
+    model.makers.forEach((maker) => {
+      const line = cvNode('div', 'cv-line');
+      line.dataset.node = cvId('disc', maker);
+      line.append(cvNode('strong', '', maker));
+      line.firstChild.setAttribute('translate', 'no');
+      line.append(cvField('Discount', `disc${CV_SEP}${maker}`, kitDiscount(kitOf(maker)) * 100, { suffix: '%', step: '0.1', max: '100' }));
+      discBody.append(line);
+    });
+    discBody.append(cvNode('p', 'cv-note', 'After discount = starting price × (1 − discount)'));
+    discBody.append(cvNode('p', 'cv-sum', `Purchase value ${formatNumber(sum('convertedTotal'), 0)} → ${formatNumber(sum('discountedTotal'), 0)} ${output}`));
+    disc.append(discBody);
+    cards.disc = disc;
+
+    // 2 · incoming freight
+    const frt = cvCard('frt', 'cv-step-card cv-wide-card');
+    frt.append(cvHead('Incoming freight', 'to the warehouse in ' + warehouseCountry, '2'));
+    const frtBody = cvNode('div', 'cv-body');
+    model.makers.forEach((maker) => {
+      const kit = kitOf(maker);
+      const line = cvNode('div', 'cv-line');
+      line.dataset.node = cvId('frt', maker);
+      const route = cvNode('div', 'cv-route');
+      const name = cvNode('strong', '', maker);
+      name.setAttribute('translate', 'no');
+      route.append(name, cvNode('small', '', `${originName(kit.originCountry)} → ${warehouseCountry}`));
+      line.append(route);
+      if (kit.shippingMode === 'percent') {
+        const sentence = cvNode('div', 'cv-assumed');
+        sentence.append(cvNode('span', 'cv-tag', 'Assumed'), cvField('', `frt${CV_SEP}${maker}`, kit.shippingAmount, { suffix: '%', step: '0.1', max: '100' }), cvNode('span', '', 'of the discounted price, for each item'));
+        line.append(sentence);
+      } else {
+        const mode = cvNode('select');
+        mode.dataset.cvSet = `frtmode${CV_SEP}${maker}`;
+        mode.setAttribute('aria-label', 'Freight rule');
+        Object.entries(KIT_SHIPPING_MODES).forEach(([value, label]) => mode.append(new Option(label, value, false, kit.shippingMode === value)));
+        line.append(mode);
+        if (kit.shippingMode !== 'sheet') line.append(cvField('Amount', `frt${CV_SEP}${maker}`, kit.shippingAmount, { suffix: kit.shippingCurrency, step: '0.01' }));
+        else line.append(cvNode('p', 'cv-note', 'The freight column of each list is used.'));
+      }
+      frtBody.append(line);
+    });
+    frtBody.append(cvField('Freight margin on all freight and import costs', 'margin', state.config.shippingMargin * 100, { suffix: '%', step: '0.1', max: '99', wide: true }));
+    frtBody.append(cvNode('p', 'cv-note', 'Customs duty, insurance and clearance fees (set per manufacturer) are added to the freight before the margin.'));
+    frtBody.append(cvNode('p', 'cv-sum', `Freight and import costs incl. margin ${formatNumber(sum('freightWithMargin'), 0)} ${output}`));
+    frt.append(frtBody);
+    cards.frt = frt;
+
+    // 3 · multiplier
+    const mult = cvCard('mult', 'cv-step-card');
+    mult.append(cvHead('Multiplier', 'sets the sales price', '3'));
+    const multBody = cvNode('div', 'cv-body');
+    const multLine = cvNode('div', 'cv-line');
+    multLine.dataset.node = cvId('mult');
+    multLine.append(cvField('Multiplier', 'mult', state.config.multiplier, { suffix: '×', step: '0.01', wide: true }));
+    multBody.append(multLine);
+    multBody.append(cvNode('p', 'cv-note', 'Price to customer = discounted price × multiplier + freight'));
+    const overrides = model.items.filter((item) => item.multiplierOverridden).length;
+    if (overrides) multBody.append(cvNode('p', 'cv-note', `${overrides} articles have their own multiplier.`));
+    multBody.append(cvNode('p', 'cv-sum', `Sales value ${formatNumber(sum('sellingTotal'), 0)} ${output}`));
+    mult.append(multBody);
+    cards.mult = mult;
+
+    // 4 · warehouse
+    const whModel = calculateWarehouseModel();
+    const wh = cvCard('wh', 'cv-step-card cv-wide-card');
+    wh.append(cvHead(`Warehouse`, warehouseCountry, '4'));
+    const whBody = cvNode('div', 'cv-body');
+    whBody.dataset.node = cvId('wh');
+    const types = cvNode('div', 'cv-types');
+    types.append(cvToggle('Shelves with bins', 'wh.shelfEnabled', state.warehouse.shelfEnabled), cvToggle('Drawers', 'wh.drawerEnabled', state.warehouse.drawerEnabled), cvToggle('Pallets', 'wh.palletEnabled', state.warehouse.palletEnabled));
+    whBody.append(types);
+    const grid = cvNode('div', 'cv-grid');
+    if (state.warehouse.shelfEnabled) {
+      grid.append(
+        cvField('Bins per shelf', 'wh.binsPerShelf', state.warehouse.binsPerShelf, { min: '1', max: '12' }),
+        cvField('Shelf levels per rack', 'wh.shelvesPerRack', state.warehouse.shelvesPerRack, { min: '1', max: '8' }),
+        cvField('Items per bin', 'wh.unitsPerBin', state.warehouse.unitsPerBin, { min: '1' }),
+      );
+    }
+    if (state.warehouse.drawerEnabled) grid.append(cvField('Items per drawer', 'wh.unitsPerDrawer', state.warehouse.unitsPerDrawer, { min: '1' }));
+    if (state.warehouse.palletEnabled) grid.append(cvField('Pallet positions', 'wh.plannedPallets', state.warehouse.plannedPallets), cvField('Items per pallet', 'wh.unitsPerPallet', state.warehouse.unitsPerPallet, { min: '1' }));
+    const monthly = model.items.reduce((total, item) => total + (item.salesPerYear ?? 0), 0) / 12;
+    grid.append(
+      cvField('Items sold per month', 'soldPerMonth', monthly, { step: '1' }),
+      cvField('Orders per month', 'wh.orders', state.warehouse.orders, { step: '0.1' }),
+      cvField('Order lines per order', 'wh.orderLines', state.warehouse.orderLines),
+      cvField('Receipts per month', 'wh.receipts', state.warehouse.receipts, { step: '0.1' }),
+    );
+    whBody.append(grid);
+    if (state.warehouse.shelfEnabled) whBody.append(cvToggle('One article per bin', 'wh.onePerBin', state.warehouse.onePerBin));
+    const quote = cvNode('div', 'cv-quote');
+    quote.append(cvNode('small', '', 'Quote (NOK)'));
+    quote.append(cvField('Shelf location / month', 'rate.shelf', state.warehouse.rates.shelf, { step: '0.01' }), cvField('Order base', 'rate.orderBase', state.warehouse.rates.orderBase, { step: '0.01' }), cvField('Receipt base', 'rate.receiptBase', state.warehouse.rates.receiptBase, { step: '0.01' }));
+    whBody.append(quote);
+    const locations = whModel.shelfLocations + whModel.drawerLocations + whModel.pallets;
+    whBody.append(cvNode('p', 'cv-sum', `${formatNumber(whModel.inventoryUnits, 0)} items · ${formatNumber(locations, 0)} locations · ${whModel.shelfEnabled ? `${formatNumber(Math.round(whModel.shelfBins), 0)} of ${formatNumber(whModel.totalBins, 0)} bins · ` : ''}${formatMoney(whModel.monthlyTotal, whModel.outputCurrency)} a month`));
+    const shelvesButton = cvNode('button', 'button small cv-shelves-button', state.canvas.shelves ? 'Hide the shelves' : 'Show the shelves');
+    shelvesButton.type = 'button';
+    shelvesButton.dataset.cvAction = 'shelves';
+    shelvesButton.setAttribute('aria-pressed', String(state.canvas.shelves));
+    const moreButton = cvNode('button', 'button small ghost', 'All warehouse settings');
+    moreButton.type = 'button';
+    moreButton.dataset.cvAction = 'warehouse';
+    const buttons = cvNode('div', 'cv-buttons');
+    buttons.append(shelvesButton, moreButton);
+    whBody.append(buttons);
+    if (state.canvas.shelves) {
+      const picture = cvNode('div', 'cv-shelves');
+      const markup = buildWarehouseIsoSvg(whModel);
+      picture.innerHTML = markup.slice(markup.indexOf('<svg'));
+      whBody.append(picture);
+    }
+    wh.append(whBody);
+    cards.wh = wh;
+
+    // 5 · going out
+    const out = cvCard('out', 'cv-step-card cv-wide-card');
+    out.append(cvHead('Going out to the customer', 'normally not calculated', '5'));
+    const outBody = cvNode('div', 'cv-body');
+    outBody.dataset.node = cvId('out');
+    outBody.append(cvNode('p', 'cv-note cv-strong', 'Normally this step is not calculated: the customer pays the price from the multiplier. Switch a row on only if it is needed.'));
+    const rows = cvNode('div', 'cv-outrows');
+    const row = (label, toggle, field) => { const line = cvNode('div', 'cv-outrow'); line.append(toggle, cvNode('strong', '', label), field); rows.append(line); };
+    row('Transport to the customer', cvToggle('', 'out.transport.on', state.outgoing.transport.on), cvField('', 'out.transport.amount', state.outgoing.transport.amount, { suffix: `${output} / item`, step: '0.01' }));
+    row('VAT', cvToggle('', 'vat.on', state.config.vatRate > 0), cvField('', 'vat.rate', state.config.vatRate * 100, { suffix: '%', step: '0.1', max: '100' }));
+    row('Toll / customs', cvToggle('', 'out.toll.on', state.outgoing.toll.on), cvField('', 'out.toll.rate', state.outgoing.toll.rate * 100, { suffix: '% of the price', step: '0.1', max: '100' }));
+    row('Other costs', cvToggle('', 'out.other.on', state.outgoing.other.on), cvField('', 'out.other.amount', state.outgoing.other.amount, { suffix: `${output} / item`, step: '0.01' }));
+    outBody.append(rows);
+    out.append(outBody);
+    cards.out = out;
+    return cards;
   }
 
-  // Tables without a saved place are put in columns inside their group, the groups side by side.
-  function cvLayout(model, frames, tableElements) {
+  // Cards without a saved place are put in a row: the lists in columns inside their frame, then the chain of steps.
+  function cvLayout(model, cards) {
     const GAP = 26;
     const HEAD = 96;
-    let originX = 60;
+    const TOP = 60 + HEAD;
+    const saved = state.canvas.positions;
+    let originY = TOP;
+    let widest = 0;
     model.groups.forEach((group) => {
-      const boxes = group.tables.map((table) => tableElements.get(table.sheet));
-      const needs = group.tables.some((table) => !state.canvas.positions[table.sheet]);
+      const boxes = group.tables.map((table) => cards.get(table.sheet));
       const columnCount = Math.max(1, Math.round(Math.sqrt(group.tables.length)));
       const columnWidth = Math.max(...boxes.map((box) => box.offsetWidth));
       const heights = new Array(columnCount).fill(0);
       group.tables.forEach((table, index) => {
-        if (state.canvas.positions[table.sheet] && !needs) return;
-        if (state.canvas.positions[table.sheet]) return;
+        if (saved[table.sheet]) return;
         const column = heights.indexOf(Math.min(...heights));
-        state.canvas.positions[table.sheet] = { x: originX + column * (columnWidth + GAP), y: 60 + HEAD + heights[column] };
+        saved[table.sheet] = { x: 60 + column * (columnWidth + GAP), y: originY + heights[column] };
         heights[column] += boxes[index].offsetHeight + GAP;
       });
-      originX += columnCount * (columnWidth + GAP) + 150;
+      widest = Math.max(widest, columnCount * (columnWidth + GAP));
+      originY += Math.max(...heights) + HEAD + 70;
     });
-    if (!state.canvas.positions[`${CV_SEP}results`]) state.canvas.positions[`${CV_SEP}results`] = { x: originX, y: 60 + HEAD };
-    tableElements.forEach((box, sheet) => {
-      const position = state.canvas.positions[sheet] || { x: 0, y: 0 };
-      box.style.left = `${position.x}px`;
-      box.style.top = `${position.y}px`;
+    let x = 60 + widest + 170;
+    CV_CHAIN.forEach((id) => {
+      const card = cards.get(id);
+      if (!card) return;
+      if (!saved[id]) saved[id] = { x, y: TOP + 120 };
+      x = Math.max(x, saved[id].x) + card.offsetWidth + 130;
+    });
+    cards.forEach((card, id) => {
+      const position = saved[id] || { x: 0, y: 0 };
+      card.style.left = `${position.x}px`;
+      card.style.top = `${position.y}px`;
     });
     cvFrames();
   }
@@ -1929,12 +2200,11 @@
   // A group frame wraps its tables; it follows them when they move.
   function cvFrames() {
     const PAD = 22;
-    const HEAD = 88;
+    const HEAD = 96;
     state.cvModel.groups.forEach((group) => {
       const frame = dom.cvWorld.querySelector(`.cv-frame[data-group="${CSS.escape(group.key)}"]`);
-      if (!frame) return;
-      const boxes = group.tables.map((table) => dom.cvWorld.querySelector(`.cv-table[data-sheet="${CSS.escape(table.sheet)}"]`)).filter(Boolean);
-      if (!boxes.length) return;
+      const boxes = group.tables.map((table) => dom.cvWorld.querySelector(`.cv-card[data-card="${CSS.escape(table.sheet)}"]`)).filter(Boolean);
+      if (!frame || !boxes.length) return;
       const left = Math.min(...boxes.map((box) => box.offsetLeft));
       const top = Math.min(...boxes.map((box) => box.offsetTop));
       const right = Math.max(...boxes.map((box) => box.offsetLeft + box.offsetWidth));
@@ -1949,18 +2219,19 @@
   function cvApplyView() {
     const { x, y, scale } = state.canvas.view;
     dom.cvWorld.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+    // Titles and lines grow when the picture is zoomed out, so they stay easy to see and to grab.
+    dom.cvWorld.style.setProperty('--inv', String(clamp(Math.sqrt(1 / scale), 1, 2.4)));
     dom.cvZoomReadout.textContent = `${Math.round(scale * 100)}%`;
   }
 
   function cvFit() {
-    const boxes = [...dom.cvWorld.querySelectorAll('.cv-frame, .cv-results')];
+    const boxes = [...dom.cvWorld.querySelectorAll('.cv-frame, .cv-card')];
     if (!boxes.length) return false;
     const left = Math.min(...boxes.map((box) => box.offsetLeft));
     const top = Math.min(...boxes.map((box) => box.offsetTop));
     const right = Math.max(...boxes.map((box) => box.offsetLeft + box.offsetWidth));
     const bottom = Math.max(...boxes.map((box) => box.offsetTop + box.offsetHeight));
     const stage = dom.cvStage;
-    // A hidden or not yet laid out surface has no size to fit to.
     if (stage.clientWidth < 300 || stage.clientHeight < 200) return false;
     const scale = clamp(Math.min((stage.clientWidth - 60) / (right - left), (stage.clientHeight - 60) / (bottom - top)), 0.08, 1.2);
     state.canvas.view = { scale, x: (stage.clientWidth - (right - left) * scale) / 2 - left * scale, y: (stage.clientHeight - (bottom - top) * scale) / 2 - top * scale };
@@ -1979,9 +2250,9 @@
     cvApplyView();
   }
 
-  /* -- Following a value: wires that flow in (blue) and out (orange) -- */
+  // ---------- wires ----------
 
-  // Position of an element on the surface, in the surface's own units (so zoom and pan do not matter).
+  // Position of an element on the surface in the surface's own units, so zoom and pan do not matter.
   function cvRect(element) {
     const scale = state.canvas.view.scale;
     const world = dom.cvWorld.getBoundingClientRect();
@@ -1989,9 +2260,19 @@
     return { x: (rect.left - world.left) / scale, y: (rect.top - world.top) / scale, w: rect.width / scale, h: rect.height / scale };
   }
 
+  // A value inside a scrolling table that is scrolled out of sight is joined at the edge of the table.
+  function cvAnchor(element) {
+    const rect = cvRect(element);
+    const scroller = element.closest('.cv-scroll');
+    if (!scroller) return rect;
+    const box = cvRect(scroller);
+    const middle = clamp(rect.y + rect.h / 2, box.y + 28, box.y + box.h - 8);
+    return { ...rect, y: middle - rect.h / 2 };
+  }
+
   function cvPath(from, to) {
-    const a = cvRect(from);
-    const b = cvRect(to);
+    const a = cvAnchor(from);
+    const b = cvAnchor(to);
     const forward = a.x + a.w / 2 <= b.x + b.w / 2;
     const overlap = Math.abs(a.x - b.x) < 24;
     let x1 = forward ? a.x + a.w : a.x;
@@ -2002,11 +2283,11 @@
       x1 = a.x + a.w;
       x2 = b.x + b.w;
       const bend = Math.max(x1, x2) + 70;
-      return `M${x1},${y1} C${bend},${y1} ${bend},${y2} ${x2},${y2}`;
+      return { d: `M${x1},${y1} C${bend},${y1} ${bend},${y2} ${x2},${y2}`, mid: [bend, (y1 + y2) / 2] };
     }
     const pull = Math.max(50, Math.abs(x2 - x1) / 2);
     const direction = forward ? 1 : -1;
-    return `M${x1},${y1} C${x1 + pull * direction},${y1} ${x2 - pull * direction},${y2} ${x2},${y2}`;
+    return { d: `M${x1},${y1} C${x1 + pull * direction},${y1} ${x2 - pull * direction},${y2} ${x2},${y2}`, mid: [(x1 + x2) / 2, (y1 + y2) / 2] };
   }
 
   function cvSvg(tag, attributes) {
@@ -2015,80 +2296,85 @@
     return element;
   }
 
-  // The values a chip or a result stands for: wires go to the tables that use it, and their cells are lit.
-  function cvChipTargets(model, id) {
-    const [kind, a, b] = id.split(CV_SEP);
-    const lines = [...model.tables.values()].flatMap((table) => table.lines.map((line) => ({ line, table })));
-    let hits;
-    if (kind === 'fx') hits = lines.filter(({ line }) => line.currency === a && line.group === b);
-    else if (kind === 'disc' || kind === 'mult') hits = lines.filter(({ line }) => line.group === a);
-    else if (id === cvId('sink', 'warehouse')) hits = lines.filter(({ table }) => table.active).map((entry) => ({ ...entry, column: 'qty' }));
-    else if (id === cvId('sink', 'consolidated')) hits = lines.filter(({ table }) => table.active).map((entry) => ({ ...entry, column: 'after' }));
-    else hits = [];
-    return hits.map((hit) => ({ ...hit, column: hit.column || (kind === 'fx' ? 'conv' : 'after') }));
+  const CV_PIPE_LABELS = Object.freeze({ start: 'starting price', disc: 'after discount', frt: '+ freight', mult: '× multiplier', wh: 'stock', out: 'to the customer' });
+
+  // The big arrows of the chain are always there; they show the order of the steps.
+  function cvPipes(svg) {
+    const card = (id) => dom.cvWorld.querySelector(`.cv-card[data-card="${CSS.escape(id)}"]`);
+    const link = (from, to, label) => {
+      if (!from || !to) return;
+      const { d, mid } = cvPath(from, to);
+      svg.append(cvSvg('path', { d, class: 'cv-wire cv-pipe', fill: 'none', 'marker-end': 'url(#cv-arrow-pipe)' }));
+      if (label) {
+        const text = cvSvg('text', { x: mid[0], y: mid[1] - 8, class: 'cv-wire cv-pipe-label', 'text-anchor': 'middle' });
+        text.textContent = translateUi(label);
+        svg.append(text);
+      }
+    };
+    const start = card('start');
+    dom.cvWorld.querySelectorAll('.cv-frame').forEach((frame) => {
+      const tables = state.cvModel.groups.find((group) => group.key === frame.dataset.group)?.tables || [];
+      if (tables.length) link(frame, start, 'prices and quantities');
+    });
+    CV_CHAIN.forEach((id, index) => { if (index < CV_CHAIN.length - 1) link(card(id), card(CV_CHAIN[index + 1]), CV_PIPE_LABELS[id]); });
   }
 
   function cvDraw() {
     if (!state.cvModel) return null;
     const svg = dom.cvWires;
     svg.querySelectorAll('.cv-wire').forEach((element) => element.remove());
-    const selected = state.canvas.selected;
     dom.cvWorld.querySelectorAll('.cv-in, .cv-out, .cv-same, .cv-selected').forEach((element) => element.classList.remove('cv-in', 'cv-out', 'cv-same', 'cv-selected'));
+    cvPipes(svg);
+    const selected = state.canvas.selected;
     if (!selected || !cvElements.get(selected)) return null;
     const model = state.cvModel;
-    const target = cvElements.get(selected);
-    target.classList.add('cv-selected');
-    const wires = [];
-    const [kind] = selected.split(CV_SEP);
-    let ins = [];
-    let outs = [];
+    cvElements.get(selected).classList.add('cv-selected');
+    const [kind, , , column] = selected.split(CV_SEP);
+    const ins = cvResolve(model, selected, 'in');
+    const outs = cvResolve(model, selected, 'out');
     let same = [];
-    let hidden = 0;
-    if (kind === 'c') {
-      ins = cvResolve(model, selected, 'in');
-      outs = cvResolve(model, selected, 'out');
-      const [, sheet, row, column] = selected.split(CV_SEP);
-      if (column === 'part') {
-        const line = model.lineAt(sheet, row);
-        same = (model.byKey.get(line.key) || []).filter((other) => !(other.sheet === sheet && other.row === line.row)).map((other) => cvId('c', other.sheet, other.row, 'part')).filter((id) => cvElements.get(id));
-      }
-      ins.forEach((id) => wires.push({ from: id, to: selected, kind: 'in' }));
-      outs.forEach((id) => wires.push({ from: selected, to: id, kind: 'out' }));
-      same.slice(0, 30).forEach((id) => wires.push({ from: selected, to: id, kind: 'same' }));
-    } else if (kind === 'fx' || kind === 'disc' || kind === 'mult' || kind === 'sink') {
-      const hits = cvChipTargets(model, selected);
-      const tablesHit = [...new Set(hits.map(({ table }) => table.sheet))];
-      const direction = kind === 'sink' ? 'in' : 'out';
-      tablesHit.forEach((sheet) => {
-        const head = cvElements.get(cvId('table', sheet));
-        if (!head) return;
-        wires.push(direction === 'in' ? { from: head, to: selected, kind: 'in' } : { from: selected, to: head, kind: 'out' });
-      });
-      hits.forEach(({ line, column }) => {
-        const cell = cvElements.get(cvId('c', line.sheet, line.row, column)) || cvElements.get(cvId('c', line.sheet, line.row, 'after'));
-        if (cell) cell.classList.add(direction === 'in' ? 'cv-in' : 'cv-out');
-      });
+    if (kind === 'c' && column === 'part') {
+      const [, sheet, row] = selected.split(CV_SEP);
+      const line = model.lineAt(sheet, row);
+      same = (model.byKey.get(line.key) || []).filter((other) => !(other.sheet === sheet && other.row === line.row)).map((other) => cvId('c', other.sheet, other.row, 'part')).filter((id) => cvElements.get(id));
     }
+    const wires = [];
+    const group = (ids, direction) => {
+      // A value that stands for many (a step, the warehouse) is joined to the table once and lights up its cells.
+      if (ids.length <= 6 || kind === 'c' || kind === 's' || kind === 'u') {
+        ids.forEach((id) => wires.push(direction === 'in' ? { from: id, to: selected, kind: 'in' } : { from: selected, to: id, kind: 'out' }));
+        return;
+      }
+      const cardsHit = new Map();
+      ids.forEach((id) => {
+        const element = cvElements.get(id);
+        element.classList.add(direction === 'in' ? 'cv-in' : 'cv-out');
+        const card = element.closest('.cv-card');
+        if (card && !cardsHit.has(card)) cardsHit.set(card, card.querySelector('.cv-head'));
+      });
+      cardsHit.forEach((head) => wires.push(direction === 'in' ? { from: head, to: selected, kind: 'in' } : { from: selected, to: head, kind: 'out' }));
+    };
+    group(ins, 'in');
+    group(outs, 'out');
+    same.slice(0, 30).forEach((id) => wires.push({ from: selected, to: id, kind: 'same' }));
     const resolve = (value) => (typeof value === 'string' ? cvElements.get(value) : value);
     wires.slice(0, CV_MAX_WIRES).forEach(({ from, to, kind: wireKind }) => {
       const a = resolve(from);
       const b = resolve(to);
       if (!a || !b) return;
-      const path = cvPath(a, b);
-      svg.append(cvSvg('path', { d: path, class: `cv-wire cv-wire-base cv-${wireKind}`, fill: 'none' }));
-      svg.append(cvSvg('path', { d: path, class: `cv-wire cv-wire-flow cv-${wireKind}`, fill: 'none', 'marker-end': wireKind === 'same' ? '' : `url(#cv-arrow-${wireKind})` }));
+      const { d } = cvPath(a, b);
+      svg.append(cvSvg('path', { d, class: `cv-wire cv-wire-base cv-${wireKind}`, fill: 'none' }));
+      svg.append(cvSvg('path', { d, class: `cv-wire cv-wire-flow cv-${wireKind}`, fill: 'none', 'marker-end': wireKind === 'same' ? '' : `url(#cv-arrow-${wireKind})` }));
       if (wireKind === 'in' && typeof from === 'string') a.classList.add('cv-in');
       if (wireKind === 'out' && typeof to === 'string') b.classList.add('cv-out');
       if (wireKind === 'same' && typeof to === 'string') b.classList.add('cv-same');
     });
-    hidden = Math.max(0, wires.length - CV_MAX_WIRES);
-    return { ins, outs, same, hidden };
+    return { ins, outs, same, hidden: Math.max(0, wires.length - CV_MAX_WIRES) };
   }
 
   function cvSelect(id) {
     state.canvas.selected = id;
-    const trace = cvDraw();
-    cvInspect(trace);
+    cvInspect(cvDraw());
   }
 
   // The plain-language explanation of the selected value, with what it is made from and what uses it.
@@ -2102,47 +2388,64 @@
     const model = state.cvModel;
     const output = state.config.outputCurrency;
     const [kind, a, b, column] = selected.split(CV_SEP);
+    const n = (value) => (value === null || value === undefined ? '—' : formatNumber(value, 2));
     const lines = [];
     let title = '';
     let value = '';
+    const labels = { part: 'Article', name: 'Article name', alt: 'Alt. part no.', qty: 'Quantity', currency: 'Currency', price: 'Price' };
     if (kind === 'c') {
       const line = model.lineAt(a, b);
       if (!line) { panel.classList.add('hidden'); return; }
-      title = `${cvLabel(column)} · ${line.part} · ${a}`;
-      value = cvCellText(line, column);
-      const n = (v) => (v === null || v === undefined ? '—' : formatNumber(v, 2));
-      const explain = {
+      title = `${labels[column]} · ${line.part} · ${a}`;
+      value = column === 'qty' ? formatQuantity(line.qty) : { part: line.part, name: line.name, alt: line.alt, currency: line.currency, price: n(line.price) }[column];
+      lines.push({
         part: `The article number, typed in ${a}, row ${line.row + 1}. The same number in other lists is the same article.`,
         name: 'The article name from the list.',
         alt: 'The second article number from the list.',
         currency: 'The currency of the price in the list.',
-        qty: `The quantity typed in ${a}, row ${line.row + 1}. The consolidated list and the warehouse use the largest quantity of this article in the lists in use.`,
-        price: `The price per piece typed in ${a}, row ${line.row + 1}, in ${line.currency}.`,
-        conv: `${n(line.price)} ${line.currency} × rate ${n(line.fx)} = ${n(line.conv)} ${output}`,
-        after: `${n(line.conv)} ${output} × (1 − discount ${formatPercent(line.discount)}) = ${n(line.after)} ${output}`,
-        afterTotal: `${n(line.after)} ${output} × ${formatQuantity(line.qty)} pieces = ${n(line.afterTotal)} ${output}`,
-        salesUnit: `${n(line.after)} ${output} × multiplier ${n(line.multiplier)} = ${n(line.salesUnit)} ${output}`,
-        salesTotal: `${n(line.salesUnit)} ${output} × ${formatQuantity(line.qty)} pieces = ${n(line.salesTotal)} ${output}`,
-      };
-      lines.push(explain[column] || '');
+        qty: `The quantity typed in ${a}, row ${line.row + 1}. The start table uses the largest quantity of this article in the lists in use.`,
+        price: `The starting price per piece typed in ${a}, row ${line.row + 1}, in ${line.currency}: before any discount.`,
+      }[column]);
       if (!model.tables.get(a).active) lines.push('This list is not used now, so its values do not go into the consolidated list or the warehouse.');
+    } else if (kind === 's' || kind === 'u') {
+      const item = model.itemByKey.get(a);
+      if (!item) { panel.classList.add('hidden'); return; }
+      const qty = formatQuantity(item.maxQuantity);
+      const after = item.convertedUnit === null ? null : item.convertedUnit * (1 - item.discount);
+      const freight = cvUnit(item, 'freightWithMargin');
+      title = `${kind === 's' ? 'Start table' : 'Customer'} · ${item.part}`;
+      if (kind === 'u') {
+        const unit = cvCustomerUnit(item);
+        value = { part: item.part, name: item.description, qty, price: n(unit), total: n(unit === null ? null : unit * item.maxQuantity * (1 + salesVatRate())) }[b];
+        lines.push({
+          part: 'The article number.', name: 'The article name.', qty: 'The quantity in stock.',
+          price: cvOutgoingOn() ? `The price from the start table plus what is switched on for the way out (${n(item.unitSalesPrice)} ${output} before).` : `The price to the customer from the start table: ${n(item.unitSalesPrice)} ${output}. Nothing is added for the way out.`,
+          total: `${n(unit)} ${output} × ${qty} pieces${salesVatRate() > 0 ? ` + VAT ${formatPercent(salesVatRate())}` : ''}`,
+        }[b]);
+      } else {
+        value = cvStartValue(item, b);
+        const sheet = item.pricingSource;
+        lines.push({
+          part: 'The article number. The same number in several lists is one row here.',
+          name: 'The article name.',
+          qty: `The largest quantity of this article in the lists in use${item.quantityOverridden ? ', or the stock quantity you set' : ''}.`,
+          price: `${n(item.unitPrice)} ${item.currency} × rate ${n(item.fx)} = ${n(item.convertedUnit)} ${output}. The price is the one in ${sheet}, row ${item.pricingRow}: the list with the largest quantity of this article.`,
+          after: `${n(item.convertedUnit)} ${output} × (1 − discount ${formatPercent(item.discount)}) = ${n(after)} ${output}`,
+          freight: `Incoming freight and import costs per item, with the freight margin: ${n(freight)} ${output}. ${item.freightPercent ? `The freight is assumed to be ${formatPercent(item.freightPercent)} of the discounted price.` : ''}`,
+          cust: `${n(after)} ${output} × multiplier ${n(item.multiplier)} + freight ${n(freight)} ${output} = ${n(item.unitSalesPrice)} ${output}`,
+          total: `${n(item.unitSalesPrice)} ${output} × ${qty} pieces = ${n(item.lineTotal)} ${output}`,
+        }[b]);
+      }
     } else if (kind === 'fx') {
       title = `Exchange rate ${a} → ${output} · ${b}`;
-      const line = model.groups.flatMap((group) => group.tables).flatMap((table) => table.lines).find((entry) => entry.currency === a);
-      value = line ? formatNumber(line.fx, 4) : '—';
-      lines.push(line ? `Today's rate ${formatNumber(line.fxLive, 4)} + currency add-on ${formatNumber(line.fxAddon, 2)}. The add-on is set in the exchange rates panel in the settings.` : '');
-    } else if (kind === 'disc') {
-      title = `Discount · ${a}`;
-      value = cvChipValue(selected);
-      lines.push('The discount of the manufacturer. It is set on the manufacturer card in the settings.');
-    } else if (kind === 'mult') {
-      title = `Price multiplier · ${a}`;
-      value = cvChipValue(selected);
-      lines.push('The sales price is the price after discount times this number. Single articles and sales groups can have their own.');
+      value = cvElements.get(selected)?.querySelector('strong')?.textContent || '';
+      lines.push(`Today's rate plus the currency add-on. The add-on is set in the exchange rates panel in the settings.`);
     } else {
-      title = a === 'warehouse' ? 'Warehouse' : 'Consolidated list';
-      value = cvChipValue(selected);
-      lines.push(a === 'warehouse' ? 'The quantities decide how many pieces are stored and how many locations that takes.' : 'The consolidated list adds the lists in use together: common articles once, with the largest quantity.');
+      const names = { disc: ['Discount', 'The manufacturer\'s discount: the starting price times (1 − discount). Change it here.'], frt: ['Incoming freight', 'What it costs to bring the goods to the warehouse. Change the rule here.'], mult: ['Multiplier', 'The sales price is the price after discount times this number. Single articles and sales groups can have their own.'], wh: ['Warehouse', 'The quantities decide how many items are stored and how many locations that takes.'], out: ['Going out to the customer', 'Costs on the way to the customer. They are normally not calculated: the customer pays the price from the multiplier.'] };
+      const [label, text] = names[kind] || ['', ''];
+      title = a ? `${label} · ${a}` : label;
+      value = kind === 'mult' ? `× ${n(state.config.multiplier)}` : '';
+      lines.push(text);
     }
     const counts = [];
     if (trace.ins.length) counts.push(`Made from ${trace.ins.length} ${trace.ins.length === 1 ? 'value' : 'values'} (blue)`);
@@ -2151,31 +2454,70 @@
     if (trace.same.length) counts.push(`The same article is in ${trace.same.length} other ${trace.same.length === 1 ? 'list' : 'lists'} (grey)`);
     if (trace.hidden) counts.push(`${trace.hidden} more wires are not drawn`);
     panel.replaceChildren();
-    const heading = document.createElement('strong');
-    heading.textContent = title;
-    heading.setAttribute('translate', 'no');
-    const number = document.createElement('p');
-    number.className = 'cv-inspector-value';
-    number.textContent = value;
-    const explanation = document.createElement('p');
-    explanation.textContent = lines.join(' ');
-    const list = document.createElement('ul');
-    counts.forEach((text) => { const item = document.createElement('li'); item.textContent = text; list.append(item); });
-    const close = document.createElement('button');
+    const heading = cvNode('strong', '', title);
+    const close = cvNode('button', 'cv-inspector-close', '×');
     close.type = 'button';
-    close.className = 'cv-inspector-close';
     close.setAttribute('aria-label', 'Stop following this value');
-    close.textContent = '×';
     close.dataset.cvClear = 'true';
-    panel.append(close, heading, number, explanation, list);
+    const list = cvNode('ul');
+    counts.forEach((text) => list.append(cvNode('li', '', text)));
+    panel.append(close, heading, ...(value ? [cvNode('p', 'cv-inspector-value', value)] : []), cvNode('p', '', lines.filter(Boolean).join(' ')), list);
     panel.classList.remove('hidden');
   }
 
-  function cvChipValue(id) {
-    return cvElements.get(id)?.querySelector('strong')?.textContent || '';
+  // ---------- changing things on the surface ----------
+
+  function cvSetMakerField(maker, field, value) {
+    pushHistory(`${maker}: ${field}`, () => {
+      makerKits(maker).forEach((sheet) => { kitSettings(sheet)[field] = value; });
+      saveSettingsSoon();
+      rebuildConsolidation();
+      if (field === 'shippingCurrency' || field === 'defaultCurrency') refreshRates(false);
+    });
   }
 
-  /* -- Editing a value in a table -- */
+  function cvApplySetting(input) {
+    const [setting, name] = input.dataset.cvSet.split(CV_SEP);
+    const number = input.type === 'checkbox' ? null : readNumberInput(input);
+    if (input.type !== 'checkbox' && number === undefined) return;
+    const warehouse = state.warehouse;
+    const refresh = () => { saveSettingsSoon(); refreshViews(); };
+    if (setting === 'disc') cvSetMakerField(name, 'discountRate', clamp((number ?? 0) / 100, 0, 1));
+    else if (setting === 'frt') cvSetMakerField(name, 'shippingAmount', Math.max(0, number ?? 0));
+    else if (setting === 'frtmode') cvSetMakerField(name, 'shippingMode', KIT_SHIPPING_MODES[input.value] ? input.value : 'sheet');
+    else if (setting === 'margin') pushHistory('Freight margin', () => { state.config.shippingMargin = clamp((number ?? 0) / 100, 0, 0.99); saveSettingsSoon(); rebuildConsolidation(); });
+    else if (setting === 'mult') pushHistory('Multiplier', () => { state.config.multiplier = Math.max(0, number ?? 0); saveSettingsSoon(); rebuildConsolidation(); });
+    else if (setting === 'soldPerMonth') {
+      // The expected sales are "times the stock per year": a monthly figure for all items becomes that number.
+      const stock = state.consolidated.reduce((total, item) => total + (item.maxQuantity ?? 0), 0);
+      if (stock > 0) pushHistory('Items sold per month', () => { state.sales.defaultMode = 'turns'; state.sales.defaultValue = Math.round(((Math.max(0, number ?? 0) * 12) / stock) * 10000) / 10000; saveSettingsSoon(); rebuildConsolidation(); });
+    } else if (setting === 'wh') {
+      const field = name;
+      if (input.type === 'checkbox') warehouse[field] = input.checked;
+      else {
+        const limits = { binsPerShelf: [1, 12, true], shelvesPerRack: [1, 8, true], unitsPerBin: [1, Infinity, true], unitsPerDrawer: [1, Infinity, true], unitsPerPallet: [1, Infinity, true], plannedPallets: [0, Infinity, true], orderLines: [0, Infinity, true], orders: [0, Infinity, false], receipts: [0, Infinity, false] }[field] || [0, Infinity, false];
+        warehouse[field] = clamp(limits[2] ? Math.round(number) : number, limits[0], limits[1]);
+      }
+      if (ACTIVITY_KEYS.includes(field)) warehouse.activityPreset = 'custom';
+      warehouse.unitsPerShelf = shelfUnitCapacity(warehouse);
+      refresh();
+    } else if (setting === 'rate') {
+      warehouse.rates[name] = Math.max(0, number ?? 0);
+      refresh();
+    } else if (setting === 'out') {
+      const [row, field] = [name, input.dataset.cvSet.split(CV_SEP)[2]];
+      if (input.type === 'checkbox') state.outgoing[row].on = input.checked;
+      else state.outgoing[row][field] = field === 'rate' ? clamp((number ?? 0) / 100, 0, 1) : Math.max(0, number ?? 0);
+      refresh();
+    } else if (setting === 'vat') {
+      pushHistory('VAT', () => {
+        if (name === 'on') state.config.vatRate = input.checked ? (state.config.vatRate > 0 ? state.config.vatRate : 0.25) : 0;
+        else state.config.vatRate = clamp((number ?? 0) / 100, 0, 1);
+        saveSettingsSoon();
+        rebuildConsolidation();
+      });
+    }
+  }
 
   // Editing starts from what is typed in the list (a number with all its decimals, or a formula), not from the rounded text.
   function cvStartEdit(cell) {
@@ -2190,19 +2532,17 @@
     const [sheet, rowText, column] = cell.dataset.edit.split(CV_SEP);
     if (cell.textContent.trim() === (cell.dataset.shown ?? '')) {
       const line = state.cvModel.lineAt(sheet, rowText);
-      if (line) cell.textContent = cvCellText(line, column);
+      if (line) cell.textContent = { part: line.part, name: line.name, alt: line.alt, qty: formatQuantity(line.qty), currency: line.currency, price: fmtNum(line.price) }[column];
       return;
     }
     const row = Number(rowText);
     const mapping = state.mappings[sheet];
     const col = mapping?.[CV_EDITABLE[column]];
     if (col === null || col === undefined) return;
-    const text = cell.textContent.trim();
-    const raw = parseUserInput(text);
+    const raw = parseUserInput(cell.textContent.trim());
     const previous = captureBlock(sheet, row, col, [[undefined]]);
-    const before = previous[0][0];
     const comparable = (value) => (value === null || value === undefined ? '' : String(value));
-    if (comparable(before) === comparable(raw)) return;
+    if (comparable(previous[0][0]) === comparable(raw)) return;
     const address = XLSX.utils.encode_cell({ r: row, c: col });
     pushHistory(`Cell ${sheet}!${address} updated`, () => {
       setEngineBlock(sheet, row, col, [[raw]]);
@@ -2211,77 +2551,83 @@
     showToast(`Updated ${sheet}!${address}. Ctrl+Z reverts it.`);
   }
 
-  /* -- Moving, panning and zooming -- */
+  // ---------- moving, panning and zooming ----------
 
   function bindCanvas() {
     const stage = dom.cvStage;
     let gesture = null;
+    const interactive = 'input, select, textarea, button, a, label, [contenteditable="plaintext-only"], [contenteditable="true"]';
     stage.addEventListener('wheel', (event) => {
+      // Over a long table the wheel scrolls the table; with Ctrl (or a pinch) it always zooms.
+      const scroller = event.target.closest?.('.cv-scroll');
+      if (scroller && !event.ctrlKey && scroller.scrollHeight > scroller.clientHeight + 2) return;
       event.preventDefault();
       cvZoomAt(Math.exp(-event.deltaY * (event.ctrlKey ? 0.01 : 0.0015)), event.clientX, event.clientY);
       cvDraw();
     }, { passive: false });
     stage.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0 || event.target.closest('[contenteditable="plaintext-only"], [contenteditable="true"]')) return;
-      const tableHead = event.target.closest('[data-drag-table]');
-      const frameHead = event.target.closest('[data-drag-group]');
-      const onCell = event.target.closest('[data-node]') && !tableHead;
-      if (onCell) return;
+      if (event.button !== 0 || event.target.closest(interactive)) return;
       const start = { x: event.clientX, y: event.clientY };
-      if (tableHead) {
-        const sheet = tableHead.dataset.dragTable;
-        gesture = { type: 'table', sheet, start, moved: false, origin: { ...(state.canvas.positions[sheet] || { x: 0, y: 0 }) } };
+      const card = event.target.closest('.cv-card');
+      const frameHead = event.target.closest('[data-drag-group]');
+      if (card) {
+        const id = card.dataset.card;
+        gesture = { type: 'card', id, start, moved: false, onHead: Boolean(event.target.closest('.cv-head')), origin: { ...(state.canvas.positions[id] || { x: 0, y: 0 }) }, pointer: event.pointerId };
       } else if (frameHead) {
         const group = state.cvModel.groups.find((entry) => entry.key === frameHead.dataset.dragGroup);
-        gesture = { type: 'group', group, start, moved: false, origins: group.tables.map((table) => ({ sheet: table.sheet, ...(state.canvas.positions[table.sheet] || { x: 0, y: 0 }) })) };
+        gesture = { type: 'group', group, start, moved: false, origins: group.tables.map((table) => ({ sheet: table.sheet, ...(state.canvas.positions[table.sheet] || { x: 0, y: 0 }) })), pointer: event.pointerId };
+      } else if (event.target.closest('.cv-chip, .cv-inspector')) {
+        return;
       } else {
-        gesture = { type: 'pan', start, moved: false, origin: { ...state.canvas.view } };
-        stage.classList.add('cv-panning');
+        gesture = { type: 'pan', start, moved: false, origin: { ...state.canvas.view }, pointer: event.pointerId };
       }
-      stage.setPointerCapture(event.pointerId);
     });
     stage.addEventListener('pointermove', (event) => {
       if (!gesture) return;
       const dx = event.clientX - gesture.start.x;
       const dy = event.clientY - gesture.start.y;
-      if (!gesture.moved && Math.hypot(dx, dy) < 4) return;
-      gesture.moved = true;
+      if (!gesture.moved) {
+        if (Math.hypot(dx, dy) < 5) return;
+        gesture.moved = true;
+        try { stage.setPointerCapture(gesture.pointer); } catch { /* The pointer is already gone. */ }
+        stage.classList.add(gesture.type === 'pan' ? 'cv-panning' : 'cv-moving');
+      }
       const scale = state.canvas.view.scale;
       if (gesture.type === 'pan') {
         state.canvas.view = { ...gesture.origin, x: gesture.origin.x + dx, y: gesture.origin.y + dy };
         cvApplyView();
-      } else if (gesture.type === 'table') {
-        state.canvas.positions[gesture.sheet] = { x: gesture.origin.x + dx / scale, y: gesture.origin.y + dy / scale };
-        const box = dom.cvWorld.querySelector(`.cv-table[data-sheet="${CSS.escape(gesture.sheet)}"]`);
-        box.style.left = `${state.canvas.positions[gesture.sheet].x}px`;
-        box.style.top = `${state.canvas.positions[gesture.sheet].y}px`;
-        cvFrames();
-        cvDraw();
-      } else {
-        gesture.origins.forEach((origin) => {
-          state.canvas.positions[origin.sheet] = { x: origin.x + dx / scale, y: origin.y + dy / scale };
-          const box = dom.cvWorld.querySelector(`.cv-table[data-sheet="${CSS.escape(origin.sheet)}"]`);
-          box.style.left = `${state.canvas.positions[origin.sheet].x}px`;
-          box.style.top = `${state.canvas.positions[origin.sheet].y}px`;
-        });
-        cvFrames();
-        cvDraw();
+        return;
       }
+      const place = (id, origin) => {
+        state.canvas.positions[id] = { x: origin.x + dx / scale, y: origin.y + dy / scale };
+        const box = dom.cvWorld.querySelector(`.cv-card[data-card="${CSS.escape(id)}"]`);
+        if (box) {
+          box.style.left = `${state.canvas.positions[id].x}px`;
+          box.style.top = `${state.canvas.positions[id].y}px`;
+        }
+      };
+      if (gesture.type === 'card') place(gesture.id, gesture.origin);
+      else gesture.origins.forEach((origin) => place(origin.sheet, origin));
+      cvFrames();
+      cvDraw();
     });
     const finish = (event) => {
       if (!gesture) return;
       const done = gesture;
       gesture = null;
-      stage.classList.remove('cv-panning');
+      stage.classList.remove('cv-panning', 'cv-moving');
       try { stage.releasePointerCapture(event.pointerId); } catch { /* The pointer was already released. */ }
       if (done.moved) {
         if (done.type !== 'pan') saveSettingsSoon();
         return;
       }
-      if (done.type === 'table' && !done.sheet.startsWith(CV_SEP)) {
+      // A click on a title opens or closes a table that can show more columns.
+      const openable = done.type === 'card' && done.onHead && (state.cvModel.tables.has(done.id) || done.id === 'start');
+      if (openable) {
+        const key = done.id === 'start' ? `${CV_SEP}start` : done.id;
         const open = state.canvas.expanded;
-        if (open.includes(done.sheet)) open.splice(open.indexOf(done.sheet), 1);
-        else open.push(done.sheet);
+        if (open.includes(key)) open.splice(open.indexOf(key), 1);
+        else open.push(key);
         saveSettingsSoon();
         renderCanvas();
       } else if (done.type === 'pan') {
@@ -2291,13 +2637,21 @@
     stage.addEventListener('pointerup', finish);
     stage.addEventListener('pointercancel', finish);
     stage.addEventListener('click', (event) => {
-      if (event.target.closest('[data-cv-clear]')) {
-        cvSelect(null);
+      if (event.target.closest('[data-cv-clear]')) { cvSelect(null); return; }
+      const action = event.target.closest('[data-cv-action]');
+      if (action) {
+        if (action.dataset.cvAction === 'shelves') { state.canvas.shelves = !state.canvas.shelves; saveSettingsSoon(); renderCanvas(); }
+        else showView(VIEW.warehouse);
         return;
       }
+      if (event.target.closest('input, select, textarea, label')) return;
       const node = event.target.closest('[data-node]');
-      if (!node || node.dataset.node.startsWith(`table${CV_SEP}`)) return;
+      if (!node || node.dataset.node.startsWith(`table${CV_SEP}`) || node.closest('.cv-head')) return;
       cvSelect(node.dataset.node);
+    });
+    stage.addEventListener('change', (event) => {
+      const input = event.target.closest?.('[data-cv-set]');
+      if (input) cvApplySetting(input);
     });
     stage.addEventListener('focusin', (event) => {
       const cell = event.target.closest?.('[data-edit]');
@@ -2309,17 +2663,13 @@
     });
     stage.addEventListener('keydown', (event) => {
       const cell = event.target.closest?.('[data-edit]');
-      if (cell && event.key === 'Enter') {
-        event.preventDefault();
-        cell.blur();
-      } else if (cell && event.key === 'Escape') {
-        event.preventDefault();
-        renderCanvas();
-      }
+      if (cell && event.key === 'Enter') { event.preventDefault(); cell.blur(); }
+      else if (cell && event.key === 'Escape') { event.preventDefault(); renderCanvas(); }
+      else if (event.key === 'Enter' && event.target.matches?.('[data-cv-set]')) event.target.blur();
     });
     dom.cvInspector.addEventListener('click', (event) => { if (event.target.closest('[data-cv-clear]')) cvSelect(null); });
     document.addEventListener('keydown', (event) => {
-      if (state.activeView !== VIEW.canvas || event.target.closest?.('input, textarea, [contenteditable], dialog')) return;
+      if (state.activeView !== VIEW.canvas || event.target.closest?.('input, select, textarea, [contenteditable], dialog')) return;
       if (event.key === 'Escape') {
         if (state.canvas.selected) cvSelect(null);
         else showView(VIEW.consolidated);
@@ -2340,7 +2690,7 @@
       renderCanvas();
       showToast(state.canvas.edit ? 'Edit mode: click a value in a table and type. Enter saves it, Esc cancels. Ctrl+Z reverts.' : 'Edit mode is off.');
     });
-    dom.cvOpenAll.addEventListener('click', () => { state.canvas.expanded = state.cvModel.groups.flatMap((group) => group.tables.map((table) => table.sheet)); saveSettingsSoon(); renderCanvas(); });
+    dom.cvOpenAll.addEventListener('click', () => { state.canvas.expanded = [...state.cvModel.groups.flatMap((group) => group.tables.map((table) => table.sheet)), `${CV_SEP}start`]; saveSettingsSoon(); renderCanvas(); });
     dom.cvCompactAll.addEventListener('click', () => { state.canvas.expanded = []; saveSettingsSoon(); renderCanvas(); });
     dom.cvReset.addEventListener('click', () => { state.canvas.positions = {}; state.canvas.fitted = false; saveSettingsSoon(); renderCanvas(); });
     dom.cvFullscreen.addEventListener('click', () => {
@@ -4473,7 +4823,8 @@
       version: 3,
       language: state.language,
       partsMode: state.partsMode,
-      canvas: { positions: state.canvas.positions, expanded: state.canvas.expanded, view: state.canvas.view, selected: state.canvas.selected, fitted: state.canvas.fitted },
+      canvas: { positions: state.canvas.positions, expanded: state.canvas.expanded, view: state.canvas.view, selected: state.canvas.selected, fitted: state.canvas.fitted, shelves: state.canvas.shelves },
+      outgoing: state.outgoing,
       fxAddons: { ...state.fxAddons },
       config: {
         discount: state.config.discount,
@@ -4565,6 +4916,7 @@
     });
     state.partsMode = settings.partsMode === 'minimal' ? 'minimal' : 'full';
     state.canvas = restoreCanvas(settings.canvas);
+    state.outgoing = restoreOutgoing(settings.outgoing);
     // The currency add-on is global. Older projects kept a rate buffer per kit: take the largest one used for each currency.
     state.fxAddons = { ...FX_ADDON_DEFAULTS };
     if (settings.fxAddons && typeof settings.fxAddons === 'object') {
@@ -6074,6 +6426,7 @@
       // A new project starts without sales history; a saved project brings its own back with its settings.
       state.history = defaultHistory();
       state.canvas = defaultCanvas();
+      state.outgoing = defaultOutgoing();
       state.fxAddons = { ...FX_ADDON_DEFAULTS };
       state.partsMode = 'full';
       state.minimalView = { rig: null, onlyDifferences: true, search: '' };
