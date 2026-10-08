@@ -916,6 +916,54 @@
 
   <div id="chart-tooltip" class="chart-tooltip" role="tooltip" hidden></div>
   <div id="customs-popover" class="customs-popover" role="dialog" aria-label="Customs and VAT rules" hidden></div>
+  <section id="canvas-view" class="canvas-view hidden" aria-label="Canvas with all parts tables">
+    <div class="cv-toolbar" role="toolbar" aria-label="Canvas tools">
+      <button id="cv-back" class="button small" type="button">Back to the app</button>
+      <strong class="cv-title">Canvas</strong>
+      <div class="cv-zoom" role="group" aria-label="Zoom">
+        <button id="cv-zoom-out" class="button small" type="button" aria-label="Zoom out">−</button>
+        <span id="cv-zoom-readout" class="cv-readout">60%</span>
+        <button id="cv-zoom-in" class="button small" type="button" aria-label="Zoom in">+</button>
+        <button id="cv-fit" class="button small" type="button" title="Show all tables (0)">Fit all</button>
+      </div>
+      <button id="cv-edit" class="button small" type="button" aria-pressed="false" title="Type new values straight into the tables">Edit values</button>
+      <button id="cv-open-all" class="button small" type="button">Open all tables</button>
+      <button id="cv-compact-all" class="button small" type="button">Compact all tables</button>
+      <button id="cv-reset" class="button small ghost" type="button">Reset the layout</button>
+      <span class="cv-spacer"></span>
+      <span class="cv-legend"><i class="cv-key cv-key-in"></i>Flows in: made this value <i class="cv-key cv-key-out"></i>Flows out: uses this value</span>
+      <button id="cv-save" class="button small primary" type="button">Save workspace</button>
+      <button id="cv-open" class="button small" type="button">Open workspace</button>
+      <button id="cv-fullscreen" class="button small" type="button">Full screen</button>
+    </div>
+    <div id="cv-stage" class="cv-stage" tabindex="0" aria-label="Surface with all parts tables. Drag to move around, scroll to zoom.">
+      <div id="cv-world" class="cv-world">
+        <svg id="cv-wires" class="cv-wires" width="1" height="1" aria-hidden="true">
+          <defs>
+            <marker id="cv-arrow-in" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1f6fd4"/></marker>
+            <marker id="cv-arrow-out" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#e0620a"/></marker>
+          </defs>
+        </svg>
+      </div>
+    </div>
+    <aside id="cv-inspector" class="cv-inspector hidden" aria-live="polite"></aside>
+    <p class="cv-hint">Drag the background to move around · scroll to zoom · drag a title to move a table · click a title to open it · click a value to follow it</p>
+  </section>
+
+  <dialog id="workspace-dialog" class="maker-setup" aria-labelledby="workspace-title">
+    <form id="workspace-form" method="dialog">
+      <h3 id="workspace-title">Save the workspace</h3>
+      <p id="workspace-copy" class="maker-setup-copy"></p>
+      <label class="workspace-field">Password <input id="workspace-password" type="password" autocomplete="off"></label>
+      <label id="workspace-confirm-label" class="workspace-field">Repeat the password <input id="workspace-password2" type="password" autocomplete="off"></label>
+      <label id="workspace-file-label" class="workspace-field hidden">Workspace file <input id="workspace-file" type="file" accept=".partslist"></label>
+      <div class="maker-setup-actions">
+        <button id="workspace-cancel" class="button small" type="button">Cancel</button>
+        <button id="workspace-go" class="button small primary" type="submit">Save the file</button>
+      </div>
+    </form>
+  </dialog>
+
   <div id="toast" class="toast" role="status" aria-live="polite" title="Click to dismiss"></div>
   <script src="vault.js"></script>
   <script src="app.js"></script>

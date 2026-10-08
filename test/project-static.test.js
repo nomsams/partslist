@@ -299,6 +299,26 @@ test('currency add-ons are global per currency, discount and duty per manufactur
   assert.ok(app.includes('function computeActivity(') && app.includes('ACTIVITY_PRESETS'));
 });
 
+test('canvas: grouped compact tables, flowing wires in and out, editing, and one encrypted workspace file', () => {
+  assert.match(html, /id="canvas-view"/);
+  ['cv-stage', 'cv-world', 'cv-wires', 'cv-inspector', 'cv-edit', 'cv-fit', 'cv-save', 'cv-open', 'cv-fullscreen', 'workspace-dialog'].forEach((id) => assert.ok(html.includes(`id="${id}"`), id));
+  assert.ok(html.includes('id="cv-arrow-in"') && html.includes('id="cv-arrow-out"'));
+  ['buildCanvasModel', 'cvNeighbours', 'cvResolve', 'cvDraw', 'cvCommit', 'cvStartEdit', 'openWorkspaceDialog', 'runWorkspace', 'bindCanvas'].forEach((name) => assert.ok(app.includes(`function ${name}(`), name));
+  assert.match(app, /VIEW = Object\.freeze\(\{[^}]*canvas/);
+  // The compact table has the five columns asked for; the open table has the rest.
+  assert.ok(app.includes("const CV_COMPACT = Object.freeze(['part', 'name', 'qty', 'price', 'after'])"));
+  // The layout and the view are part of the saved settings, so a workspace file restores the canvas as it was left.
+  assert.ok(app.includes('canvas: { positions: state.canvas.positions'));
+  assert.ok(app.includes('state.canvas = restoreCanvas(settings.canvas)'));
+  // The workspace file is the encrypted secure project, never a readable file.
+  const workspace = app.slice(app.indexOf('async function runWorkspace('), app.indexOf('/* ---------- Sales history & popularity'));
+  assert.ok(workspace.includes('exportSecureProject()') && workspace.includes('importSecureProject(file)'));
+  // Flowing wires move, but not for people who ask for less motion.
+  const css = fs.readFileSync(path.join(root, 'styles.css'), 'utf8');
+  assert.match(css, /@keyframes cv-flow/);
+  assert.match(css, /prefers-reduced-motion: reduce/);
+});
+
 test('every manufacturer is its own route: own settings, exchange-rate buffer, percentage freight and an independent shipment', () => {
   assert.match(html, /id="makers-panel"/);
   assert.match(app, /function buildMakerCard\(/);

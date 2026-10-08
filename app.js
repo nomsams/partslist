@@ -128,7 +128,7 @@
   const MAX_GROUPS = GROUP_COLORS.length;
   const LEGACY_SETTINGS_STORAGE_PREFIX = 'partslist.settings.caesar14.v1:';
   const SETTINGS_SHEET_MARKER = 'partslist settings';
-  const VIEW = Object.freeze({ consolidated: ':consolidated', minimal: ':minimal', popularity: ':popularity', dashboard: ':dashboard', warehouse: ':warehouse', wire: ':wire' });
+  const VIEW = Object.freeze({ consolidated: ':consolidated', canvas: ':canvas', minimal: ':minimal', popularity: ':popularity', dashboard: ':dashboard', warehouse: ':warehouse', wire: ':wire' });
   const SPECIAL_VIEWS = new Set(Object.values(VIEW));
   // Starting points for the stock suggestion: half a year of sales, a 95 % chance of having a part, no budget.
   const STOCK_DEFAULTS = Object.freeze({ months: 6, service: 0.95, budget: null, complete: true });
@@ -314,6 +314,8 @@
     hiddenColumns: [...DEFAULT_HIDDEN_COLUMNS],
     columnPreset: 'simple',
     kitBarOpen: false,
+    canvas: defaultCanvas(),
+    cvModel: null,
     fxAddons: { ...FX_ADDON_DEFAULTS },
     // 'full' or 'minimal': which version of the rigs' parts lists is in use (see "Minimal parts lists").
     partsMode: 'full',
@@ -495,6 +497,34 @@
     consolidatedCount: el('consolidated-count'),
     consolidatedActions: el('consolidated-actions'),
     fxOutput: el('fx-output'),
+    canvasView: el('canvas-view'),
+    cvStage: el('cv-stage'),
+    cvWorld: el('cv-world'),
+    cvWires: el('cv-wires'),
+    cvInspector: el('cv-inspector'),
+    cvZoomReadout: el('cv-zoom-readout'),
+    cvBack: el('cv-back'),
+    cvZoomIn: el('cv-zoom-in'),
+    cvZoomOut: el('cv-zoom-out'),
+    cvFit: el('cv-fit'),
+    cvEdit: el('cv-edit'),
+    cvOpenAll: el('cv-open-all'),
+    cvCompactAll: el('cv-compact-all'),
+    cvReset: el('cv-reset'),
+    cvSave: el('cv-save'),
+    cvOpen: el('cv-open'),
+    cvFullscreen: el('cv-fullscreen'),
+    workspaceDialog: el('workspace-dialog'),
+    workspaceForm: el('workspace-form'),
+    workspaceTitle: el('workspace-title'),
+    workspaceCopy: el('workspace-copy'),
+    workspaceGo: el('workspace-go'),
+    workspaceCancel: el('workspace-cancel'),
+    workspacePassword: el('workspace-password'),
+    workspacePassword2: el('workspace-password2'),
+    workspaceFile: el('workspace-file'),
+    workspaceConfirmLabel: el('workspace-confirm-label'),
+    workspaceFileLabel: el('workspace-file-label'),
     activityPreset: el('activity-preset'),
     activityMaker: el('activity-maker'),
     activityPresetNote: el('activity-preset-note'),
@@ -655,6 +685,7 @@
     bindPopularity();
     bindMinimal();
     bindFxPanel();
+    bindCanvas();
     bindActivityPresets();
     dom.commonMode.addEventListener('click', toggleCommonMode);
     bindToast();
@@ -1544,6 +1575,823 @@
         rebuildConsolidation();
       });
     });
+  }
+
+  /* ---------- Canvas: every parts table on one pannable, zoomable surface, with the values followed by wires ---------- */
+
+  // The tables of all lists sit on one large surface in groups (one group per manufacturer, the minimal lists in a group of
+  // their own). A compact table shows article, name, quantity, original price and the price after discount; a click on its title
+  // opens it. A click on a value follows it: wires flow IN from what made the value and OUT to what uses it.
+  const CV_SEP = '§';
+  const CV_COMPACT = Object.freeze(['part', 'name', 'qty', 'price', 'after']);
+  const CV_EXPANDED = Object.freeze(['part', 'name', 'alt', 'qty', 'currency', 'price', 'conv', 'after', 'afterTotal', 'salesUnit', 'salesTotal']);
+  const CV_EDITABLE = Object.freeze({ part: 'part', name: 'description', alt: 'altPart', qty: 'quantity', price: 'price' });
+  const CV_MAX_WIRES = 70;
+
+  function defaultCanvas() {
+    return { positions: {}, expanded: [], view: { x: 40, y: 40, scale: 0.6 }, selected: null, edit: false, fitted: false };
+  }
+
+  function restoreCanvas(saved) {
+    const canvas = defaultCanvas();
+    if (!saved || typeof saved !== 'object') return canvas;
+    Object.entries(saved.positions || {}).slice(0, 200).forEach(([name, position]) => {
+      if (position && Number.isFinite(position.x) && Number.isFinite(position.y)) canvas.positions[String(name).slice(0, 80)] = { x: position.x, y: position.y };
+    });
+    canvas.expanded = (Array.isArray(saved.expanded) ? saved.expanded : []).filter((name) => typeof name === 'string').slice(0, 200);
+    const view = saved.view || {};
+    if (Number.isFinite(view.x) && Number.isFinite(view.y) && Number.isFinite(view.scale)) canvas.view = { x: view.x, y: view.y, scale: clamp(view.scale, 0.08, 3) };
+    canvas.fitted = saved.fitted === true;
+    canvas.selected = typeof saved.selected === 'string' ? saved.selected.slice(0, 200) : null;
+    return canvas;
+  }
+
+  const cvId = (kind, ...parts) => [kind, ...parts].join(CV_SEP);
+
+  function cvLabel(column) {
+    const output = state.config.outputCurrency;
+    return {
+      part: 'Article', name: 'Article name', alt: 'Alt. part no.', qty: 'Quantity', currency: 'Currency', price: 'Original price',
+      conv: `Price in ${output}`, after: 'After discount', afterTotal: 'Total after discount', salesUnit: 'Sales price / unit', salesTotal: 'Sales total',
+    }[column];
+  }
+
+  // The lines of every kit sheet with the numbers the canvas shows, calculated the same way as the consolidated list.
+  function buildCanvasModel() {
+    const output = state.config.outputCurrency;
+    const sheets = state.workbook.SheetNames.filter((name) => isSourceKit(name));
+    const groups = new Map();
+    const tables = new Map();
+    const byKey = new Map();
+    sheets.forEach((sheetName) => {
+      const mapping = state.mappings[sheetName];
+      const kit = kitSettings(sheetName);
+      const matrix = state.matrices[sheetName];
+      const priceHeader = matrix.slice(mapping.headerRow, mapping.dataStartRow).map((row) => displayValue(row?.[mapping.price])).filter(Boolean).join(' ');
+      const groupKey = `${kit.manufacturer || sheetName}${kit.minimalOf ? ' · minimal' : ''}`;
+      const discount = kitDiscount(kit);
+      const lines = [];
+      for (let row = mapping.dataStartRow; row < matrix.length; row += 1) {
+        const partValue = readCalculatedValue(sheetName, row, mapping.part);
+        const part = partValue === null || partValue === undefined ? '' : String(partValue).trim();
+        if (!part || /^(?:total(?:s)?|effective\b|confidential\b)/i.test(part)) continue;
+        const qty = toNumber(readCalculatedValue(sheetName, row, mapping.quantity));
+        if (qty === null) continue;
+        const key = normalizePart(part);
+        const price = mapping.price === null ? null : toNumber(readCalculatedValue(sheetName, row, mapping.price));
+        const currencyValue = mapping.currency === null ? null : readCalculatedValue(sheetName, row, mapping.currency);
+        const currency = normalizeCurrency(currencyValue) || kit.defaultCurrency || currencyFromText(priceHeader) || state.config.sourceCurrency;
+        const fx = effectiveFx(currency, fxAddonFor(currency));
+        const conv = price !== null && fx !== null ? price * fx : null;
+        const after = conv === null ? null : conv * (1 - discount);
+        const multiplier = effectiveMultiplier(key);
+        const salesUnit = after === null ? null : after * multiplier;
+        const line = {
+          sheet: sheetName, row, key, group: groupKey, currency, foreign: currency !== output, fx, fxLive: fxToOutput(currency), fxAddon: fxAddonFor(currency), discount, multiplier,
+          part,
+          name: mapping.description === null ? '' : displayValue(readCalculatedValue(sheetName, row, mapping.description)),
+          alt: mapping.altPart === null ? '' : cleanAltPart(displayValue(readCalculatedValue(sheetName, row, mapping.altPart))),
+          qty, price, conv, after,
+          afterTotal: after === null ? null : after * qty,
+          salesUnit,
+          salesTotal: salesUnit === null ? null : salesUnit * qty,
+        };
+        lines.push(line);
+        if (!byKey.has(key)) byKey.set(key, []);
+        byKey.get(key).push(line);
+      }
+      const table = { sheet: sheetName, group: groupKey, minimal: Boolean(kit.minimalOf), active: isActiveSheet(sheetName), mapping, lines, currencies: [...new Set(lines.filter((l) => l.foreign).map((l) => l.currency))] };
+      tables.set(sheetName, table);
+      if (!groups.has(groupKey)) groups.set(groupKey, { key: groupKey, minimal: table.minimal, maker: kit.manufacturer || sheetName, tables: [] });
+      groups.get(groupKey).tables.push(table);
+    });
+    // Each manufacturer's full lists first, then its minimal lists.
+    const ordered = [];
+    const makers = [...new Set([...groups.values()].map((group) => group.maker))];
+    makers.forEach((maker) => {
+      const full = groups.get(maker);
+      const minimal = groups.get(`${maker} · minimal`);
+      if (full) ordered.push(full);
+      if (minimal) ordered.push(minimal);
+    });
+    const lineAt = (sheet, row) => tables.get(sheet)?.lines.find((line) => line.row === Number(row)) || null;
+    return { groups: ordered, tables, byKey, lineAt };
+  }
+
+  // Which values a value is made from (in) and which values use it (out). Nodes that are not on screen (a closed table has
+  // fewer columns) are passed through, so the wires always join things that can be seen.
+  function cvNeighbours(model, id, direction) {
+    const [kind, a, b, c] = id.split(CV_SEP);
+    if (kind === 'cons') {
+      if (direction === 'in') return (model.byKey.get(a) || []).filter((line) => model.tables.get(line.sheet).active).map((line) => cvId('c', line.sheet, line.row, 'qty'));
+      return [cvId('sink', 'warehouse'), cvId('sink', 'consolidated')];
+    }
+    if (kind !== 'c') return [];
+    const line = model.lineAt(a, b);
+    if (!line) return [];
+    const cell = (column) => cvId('c', a, b, column);
+    const fx = line.foreign ? [cvId('fx', line.currency, line.group)] : [];
+    const disc = cvId('disc', line.group);
+    const mult = cvId('mult', line.group);
+    const active = model.tables.get(a).active;
+    const rules = {
+      part: { in: [], out: [] },
+      name: { in: [], out: [] },
+      alt: { in: [], out: [] },
+      currency: { in: [], out: [cell('conv')] },
+      qty: { in: [], out: [cell('afterTotal'), cell('salesTotal'), ...(active ? [cvId('cons', line.key)] : [])] },
+      price: { in: [], out: [cell('conv')] },
+      conv: { in: [cell('price'), cell('currency'), ...fx], out: [cell('after')] },
+      after: { in: [cell('conv'), disc], out: [cell('afterTotal'), cell('salesUnit')] },
+      afterTotal: { in: [cell('after'), cell('qty')], out: active ? [cvId('sink', 'consolidated')] : [] },
+      salesUnit: { in: [cell('after'), mult], out: [cell('salesTotal')] },
+      salesTotal: { in: [cell('salesUnit'), cell('qty')], out: active ? [cvId('sink', 'consolidated')] : [] },
+    };
+    return (rules[c] || { in: [], out: [] })[direction];
+  }
+
+  function cvVisible(id) {
+    const [kind] = id.split(CV_SEP);
+    if (kind === 'cons') return false;
+    return Boolean(cvElements.get(id));
+  }
+
+  // The visible values reached from a value, going through the ones that are hidden, but not beyond a visible one.
+  function cvResolve(model, id, direction) {
+    const found = new Set();
+    const seen = new Set([id]);
+    const stack = [...cvNeighbours(model, id, direction)];
+    while (stack.length) {
+      const next = stack.pop();
+      if (seen.has(next)) continue;
+      seen.add(next);
+      if (cvVisible(next)) found.add(next);
+      else stack.push(...cvNeighbours(model, next, direction));
+    }
+    return [...found];
+  }
+
+  const cvElements = new Map();
+
+  function cvColumns(table) {
+    return state.canvas.expanded.includes(table.sheet) ? CV_EXPANDED : CV_COMPACT;
+  }
+
+  function cvCellText(line, column) {
+    const number = (value) => (value === null || value === undefined ? '—' : formatNumber(value, 2));
+    switch (column) {
+      case 'part': return line.part;
+      case 'name': return line.name;
+      case 'alt': return line.alt;
+      case 'qty': return formatQuantity(line.qty);
+      case 'currency': return line.currency;
+      case 'price': return number(line.price);
+      case 'conv': return number(line.conv);
+      case 'after': return number(line.after);
+      case 'afterTotal': return number(line.afterTotal);
+      case 'salesUnit': return number(line.salesUnit);
+      default: return number(line.salesTotal);
+    }
+  }
+
+  function renderCanvas() {
+    if (!state.workbook) return;
+    const model = buildCanvasModel();
+    state.cvModel = model;
+    cvElements.clear();
+    const world = dom.cvWorld;
+    [...world.children].forEach((child) => { if (child !== dom.cvWires) child.remove(); });
+    const output = state.config.outputCurrency;
+
+    const frames = new Map();
+    model.groups.forEach((group) => {
+      const frame = document.createElement('section');
+      frame.className = `cv-frame${group.minimal ? ' cv-minimal' : ''}`;
+      frame.dataset.group = group.key;
+      const head = document.createElement('header');
+      head.className = 'cv-frame-head';
+      head.dataset.dragGroup = group.key;
+      const title = document.createElement('strong');
+      title.textContent = group.key;
+      title.setAttribute('translate', 'no');
+      const inUse = group.tables.some((table) => table.active);
+      const badge = document.createElement('small');
+      badge.className = 'cv-badge';
+      badge.textContent = inUse ? `${group.tables.length} tables` : group.minimal ? 'Not in use: the full lists are used' : 'Not in use: the minimal lists are used';
+      head.append(title, badge);
+      const chips = document.createElement('div');
+      chips.className = 'cv-chips';
+      const sample = group.tables[0].lines[0];
+      const currencies = [...new Set(group.tables.flatMap((table) => table.currencies))];
+      currencies.forEach((currency) => {
+        const line = group.tables.flatMap((table) => table.lines).find((entry) => entry.currency === currency);
+        chips.append(cvChip(cvId('fx', currency, group.key), `${currency} → ${output}`, line.fxLive === null ? '—' : `${formatNumber(line.fxLive, 4)} + ${formatNumber(line.fxAddon, 2)} = ${formatNumber(line.fx, 4)}`, 'Today\'s rate plus the currency add-on'));
+      });
+      if (sample) {
+        chips.append(cvChip(cvId('disc', group.key), 'Discount', formatPercent(sample.discount), 'The manufacturer\'s discount'));
+        chips.append(cvChip(cvId('mult', group.key), 'Price multiplier', `× ${formatNumber(sample.multiplier, 2)}`, 'The sales price is the price after discount times this number'));
+      }
+      frame.append(head, chips);
+      frame.classList.toggle('cv-unused', !inUse);
+      world.append(frame);
+      frames.set(group.key, frame);
+    });
+
+    const tableElements = new Map();
+    model.groups.forEach((group) => group.tables.forEach((table) => {
+      const box = document.createElement('article');
+      const open = state.canvas.expanded.includes(table.sheet);
+      box.className = `cv-table${open ? ' cv-open' : ''}${table.active ? '' : ' cv-unused'}${table.minimal ? ' cv-minimal' : ''}`;
+      box.dataset.sheet = table.sheet;
+      const head = document.createElement('header');
+      head.className = 'cv-table-head';
+      head.dataset.dragTable = table.sheet;
+      head.dataset.node = cvId('table', table.sheet);
+      head.title = open ? 'Click to make the table compact. Drag to move it.' : 'Click to show more columns. Drag to move it.';
+      const title = document.createElement('strong');
+      title.textContent = table.sheet;
+      title.setAttribute('translate', 'no');
+      const count = document.createElement('small');
+      count.textContent = `${table.lines.length} lines`;
+      const toggle = document.createElement('span');
+      toggle.className = 'cv-toggle';
+      toggle.setAttribute('aria-hidden', 'true');
+      toggle.textContent = open ? '▾' : '▸';
+      head.append(toggle, title, count);
+      cvElements.set(cvId('table', table.sheet), head);
+      const grid = document.createElement('table');
+      const columns = cvColumns(table);
+      const header = grid.createTHead().insertRow();
+      columns.forEach((column) => {
+        const th = document.createElement('th');
+        th.scope = 'col';
+        th.textContent = cvLabel(column);
+        if (!['part', 'name', 'alt', 'currency'].includes(column)) th.className = 'number';
+        header.append(th);
+      });
+      const body = grid.createTBody();
+      table.lines.forEach((line) => {
+        const tr = body.insertRow();
+        if (line.qty === 0) tr.className = 'cv-zero';
+        columns.forEach((column) => {
+          const td = tr.insertCell();
+          const id = cvId('c', line.sheet, line.row, column);
+          td.dataset.node = id;
+          td.textContent = cvCellText(line, column);
+          if (!['part', 'name', 'alt', 'currency'].includes(column)) td.className = 'number';
+          if (column === 'after' || column === 'afterTotal' || column === 'salesTotal') td.classList.add('cv-calc');
+          if (state.canvas.edit && CV_EDITABLE[column] && table.mapping[CV_EDITABLE[column]] !== null) {
+            td.contentEditable = 'plaintext-only';
+            td.classList.add('cv-editable');
+            td.dataset.edit = `${line.sheet}${CV_SEP}${line.row}${CV_SEP}${column}`;
+            td.spellcheck = false;
+          }
+          cvElements.set(id, td);
+        });
+      });
+      box.append(head, grid);
+      world.append(box);
+      tableElements.set(table.sheet, box);
+    }));
+
+    // Results: where the values end up.
+    const results = document.createElement('article');
+    results.className = 'cv-table cv-results';
+    results.dataset.sheet = `${CV_SEP}results`;
+    const resultsHead = document.createElement('header');
+    resultsHead.className = 'cv-table-head';
+    resultsHead.dataset.dragTable = `${CV_SEP}results`;
+    const resultsTitle = document.createElement('strong');
+    resultsTitle.textContent = 'Results';
+    resultsHead.append(resultsTitle);
+    const totals = state.consolidated.reduce((sum, item) => ({ purchase: sum.purchase + (item.discountedTotal ?? 0), sales: sum.sales + (item.lineTotal ?? 0), units: sum.units + (item.maxQuantity ?? 0) }), { purchase: 0, sales: 0, units: 0 });
+    const warehouse = calculateWarehouseModel();
+    results.append(
+      resultsHead,
+      cvChip(cvId('sink', 'consolidated'), 'Consolidated list', `${formatNumber(totals.purchase, 0)} → ${formatNumber(totals.sales, 0)} ${output}`, 'Purchase value and sales value of the consolidated list'),
+      cvChip(cvId('sink', 'warehouse'), 'Warehouse', `${formatNumber(totals.units, 0)} pieces · ${formatNumber(warehouse.shelfLocations + warehouse.drawerLocations + warehouse.pallets, 0)} locations`, 'The stock quantities decide how much room and how many locations the warehouse needs'),
+    );
+    world.append(results);
+    tableElements.set(`${CV_SEP}results`, results);
+    results.querySelectorAll('[data-node]').forEach((element) => cvElements.set(element.dataset.node, element));
+    frames.forEach((frame) => frame.querySelectorAll('[data-node]').forEach((element) => cvElements.set(element.dataset.node, element)));
+
+    cvLayout(model, frames, tableElements);
+    cvApplyView();
+    cvSelect(state.canvas.selected && cvElements.has(state.canvas.selected) ? state.canvas.selected : null);
+    // The first time, show everything once the surface has its size.
+    if (!state.canvas.fitted) requestAnimationFrame(() => requestAnimationFrame(() => { if (!state.canvas.fitted && cvFit()) { state.canvas.fitted = true; cvDraw(); } }));
+  }
+
+  function cvChip(id, label, value, tip) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'cv-chip';
+    chip.dataset.node = id;
+    chip.title = tip;
+    const name = document.createElement('small');
+    name.textContent = label;
+    const number = document.createElement('strong');
+    number.textContent = value;
+    chip.append(name, number);
+    return chip;
+  }
+
+  // Tables without a saved place are put in columns inside their group, the groups side by side.
+  function cvLayout(model, frames, tableElements) {
+    const GAP = 26;
+    const HEAD = 96;
+    let originX = 60;
+    model.groups.forEach((group) => {
+      const boxes = group.tables.map((table) => tableElements.get(table.sheet));
+      const needs = group.tables.some((table) => !state.canvas.positions[table.sheet]);
+      const columnCount = Math.max(1, Math.round(Math.sqrt(group.tables.length)));
+      const columnWidth = Math.max(...boxes.map((box) => box.offsetWidth));
+      const heights = new Array(columnCount).fill(0);
+      group.tables.forEach((table, index) => {
+        if (state.canvas.positions[table.sheet] && !needs) return;
+        if (state.canvas.positions[table.sheet]) return;
+        const column = heights.indexOf(Math.min(...heights));
+        state.canvas.positions[table.sheet] = { x: originX + column * (columnWidth + GAP), y: 60 + HEAD + heights[column] };
+        heights[column] += boxes[index].offsetHeight + GAP;
+      });
+      originX += columnCount * (columnWidth + GAP) + 150;
+    });
+    if (!state.canvas.positions[`${CV_SEP}results`]) state.canvas.positions[`${CV_SEP}results`] = { x: originX, y: 60 + HEAD };
+    tableElements.forEach((box, sheet) => {
+      const position = state.canvas.positions[sheet] || { x: 0, y: 0 };
+      box.style.left = `${position.x}px`;
+      box.style.top = `${position.y}px`;
+    });
+    cvFrames();
+  }
+
+  // A group frame wraps its tables; it follows them when they move.
+  function cvFrames() {
+    const PAD = 22;
+    const HEAD = 88;
+    state.cvModel.groups.forEach((group) => {
+      const frame = dom.cvWorld.querySelector(`.cv-frame[data-group="${CSS.escape(group.key)}"]`);
+      if (!frame) return;
+      const boxes = group.tables.map((table) => dom.cvWorld.querySelector(`.cv-table[data-sheet="${CSS.escape(table.sheet)}"]`)).filter(Boolean);
+      if (!boxes.length) return;
+      const left = Math.min(...boxes.map((box) => box.offsetLeft));
+      const top = Math.min(...boxes.map((box) => box.offsetTop));
+      const right = Math.max(...boxes.map((box) => box.offsetLeft + box.offsetWidth));
+      const bottom = Math.max(...boxes.map((box) => box.offsetTop + box.offsetHeight));
+      frame.style.left = `${left - PAD}px`;
+      frame.style.top = `${top - PAD - HEAD}px`;
+      frame.style.width = `${right - left + PAD * 2}px`;
+      frame.style.height = `${bottom - top + PAD * 2 + HEAD}px`;
+    });
+  }
+
+  function cvApplyView() {
+    const { x, y, scale } = state.canvas.view;
+    dom.cvWorld.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+    dom.cvZoomReadout.textContent = `${Math.round(scale * 100)}%`;
+  }
+
+  function cvFit() {
+    const boxes = [...dom.cvWorld.querySelectorAll('.cv-frame, .cv-results')];
+    if (!boxes.length) return false;
+    const left = Math.min(...boxes.map((box) => box.offsetLeft));
+    const top = Math.min(...boxes.map((box) => box.offsetTop));
+    const right = Math.max(...boxes.map((box) => box.offsetLeft + box.offsetWidth));
+    const bottom = Math.max(...boxes.map((box) => box.offsetTop + box.offsetHeight));
+    const stage = dom.cvStage;
+    // A hidden or not yet laid out surface has no size to fit to.
+    if (stage.clientWidth < 300 || stage.clientHeight < 200) return false;
+    const scale = clamp(Math.min((stage.clientWidth - 60) / (right - left), (stage.clientHeight - 60) / (bottom - top)), 0.08, 1.2);
+    state.canvas.view = { scale, x: (stage.clientWidth - (right - left) * scale) / 2 - left * scale, y: (stage.clientHeight - (bottom - top) * scale) / 2 - top * scale };
+    cvApplyView();
+    return true;
+  }
+
+  function cvZoomAt(factor, clientX, clientY) {
+    const rect = dom.cvStage.getBoundingClientRect();
+    const view = state.canvas.view;
+    const px = (clientX ?? rect.left + rect.width / 2) - rect.left;
+    const py = (clientY ?? rect.top + rect.height / 2) - rect.top;
+    const scale = clamp(view.scale * factor, 0.08, 3);
+    const real = scale / view.scale;
+    state.canvas.view = { scale, x: px - (px - view.x) * real, y: py - (py - view.y) * real };
+    cvApplyView();
+  }
+
+  /* -- Following a value: wires that flow in (blue) and out (orange) -- */
+
+  // Position of an element on the surface, in the surface's own units (so zoom and pan do not matter).
+  function cvRect(element) {
+    const scale = state.canvas.view.scale;
+    const world = dom.cvWorld.getBoundingClientRect();
+    const rect = element.getBoundingClientRect();
+    return { x: (rect.left - world.left) / scale, y: (rect.top - world.top) / scale, w: rect.width / scale, h: rect.height / scale };
+  }
+
+  function cvPath(from, to) {
+    const a = cvRect(from);
+    const b = cvRect(to);
+    const forward = a.x + a.w / 2 <= b.x + b.w / 2;
+    const overlap = Math.abs(a.x - b.x) < 24;
+    let x1 = forward ? a.x + a.w : a.x;
+    let x2 = forward ? b.x : b.x + b.w;
+    const y1 = a.y + a.h / 2;
+    const y2 = b.y + b.h / 2;
+    if (overlap) {
+      x1 = a.x + a.w;
+      x2 = b.x + b.w;
+      const bend = Math.max(x1, x2) + 70;
+      return `M${x1},${y1} C${bend},${y1} ${bend},${y2} ${x2},${y2}`;
+    }
+    const pull = Math.max(50, Math.abs(x2 - x1) / 2);
+    const direction = forward ? 1 : -1;
+    return `M${x1},${y1} C${x1 + pull * direction},${y1} ${x2 - pull * direction},${y2} ${x2},${y2}`;
+  }
+
+  function cvSvg(tag, attributes) {
+    const element = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    Object.entries(attributes).forEach(([name, value]) => element.setAttribute(name, value));
+    return element;
+  }
+
+  // The values a chip or a result stands for: wires go to the tables that use it, and their cells are lit.
+  function cvChipTargets(model, id) {
+    const [kind, a, b] = id.split(CV_SEP);
+    const lines = [...model.tables.values()].flatMap((table) => table.lines.map((line) => ({ line, table })));
+    let hits;
+    if (kind === 'fx') hits = lines.filter(({ line }) => line.currency === a && line.group === b);
+    else if (kind === 'disc' || kind === 'mult') hits = lines.filter(({ line }) => line.group === a);
+    else if (id === cvId('sink', 'warehouse')) hits = lines.filter(({ table }) => table.active).map((entry) => ({ ...entry, column: 'qty' }));
+    else if (id === cvId('sink', 'consolidated')) hits = lines.filter(({ table }) => table.active).map((entry) => ({ ...entry, column: 'after' }));
+    else hits = [];
+    return hits.map((hit) => ({ ...hit, column: hit.column || (kind === 'fx' ? 'conv' : 'after') }));
+  }
+
+  function cvDraw() {
+    if (!state.cvModel) return null;
+    const svg = dom.cvWires;
+    svg.querySelectorAll('.cv-wire').forEach((element) => element.remove());
+    const selected = state.canvas.selected;
+    dom.cvWorld.querySelectorAll('.cv-in, .cv-out, .cv-same, .cv-selected').forEach((element) => element.classList.remove('cv-in', 'cv-out', 'cv-same', 'cv-selected'));
+    if (!selected || !cvElements.get(selected)) return null;
+    const model = state.cvModel;
+    const target = cvElements.get(selected);
+    target.classList.add('cv-selected');
+    const wires = [];
+    const [kind] = selected.split(CV_SEP);
+    let ins = [];
+    let outs = [];
+    let same = [];
+    let hidden = 0;
+    if (kind === 'c') {
+      ins = cvResolve(model, selected, 'in');
+      outs = cvResolve(model, selected, 'out');
+      const [, sheet, row, column] = selected.split(CV_SEP);
+      if (column === 'part') {
+        const line = model.lineAt(sheet, row);
+        same = (model.byKey.get(line.key) || []).filter((other) => !(other.sheet === sheet && other.row === line.row)).map((other) => cvId('c', other.sheet, other.row, 'part')).filter((id) => cvElements.get(id));
+      }
+      ins.forEach((id) => wires.push({ from: id, to: selected, kind: 'in' }));
+      outs.forEach((id) => wires.push({ from: selected, to: id, kind: 'out' }));
+      same.slice(0, 30).forEach((id) => wires.push({ from: selected, to: id, kind: 'same' }));
+    } else if (kind === 'fx' || kind === 'disc' || kind === 'mult' || kind === 'sink') {
+      const hits = cvChipTargets(model, selected);
+      const tablesHit = [...new Set(hits.map(({ table }) => table.sheet))];
+      const direction = kind === 'sink' ? 'in' : 'out';
+      tablesHit.forEach((sheet) => {
+        const head = cvElements.get(cvId('table', sheet));
+        if (!head) return;
+        wires.push(direction === 'in' ? { from: head, to: selected, kind: 'in' } : { from: selected, to: head, kind: 'out' });
+      });
+      hits.forEach(({ line, column }) => {
+        const cell = cvElements.get(cvId('c', line.sheet, line.row, column)) || cvElements.get(cvId('c', line.sheet, line.row, 'after'));
+        if (cell) cell.classList.add(direction === 'in' ? 'cv-in' : 'cv-out');
+      });
+    }
+    const resolve = (value) => (typeof value === 'string' ? cvElements.get(value) : value);
+    wires.slice(0, CV_MAX_WIRES).forEach(({ from, to, kind: wireKind }) => {
+      const a = resolve(from);
+      const b = resolve(to);
+      if (!a || !b) return;
+      const path = cvPath(a, b);
+      svg.append(cvSvg('path', { d: path, class: `cv-wire cv-wire-base cv-${wireKind}`, fill: 'none' }));
+      svg.append(cvSvg('path', { d: path, class: `cv-wire cv-wire-flow cv-${wireKind}`, fill: 'none', 'marker-end': wireKind === 'same' ? '' : `url(#cv-arrow-${wireKind})` }));
+      if (wireKind === 'in' && typeof from === 'string') a.classList.add('cv-in');
+      if (wireKind === 'out' && typeof to === 'string') b.classList.add('cv-out');
+      if (wireKind === 'same' && typeof to === 'string') b.classList.add('cv-same');
+    });
+    hidden = Math.max(0, wires.length - CV_MAX_WIRES);
+    return { ins, outs, same, hidden };
+  }
+
+  function cvSelect(id) {
+    state.canvas.selected = id;
+    const trace = cvDraw();
+    cvInspect(trace);
+  }
+
+  // The plain-language explanation of the selected value, with what it is made from and what uses it.
+  function cvInspect(trace) {
+    const panel = dom.cvInspector;
+    const selected = state.canvas.selected;
+    if (!selected || !trace) {
+      panel.classList.add('hidden');
+      return;
+    }
+    const model = state.cvModel;
+    const output = state.config.outputCurrency;
+    const [kind, a, b, column] = selected.split(CV_SEP);
+    const lines = [];
+    let title = '';
+    let value = '';
+    if (kind === 'c') {
+      const line = model.lineAt(a, b);
+      if (!line) { panel.classList.add('hidden'); return; }
+      title = `${cvLabel(column)} · ${line.part} · ${a}`;
+      value = cvCellText(line, column);
+      const n = (v) => (v === null || v === undefined ? '—' : formatNumber(v, 2));
+      const explain = {
+        part: `The article number, typed in ${a}, row ${line.row + 1}. The same number in other lists is the same article.`,
+        name: 'The article name from the list.',
+        alt: 'The second article number from the list.',
+        currency: 'The currency of the price in the list.',
+        qty: `The quantity typed in ${a}, row ${line.row + 1}. The consolidated list and the warehouse use the largest quantity of this article in the lists in use.`,
+        price: `The price per piece typed in ${a}, row ${line.row + 1}, in ${line.currency}.`,
+        conv: `${n(line.price)} ${line.currency} × rate ${n(line.fx)} = ${n(line.conv)} ${output}`,
+        after: `${n(line.conv)} ${output} × (1 − discount ${formatPercent(line.discount)}) = ${n(line.after)} ${output}`,
+        afterTotal: `${n(line.after)} ${output} × ${formatQuantity(line.qty)} pieces = ${n(line.afterTotal)} ${output}`,
+        salesUnit: `${n(line.after)} ${output} × multiplier ${n(line.multiplier)} = ${n(line.salesUnit)} ${output}`,
+        salesTotal: `${n(line.salesUnit)} ${output} × ${formatQuantity(line.qty)} pieces = ${n(line.salesTotal)} ${output}`,
+      };
+      lines.push(explain[column] || '');
+      if (!model.tables.get(a).active) lines.push('This list is not used now, so its values do not go into the consolidated list or the warehouse.');
+    } else if (kind === 'fx') {
+      title = `Exchange rate ${a} → ${output} · ${b}`;
+      const line = model.groups.flatMap((group) => group.tables).flatMap((table) => table.lines).find((entry) => entry.currency === a);
+      value = line ? formatNumber(line.fx, 4) : '—';
+      lines.push(line ? `Today's rate ${formatNumber(line.fxLive, 4)} + currency add-on ${formatNumber(line.fxAddon, 2)}. The add-on is set in the exchange rates panel in the settings.` : '');
+    } else if (kind === 'disc') {
+      title = `Discount · ${a}`;
+      value = cvChipValue(selected);
+      lines.push('The discount of the manufacturer. It is set on the manufacturer card in the settings.');
+    } else if (kind === 'mult') {
+      title = `Price multiplier · ${a}`;
+      value = cvChipValue(selected);
+      lines.push('The sales price is the price after discount times this number. Single articles and sales groups can have their own.');
+    } else {
+      title = a === 'warehouse' ? 'Warehouse' : 'Consolidated list';
+      value = cvChipValue(selected);
+      lines.push(a === 'warehouse' ? 'The quantities decide how many pieces are stored and how many locations that takes.' : 'The consolidated list adds the lists in use together: common articles once, with the largest quantity.');
+    }
+    const counts = [];
+    if (trace.ins.length) counts.push(`Made from ${trace.ins.length} ${trace.ins.length === 1 ? 'value' : 'values'} (blue)`);
+    else if (kind === 'c') counts.push('Typed in: it is made from nothing else');
+    if (trace.outs.length) counts.push(`Used in ${trace.outs.length} ${trace.outs.length === 1 ? 'place' : 'places'} (orange)`);
+    if (trace.same.length) counts.push(`The same article is in ${trace.same.length} other ${trace.same.length === 1 ? 'list' : 'lists'} (grey)`);
+    if (trace.hidden) counts.push(`${trace.hidden} more wires are not drawn`);
+    panel.replaceChildren();
+    const heading = document.createElement('strong');
+    heading.textContent = title;
+    heading.setAttribute('translate', 'no');
+    const number = document.createElement('p');
+    number.className = 'cv-inspector-value';
+    number.textContent = value;
+    const explanation = document.createElement('p');
+    explanation.textContent = lines.join(' ');
+    const list = document.createElement('ul');
+    counts.forEach((text) => { const item = document.createElement('li'); item.textContent = text; list.append(item); });
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'cv-inspector-close';
+    close.setAttribute('aria-label', 'Stop following this value');
+    close.textContent = '×';
+    close.dataset.cvClear = 'true';
+    panel.append(close, heading, number, explanation, list);
+    panel.classList.remove('hidden');
+  }
+
+  function cvChipValue(id) {
+    return cvElements.get(id)?.querySelector('strong')?.textContent || '';
+  }
+
+  /* -- Editing a value in a table -- */
+
+  // Editing starts from what is typed in the list (a number with all its decimals, or a formula), not from the rounded text.
+  function cvStartEdit(cell) {
+    const [sheet, rowText, column] = cell.dataset.edit.split(CV_SEP);
+    const col = state.mappings[sheet]?.[CV_EDITABLE[column]];
+    const raw = col === null || col === undefined ? '' : state.matrices[sheet]?.[Number(rowText)]?.[col];
+    cell.textContent = raw === null || raw === undefined ? '' : String(raw);
+    cell.dataset.shown = cell.textContent;
+  }
+
+  function cvCommit(cell) {
+    const [sheet, rowText, column] = cell.dataset.edit.split(CV_SEP);
+    if (cell.textContent.trim() === (cell.dataset.shown ?? '')) {
+      const line = state.cvModel.lineAt(sheet, rowText);
+      if (line) cell.textContent = cvCellText(line, column);
+      return;
+    }
+    const row = Number(rowText);
+    const mapping = state.mappings[sheet];
+    const col = mapping?.[CV_EDITABLE[column]];
+    if (col === null || col === undefined) return;
+    const text = cell.textContent.trim();
+    const raw = parseUserInput(text);
+    const previous = captureBlock(sheet, row, col, [[undefined]]);
+    const before = previous[0][0];
+    const comparable = (value) => (value === null || value === undefined ? '' : String(value));
+    if (comparable(before) === comparable(raw)) return;
+    const address = XLSX.utils.encode_cell({ r: row, c: col });
+    pushHistory(`Cell ${sheet}!${address} updated`, () => {
+      setEngineBlock(sheet, row, col, [[raw]]);
+      afterWorkbookEdit(sheet);
+    }, { restore: () => restoreBlock(sheet, row, col, previous) });
+    showToast(`Updated ${sheet}!${address}. Ctrl+Z reverts it.`);
+  }
+
+  /* -- Moving, panning and zooming -- */
+
+  function bindCanvas() {
+    const stage = dom.cvStage;
+    let gesture = null;
+    stage.addEventListener('wheel', (event) => {
+      event.preventDefault();
+      cvZoomAt(Math.exp(-event.deltaY * (event.ctrlKey ? 0.01 : 0.0015)), event.clientX, event.clientY);
+      cvDraw();
+    }, { passive: false });
+    stage.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || event.target.closest('[contenteditable="plaintext-only"], [contenteditable="true"]')) return;
+      const tableHead = event.target.closest('[data-drag-table]');
+      const frameHead = event.target.closest('[data-drag-group]');
+      const onCell = event.target.closest('[data-node]') && !tableHead;
+      if (onCell) return;
+      const start = { x: event.clientX, y: event.clientY };
+      if (tableHead) {
+        const sheet = tableHead.dataset.dragTable;
+        gesture = { type: 'table', sheet, start, moved: false, origin: { ...(state.canvas.positions[sheet] || { x: 0, y: 0 }) } };
+      } else if (frameHead) {
+        const group = state.cvModel.groups.find((entry) => entry.key === frameHead.dataset.dragGroup);
+        gesture = { type: 'group', group, start, moved: false, origins: group.tables.map((table) => ({ sheet: table.sheet, ...(state.canvas.positions[table.sheet] || { x: 0, y: 0 }) })) };
+      } else {
+        gesture = { type: 'pan', start, moved: false, origin: { ...state.canvas.view } };
+        stage.classList.add('cv-panning');
+      }
+      stage.setPointerCapture(event.pointerId);
+    });
+    stage.addEventListener('pointermove', (event) => {
+      if (!gesture) return;
+      const dx = event.clientX - gesture.start.x;
+      const dy = event.clientY - gesture.start.y;
+      if (!gesture.moved && Math.hypot(dx, dy) < 4) return;
+      gesture.moved = true;
+      const scale = state.canvas.view.scale;
+      if (gesture.type === 'pan') {
+        state.canvas.view = { ...gesture.origin, x: gesture.origin.x + dx, y: gesture.origin.y + dy };
+        cvApplyView();
+      } else if (gesture.type === 'table') {
+        state.canvas.positions[gesture.sheet] = { x: gesture.origin.x + dx / scale, y: gesture.origin.y + dy / scale };
+        const box = dom.cvWorld.querySelector(`.cv-table[data-sheet="${CSS.escape(gesture.sheet)}"]`);
+        box.style.left = `${state.canvas.positions[gesture.sheet].x}px`;
+        box.style.top = `${state.canvas.positions[gesture.sheet].y}px`;
+        cvFrames();
+        cvDraw();
+      } else {
+        gesture.origins.forEach((origin) => {
+          state.canvas.positions[origin.sheet] = { x: origin.x + dx / scale, y: origin.y + dy / scale };
+          const box = dom.cvWorld.querySelector(`.cv-table[data-sheet="${CSS.escape(origin.sheet)}"]`);
+          box.style.left = `${state.canvas.positions[origin.sheet].x}px`;
+          box.style.top = `${state.canvas.positions[origin.sheet].y}px`;
+        });
+        cvFrames();
+        cvDraw();
+      }
+    });
+    const finish = (event) => {
+      if (!gesture) return;
+      const done = gesture;
+      gesture = null;
+      stage.classList.remove('cv-panning');
+      try { stage.releasePointerCapture(event.pointerId); } catch { /* The pointer was already released. */ }
+      if (done.moved) {
+        if (done.type !== 'pan') saveSettingsSoon();
+        return;
+      }
+      if (done.type === 'table' && !done.sheet.startsWith(CV_SEP)) {
+        const open = state.canvas.expanded;
+        if (open.includes(done.sheet)) open.splice(open.indexOf(done.sheet), 1);
+        else open.push(done.sheet);
+        saveSettingsSoon();
+        renderCanvas();
+      } else if (done.type === 'pan') {
+        cvSelect(null);
+      }
+    };
+    stage.addEventListener('pointerup', finish);
+    stage.addEventListener('pointercancel', finish);
+    stage.addEventListener('click', (event) => {
+      if (event.target.closest('[data-cv-clear]')) {
+        cvSelect(null);
+        return;
+      }
+      const node = event.target.closest('[data-node]');
+      if (!node || node.dataset.node.startsWith(`table${CV_SEP}`)) return;
+      cvSelect(node.dataset.node);
+    });
+    stage.addEventListener('focusin', (event) => {
+      const cell = event.target.closest?.('[data-edit]');
+      if (cell && cell.dataset.shown === undefined) cvStartEdit(cell);
+    });
+    stage.addEventListener('focusout', (event) => {
+      const cell = event.target.closest?.('[data-edit]');
+      if (cell) cvCommit(cell);
+    });
+    stage.addEventListener('keydown', (event) => {
+      const cell = event.target.closest?.('[data-edit]');
+      if (cell && event.key === 'Enter') {
+        event.preventDefault();
+        cell.blur();
+      } else if (cell && event.key === 'Escape') {
+        event.preventDefault();
+        renderCanvas();
+      }
+    });
+    dom.cvInspector.addEventListener('click', (event) => { if (event.target.closest('[data-cv-clear]')) cvSelect(null); });
+    document.addEventListener('keydown', (event) => {
+      if (state.activeView !== VIEW.canvas || event.target.closest?.('input, textarea, [contenteditable], dialog')) return;
+      if (event.key === 'Escape') {
+        if (state.canvas.selected) cvSelect(null);
+        else showView(VIEW.consolidated);
+      } else if (event.key === '+' || event.key === '=') cvZoomAt(1.2);
+      else if (event.key === '-') cvZoomAt(1 / 1.2);
+      else if (event.key === '0') cvFit();
+      else return;
+      cvDraw();
+    });
+    window.addEventListener('resize', () => { if (state.activeView === VIEW.canvas) cvDraw(); });
+    dom.cvBack.addEventListener('click', () => showView(VIEW.consolidated));
+    dom.cvZoomIn.addEventListener('click', () => { cvZoomAt(1.25); cvDraw(); });
+    dom.cvZoomOut.addEventListener('click', () => { cvZoomAt(0.8); cvDraw(); });
+    dom.cvFit.addEventListener('click', () => { cvFit(); cvDraw(); });
+    dom.cvEdit.addEventListener('click', () => {
+      state.canvas.edit = !state.canvas.edit;
+      dom.cvEdit.setAttribute('aria-pressed', String(state.canvas.edit));
+      renderCanvas();
+      showToast(state.canvas.edit ? 'Edit mode: click a value in a table and type. Enter saves it, Esc cancels. Ctrl+Z reverts.' : 'Edit mode is off.');
+    });
+    dom.cvOpenAll.addEventListener('click', () => { state.canvas.expanded = state.cvModel.groups.flatMap((group) => group.tables.map((table) => table.sheet)); saveSettingsSoon(); renderCanvas(); });
+    dom.cvCompactAll.addEventListener('click', () => { state.canvas.expanded = []; saveSettingsSoon(); renderCanvas(); });
+    dom.cvReset.addEventListener('click', () => { state.canvas.positions = {}; state.canvas.fitted = false; saveSettingsSoon(); renderCanvas(); });
+    dom.cvFullscreen.addEventListener('click', () => {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else dom.canvasView.requestFullscreen?.().catch(() => showToast('Your browser did not allow full screen.', true));
+    });
+    dom.cvSave.addEventListener('click', () => openWorkspaceDialog('save'));
+    dom.cvOpen.addEventListener('click', () => openWorkspaceDialog('open'));
+    dom.workspaceCancel.addEventListener('click', () => dom.workspaceDialog.close());
+    dom.workspaceForm.addEventListener('submit', (event) => { event.preventDefault(); runWorkspace(); });
+  }
+
+  /* -- The workspace file: everything in one encrypted file -- */
+
+  // One password-protected file holds the source lists, the minimal lists, the sales history, every setting and the layout of
+  // the canvas, so the whole state can be opened again later exactly as it was left.
+  function openWorkspaceDialog(mode) {
+    const dialog = dom.workspaceDialog;
+    dialog.dataset.mode = mode;
+    dom.workspaceTitle.textContent = mode === 'save' ? 'Save the workspace' : 'Open a workspace';
+    dom.workspaceCopy.textContent = mode === 'save'
+      ? 'One encrypted file with all lists, settings and the layout of the canvas. Keep the password: without it the file cannot be opened.'
+      : 'Choose a workspace file and type its password. The project is replaced by the one in the file.';
+    dom.workspaceGo.textContent = mode === 'save' ? 'Save the file' : 'Open the file';
+    dom.workspaceConfirmLabel.classList.toggle('hidden', mode !== 'save');
+    dom.workspaceFileLabel.classList.toggle('hidden', mode !== 'open');
+    dom.workspacePassword.value = '';
+    dom.workspacePassword2.value = '';
+    dom.workspaceFile.value = '';
+    dialog.showModal();
+    dom.workspacePassword.focus();
+  }
+
+  async function runWorkspace() {
+    const mode = dom.workspaceDialog.dataset.mode;
+    const password = dom.workspacePassword.value;
+    if (mode === 'save') {
+      if (password.length < 10) { showToast('Use a password with at least 10 characters.', true); return; }
+      if (password !== dom.workspacePassword2.value) { showToast('The passwords do not match.', true); return; }
+      dom.securePassword.value = password;
+      dom.securePasswordConfirm.value = password;
+      dom.workspaceDialog.close();
+      if (await exportSecureProject()) dom.secureDownload.click();
+      return;
+    }
+    const [file] = dom.workspaceFile.files;
+    if (!file) { showToast('Choose a workspace file first.', true); return; }
+    if (!password) { showToast('Enter the password of the file.', true); return; }
+    dom.securePassword.value = password;
+    dom.workspaceDialog.close();
+    if (await importSecureProject(file)) showView(VIEW.canvas);
   }
 
   /* ---------- Sales history & popularity ---------- */
@@ -3625,6 +4473,7 @@
       version: 3,
       language: state.language,
       partsMode: state.partsMode,
+      canvas: { positions: state.canvas.positions, expanded: state.canvas.expanded, view: state.canvas.view, selected: state.canvas.selected, fitted: state.canvas.fitted },
       fxAddons: { ...state.fxAddons },
       config: {
         discount: state.config.discount,
@@ -3715,6 +4564,7 @@
       };
     });
     state.partsMode = settings.partsMode === 'minimal' ? 'minimal' : 'full';
+    state.canvas = restoreCanvas(settings.canvas);
     // The currency add-on is global. Older projects kept a rate buffer per kit: take the largest one used for each currency.
     state.fxAddons = { ...FX_ADDON_DEFAULTS };
     if (settings.fxAddons && typeof settings.fxAddons === 'object') {
@@ -5223,6 +6073,7 @@
       state.selectedCell = null;
       // A new project starts without sales history; a saved project brings its own back with its settings.
       state.history = defaultHistory();
+      state.canvas = defaultCanvas();
       state.fxAddons = { ...FX_ADDON_DEFAULTS };
       state.partsMode = 'full';
       state.minimalView = { rig: null, onlyDifferences: true, search: '' };
@@ -6180,6 +7031,7 @@
     updateKitRouteSummaries();
     renderCustomsGuides();
     if (state.activeView === VIEW.consolidated) renderConsolidated();
+    else if (state.activeView === VIEW.canvas) renderCanvas();
     else if (state.activeView === VIEW.minimal) renderMinimalView();
     else if (state.activeView === VIEW.popularity) renderPopularity();
     else if (state.activeView === VIEW.dashboard) renderDashboard();
@@ -8879,6 +9731,7 @@
   function renderTabs() {
     dom.tabs.replaceChildren(
       createTab('Consolidated', VIEW.consolidated),
+      createTab('Canvas', VIEW.canvas),
       createTab('Minimal vs full', VIEW.minimal),
       createTab('Popularity', VIEW.popularity),
       createTab('Dashboard', VIEW.dashboard),
@@ -8892,6 +9745,7 @@
   // What each main tab is for, in plain words.
   const TAB_HELP = Object.freeze({
     [VIEW.consolidated]: 'Every part from all the kits in one list, with prices.',
+    [VIEW.canvas]: 'All tables on one large surface: move them around and follow how every value is made and used.',
     [VIEW.minimal]: 'Compare the minimal parts lists with the full ones, and choose which to use.',
     [VIEW.popularity]: 'How well each part and kit sells, and how much to keep in stock.',
     [VIEW.dashboard]: 'Profit, costs and how long it takes to earn the money back.',
@@ -8957,6 +9811,9 @@
     dom.welcome.classList.add('hidden');
     dom.consolidatedView.classList.toggle('hidden', view !== VIEW.consolidated);
     dom.minimalView.classList.toggle('hidden', view !== VIEW.minimal);
+    dom.canvasView.classList.toggle('hidden', view !== VIEW.canvas);
+    document.body.classList.toggle('canvas-open', view === VIEW.canvas);
+    if (view !== VIEW.canvas && document.fullscreenElement) document.exitFullscreen();
     dom.popularityView.classList.toggle('hidden', view !== VIEW.popularity);
     dom.dashboardView.classList.toggle('hidden', view !== VIEW.dashboard);
     dom.warehouseView.classList.toggle('hidden', view !== VIEW.warehouse);
@@ -9485,10 +10342,12 @@
       dom.securePasswordConfirm.value = '';
       setStatus(`Encrypted project is ready to download for ${state.fileName}.`);
       showToast('Encrypted project ready. Use the download button.');
+      return true;
     } catch (error) {
       console.error(error);
       setStatus('The secure project could not be encrypted.', 'error');
       showToast(error.message || 'Secure project export failed.', true);
+      return false;
     } finally {
       dom.secureExport.disabled = false;
     }
@@ -9559,10 +10418,12 @@
       showToast('Secure project imported and unlocked.');
       await refreshRates(false);
       markProjectSaved('Encrypted project opened');
+      return true;
     } catch (error) {
       console.error(error);
       setStatus(`Could not open ${file.name}: ${error.message}`, 'error');
       showToast(error.message || 'Secure project import failed.', true);
+      return false;
     }
   }
 
