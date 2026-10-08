@@ -180,7 +180,7 @@ test('a multi-kit catalogue file is split into one kit sheet per kit, from Bulga
   assert.match(app, /function catalogueSheetsOf\(/);
   assert.match(app, /Core\.parseKitCatalogue\(/);
   assert.match(app, /Core\.catalogueSheetRows\(/);
-  assert.match(app, /CATALOGUE_DEFAULTS = Object\.freeze\(\{ manufacturer: 'Häny', originCountry: '100', fxMargin: 0\.4, freightPercent: 3 \}\)/);
+  assert.match(app, /CATALOGUE_DEFAULTS = Object\.freeze\(\{ manufacturer: 'Häny', originCountry: '100', freightPercent: 3 \}\)/);
   assert.match(app, /discountRate: 0,/);
   // Opening a catalogue as the first file, or adding one to an open project, takes the same route.
   assert.match(app, /function openWorkbookFile\(/);
@@ -278,6 +278,25 @@ test('minimal parts lists: paired with the full list, compared side by side, swi
   // The README gives no supplier names or item numbers (example names only).
   const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
   assert.doesNotMatch(readme, /TEI|Häny|ET-PAK|Rock Drills/);
+});
+
+test('currency add-ons are global per currency, discount and duty per manufacturer, warehouse fields follow the storage types', () => {
+  ['USD', 'EUR', 'NOK', 'DKK'].forEach((code) => assert.match(html, new RegExp(`data-fx-row="${code}"`)));
+  assert.ok(app.includes("const FX_ADDON_CURRENCIES = Object.freeze(['USD', 'EUR', 'NOK', 'DKK'])"));
+  // The add-on comes from the currency, not from the kit.
+  assert.ok(/function kitFxMargin\(kit\) \{\s*return fxAddonFor\(kitCurrency\(kit\)\);/.test(app));
+  assert.ok(app.includes('fxAddons: { ...state.fxAddons }'));
+  // The kit card has no discount, duty or buffer fields of its own.
+  const kitCard = app.slice(app.indexOf('function createKitFreightControl('), app.indexOf('// Discount and customs duty belong to the manufacturer'));
+  assert.doesNotMatch(kitCard, /discountRate|dutyRate|'fxMargin'/);
+  assert.ok(app.includes('function unifyMakerRates('));
+  // One share on shelves; the drawers get the rest.
+  assert.ok(app.includes('function normalizeStorageShares('));
+  assert.ok(html.includes('data-show-when="shelf+drawer"') && html.includes('data-show-when="pallet"') && html.includes('data-show-when="drawer"'));
+  assert.ok(app.includes('function applyWarehouseVisibility('));
+  // Presets for the monthly activity come from the sales history.
+  assert.match(html, /id="activity-preset"/);
+  assert.ok(app.includes('function computeActivity(') && app.includes('ACTIVITY_PRESETS'));
 });
 
 test('every manufacturer is its own route: own settings, exchange-rate buffer, percentage freight and an independent shipment', () => {

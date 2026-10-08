@@ -35,8 +35,10 @@
     drawerEnabled: false,
     palletEnabled: false,
     plannedPallets: 0,
-    shelfShare: 55,
-    drawerShare: 25,
+    shelfShare: 70,
+    drawerShare: 30,
+    activityPreset: 'custom',
+    activityMaker: '',
     binsPerShelf: 4,
     shelvesPerRack: 4,
     unitsPerBin: 5,
@@ -130,6 +132,9 @@
   const SPECIAL_VIEWS = new Set(Object.values(VIEW));
   // Starting points for the stock suggestion: half a year of sales, a 95 % chance of having a part, no budget.
   const STOCK_DEFAULTS = Object.freeze({ months: 6, service: 0.95, budget: null, complete: true });
+  // The currency add-on: an amount in the output currency added to today's rate, one per foreign currency and the same for every manufacturer.
+  const FX_ADDON_CURRENCIES = Object.freeze(['USD', 'EUR', 'NOK', 'DKK']);
+  const FX_ADDON_DEFAULTS = Object.freeze({ USD: 0, EUR: 0.4, NOK: 0, DKK: 0 });
   const WAREHOUSE_RATE_DEFAULTS = Object.freeze({
     eu120: 0,
     eu220: 0,
@@ -309,6 +314,7 @@
     hiddenColumns: [...DEFAULT_HIDDEN_COLUMNS],
     columnPreset: 'simple',
     kitBarOpen: false,
+    fxAddons: { ...FX_ADDON_DEFAULTS },
     // 'full' or 'minimal': which version of the rigs' parts lists is in use (see "Minimal parts lists").
     partsMode: 'full',
     minimalView: { rig: null, onlyDifferences: true, search: '' },
@@ -488,6 +494,10 @@
     consolidatedFilter: el('consolidated-filter'),
     consolidatedCount: el('consolidated-count'),
     consolidatedActions: el('consolidated-actions'),
+    fxOutput: el('fx-output'),
+    activityPreset: el('activity-preset'),
+    activityMaker: el('activity-maker'),
+    activityPresetNote: el('activity-preset-note'),
     minimalView: el('minimal-view'),
     minimalSummary: el('minimal-summary'),
     minimalEmpty: el('minimal-empty'),
@@ -644,6 +654,8 @@
     dom.customerExport.addEventListener('click', exportCustomerPriceList);
     bindPopularity();
     bindMinimal();
+    bindFxPanel();
+    bindActivityPresets();
     dom.commonMode.addEventListener('click', toggleCommonMode);
     bindToast();
     document.addEventListener('click', (event) => {
@@ -895,6 +907,7 @@
         if (key === 'binsHigh' || key === 'binsDeep') value = clamp(Math.round(value), 1, 10);
         if (key === 'shelvesPerRack') value = clamp(Math.round(value), 1, 8);
         state.warehouse[key] = value;
+        if (ACTIVITY_KEYS.includes(key)) state.warehouse.activityPreset = 'custom';
         state.warehouse.unitsPerShelf = shelfUnitCapacity(state.warehouse);
         dom.whUnitsShelf.value = String(state.warehouse.unitsPerShelf);
         if (key === 'shelfShare' || key === 'drawerShare') constrainStorageShares(key);
@@ -962,17 +975,36 @@
     dom.warehousePreview.addEventListener('pointercancel', endPreviewDrag);
   }
 
+  // The share on shelves and the share in drawers always add up to 100 %: the drawers get what the shelves do not.
   function constrainStorageShares(changedKey) {
     const warehouse = state.warehouse;
-    const otherKey = changedKey === 'shelfShare' ? 'drawerShare' : 'shelfShare';
-    if (warehouse.shelfShare + warehouse.drawerShare <= 100) {
-      warehouse.shareMessage = '';
-      return;
+    if (changedKey === 'shelfShare') {
+      warehouse.drawerShare = Math.max(0, 100 - warehouse.shelfShare);
+      dom.whDrawerShare.value = String(warehouse.drawerShare);
     }
-    warehouse[otherKey] = Math.max(0, 100 - warehouse[changedKey]);
-    const otherInput = otherKey === 'shelfShare' ? dom.whShelfShare : dom.whDrawerShare;
-    otherInput.value = String(warehouse[otherKey]);
-    warehouse.shareMessage = 'Storage shares were capped at 100%; the remaining share was adjusted automatically.';
+    warehouse.shareMessage = '';
+  }
+
+  // Older projects stored two independent shares; keep their proportion.
+  function normalizeStorageShares(warehouse) {
+    const shelf = Math.max(0, Number(warehouse.shelfShare) || 0);
+    const drawer = Math.max(0, Number(warehouse.drawerShare) || 0);
+    if (shelf + drawer <= 0) {
+      warehouse.shelfShare = WAREHOUSE_DEFAULTS.shelfShare;
+      warehouse.drawerShare = WAREHOUSE_DEFAULTS.drawerShare;
+    } else if (Math.abs(shelf + drawer - 100) > 0.001) {
+      warehouse.shelfShare = Math.round((100 * shelf) / (shelf + drawer));
+      warehouse.drawerShare = 100 - warehouse.shelfShare;
+    }
+  }
+
+  // Fields for a storage type that is switched off are not shown; they come back when it is switched on again.
+  function applyWarehouseVisibility() {
+    const on = { shelf: state.warehouse.shelfEnabled, drawer: state.warehouse.drawerEnabled, pallet: state.warehouse.palletEnabled };
+    document.querySelectorAll('[data-show-when]').forEach((element) => {
+      const visible = element.dataset.showWhen.split('+').every((type) => on[type]);
+      element.classList.toggle('hidden', !visible);
+    });
   }
 
   /* ---------- Two-way value binding ---------- */
@@ -1156,7 +1188,14 @@
 
   // Added on top of the live exchange rate (in the output currency per unit of the source currency).
   function kitFxMargin(kit) {
-    return Number.isFinite(kit.fxMargin) && kit.fxMargin > 0 ? kit.fxMargin : 0;
+    return fxAddonFor(kitCurrency(kit));
+  }
+
+  // The output currency itself never gets an add-on.
+  function fxAddonFor(currency) {
+    if (!currency || currency === state.config.outputCurrency) return 0;
+    const value = state.fxAddons[currency];
+    return Number.isFinite(value) && value > 0 ? value : 0;
   }
 
   function sanitizeMaker(maker) {
@@ -1286,35 +1325,9 @@
     sourceCurrency.setAttribute('aria-label', `${sheetName} default source currency`);
     sourceCurrency.append(new Option('Default', ''), ...CURRENCIES.map((code) => new Option(code, code)));
     sourceCurrency.value = kit.defaultCurrency || '';
-    const percentField = (field, caption) => {
-      const label = document.createElement('label');
-      label.className = 'kit-discount-field';
-      label.textContent = caption;
-      const input = document.createElement('input');
-      input.type = 'number';
-      input.min = '0';
-      input.max = '100';
-      input.step = '0.1';
-      input.dataset.scale = '100';
-      input.dataset.kitBind = sheetName;
-      input.dataset.kitField = field;
-      writeInputValue(input, kit[field]);
-      label.append(input);
-      return label;
-    };
-    const discount = percentField('discountRate', 'Discount %');
-    const duty = percentField('dutyRate', 'Duty %');
-    const buffer = document.createElement('label');
-    buffer.className = 'kit-discount-field';
-    buffer.textContent = 'Rate buffer';
-    const bufferInput = document.createElement('input');
-    bufferInput.type = 'number';
-    bufferInput.min = '0';
-    bufferInput.step = '0.01';
-    bufferInput.dataset.kitBind = sheetName;
-    bufferInput.dataset.kitField = 'fxMargin';
-    writeInputValue(bufferInput, kit.fxMargin);
-    buffer.append(bufferInput);
+    const setByMaker = document.createElement('small');
+    setByMaker.className = 'kit-by-maker';
+    setByMaker.textContent = 'Discount and customs duty are set for the whole manufacturer, the currency add-on for the whole currency.';
     const caption = document.createElement('span');
     caption.className = 'kit-freight-caption';
     caption.textContent = 'Kit freight';
@@ -1343,8 +1356,194 @@
     route.className = 'kit-route-summary';
     route.dataset.kitRoute = sheetName;
     route.textContent = kitRouteSummary(kit);
-    wrapper.append(profileCaption, manufacturer, origin, sourceCurrency, discount, duty, buffer, caption, mode, amount, currency, help, route);
+    wrapper.append(profileCaption, manufacturer, origin, sourceCurrency, setByMaker, caption, mode, amount, currency, help, route);
     return wrapper;
+  }
+
+  // Discount and customs duty belong to the manufacturer, not to a kit: every kit of a manufacturer takes the values of its first kit.
+  function unifyMakerRates() {
+    const first = {};
+    Object.entries(state.kits).forEach(([, kit]) => {
+      const maker = kit.manufacturer || '';
+      if (!first[maker]) first[maker] = kit;
+      else {
+        kit.discountRate = first[maker].discountRate;
+        kit.dutyRate = first[maker].dutyRate;
+      }
+    });
+  }
+
+  /* -- Monthly activity presets: how many orders, parcels and receipts the sales history suggests -- */
+
+  const ACTIVITY_KEYS = Object.freeze(['receipts', 'receiptLines', 'orders', 'orderLines', 'ediLabels', 'businessParcels', 'privateParcels']);
+  // How an order looks in the absence of order data: a few pieces per line, a few lines per order, one parcel per order.
+  const ACTIVITY_ASSUMPTIONS = Object.freeze({ unitsPerOrderLine: 3, linesPerOrder: 4, privateShare: 0.1 });
+  const ACTIVITY_PRESETS = Object.freeze({
+    lean: { label: 'Lean: the best sellers (80 % of the pieces sold)', coverage: 0.8, receipts: 0.5 },
+    balanced: { label: 'Balanced: the parts that make up 95 % of the pieces sold', coverage: 0.95, receipts: 1 },
+    wide: { label: 'Wide: every part that sold', coverage: 1, receipts: 2 },
+  });
+
+  // The market the presets are based on: Norway when it is in the sales history, otherwise the first market.
+  function activityMarket() {
+    const markets = state.history.markets;
+    const index = markets.findIndex((market) => /^(?:norway|norge)$/i.test(market.name));
+    return index >= 0 ? index : markets.length ? 0 : -1;
+  }
+
+  // Manufacturers whose parts sold in that market, best sellers first.
+  function activityMakers() {
+    const index = activityMarket();
+    if (index < 0) return [];
+    const totals = new Map();
+    popularityResult().rows.filter((row) => row.inKit && row.sold[index] > 0).forEach((row) => {
+      const maker = row.manufacturer || '';
+      totals.set(maker, (totals.get(maker) || 0) + row.sold[index]);
+    });
+    return [...totals.entries()].sort((a, b) => b[1] - a[1]).map(([maker]) => maker);
+  }
+
+  function computeActivity(kind) {
+    const preset = ACTIVITY_PRESETS[kind];
+    const index = activityMarket();
+    const makers = activityMakers();
+    if (!preset || index < 0 || !makers.length) return null;
+    const maker = makers.includes(state.warehouse.activityMaker) ? state.warehouse.activityMaker : makers[0];
+    const rows = popularityResult().rows.filter((row) => row.inKit && (row.manufacturer || '') === maker && row.sold[index] > 0).sort((a, b) => b.sold[index] - a.sold[index]);
+    const total = rows.reduce((sum, row) => sum + row.sold[index], 0);
+    const picked = [];
+    let covered = 0;
+    for (const row of rows) {
+      if (picked.length && covered >= preset.coverage * total - 1e-9) break;
+      picked.push(row);
+      covered += row.sold[index];
+    }
+    const monthlyUnits = covered / (Math.max(1, state.history.years) * 12);
+    // One decimal: a small market has a couple of orders a month, and the presets should still differ.
+    const tenth = (value) => Math.round(value * 10) / 10;
+    const orderLines = monthlyUnits / ACTIVITY_ASSUMPTIONS.unitsPerOrderLine;
+    const orders = Math.max(0.1, tenth(orderLines / ACTIVITY_ASSUMPTIONS.linesPerOrder));
+    const privateParcels = tenth(orders * ACTIVITY_ASSUMPTIONS.privateShare);
+    const restockMonths = Math.max(1, state.history.stock.months);
+    return {
+      market: state.history.markets[index].name,
+      maker,
+      parts: picked.length,
+      share: total > 0 ? covered / total : 0,
+      monthlyUnits,
+      values: {
+        receipts: preset.receipts,
+        receiptLines: Math.max(1, Math.ceil(picked.length / (restockMonths * preset.receipts))),
+        orders,
+        orderLines: ACTIVITY_ASSUMPTIONS.linesPerOrder,
+        ediLabels: orders,
+        businessParcels: tenth(orders - privateParcels),
+        privateParcels,
+      },
+    };
+  }
+
+  function renderActivityPresets() {
+    if (!dom.activityPreset) return;
+    const hasHistory = state.history.markets.length > 0 && activityMakers().length > 0;
+    dom.activityPreset.replaceChildren(
+      new Option('Own values', 'custom', false, state.warehouse.activityPreset === 'custom'),
+      ...Object.entries(ACTIVITY_PRESETS).map(([value, preset]) => new Option(preset.label, value, false, state.warehouse.activityPreset === value)),
+    );
+    dom.activityPreset.value = hasHistory ? state.warehouse.activityPreset : 'custom';
+    dom.activityPreset.disabled = !hasHistory;
+    const makers = hasHistory ? activityMakers() : [];
+    const chosen = makers.includes(state.warehouse.activityMaker) ? state.warehouse.activityMaker : makers[0] || '';
+    dom.activityMaker.replaceChildren(...makers.map((maker) => new Option(maker || 'Unknown', maker, false, maker === chosen)));
+    dom.activityMaker.value = chosen;
+    dom.activityMaker.disabled = !hasHistory;
+    dom.activityMaker.closest('label').classList.toggle('hidden', makers.length < 2);
+    if (!hasHistory) {
+      dom.activityPresetNote.textContent = 'Add a sales history on the Popularity tab to get presets based on how the parts sell.';
+      return;
+    }
+    const kind = dom.activityPreset.value;
+    const result = kind === 'custom' ? null : computeActivity(kind);
+    if (!result) {
+      dom.activityPresetNote.textContent = `Choose a preset to fill in the values below from the sales history of ${state.history.markets[activityMarket()].name}. You can change every value afterwards.`;
+      return;
+    }
+    dom.activityPresetNote.textContent = `Based on ${result.market}: ${result.parts} parts cover ${Math.round(result.share * 100)} % of the pieces sold, about ${formatNumber(result.monthlyUnits, 0)} pieces a month. Assumes ${ACTIVITY_ASSUMPTIONS.unitsPerOrderLine} pieces per order line, ${ACTIVITY_ASSUMPTIONS.linesPerOrder} lines per order, one parcel per order and ${Math.round(ACTIVITY_ASSUMPTIONS.privateShare * 100)} % private customers.`;
+  }
+
+  function applyActivityPreset(kind) {
+    if (kind === 'custom') {
+      state.warehouse.activityPreset = 'custom';
+      renderWarehouse();
+      return;
+    }
+    const result = computeActivity(kind);
+    if (!result) return;
+    Object.assign(state.warehouse, result.values, { activityPreset: kind, activityMaker: result.maker });
+    syncControlsFromState();
+    markProjectDirty();
+    refreshViews();
+    showToast(`Monthly activity set from the sales history of ${result.market}. You can change every value.`);
+  }
+
+  function bindActivityPresets() {
+    dom.activityPreset.addEventListener('change', () => applyActivityPreset(dom.activityPreset.value));
+    dom.activityMaker.addEventListener('change', () => {
+      state.warehouse.activityMaker = dom.activityMaker.value;
+      if (state.warehouse.activityPreset !== 'custom') applyActivityPreset(state.warehouse.activityPreset);
+      else renderWarehouse();
+    });
+  }
+
+  /* -- Currency rates with the global add-on: today's rate, and under it the add-on -- */
+
+  function renderFxPanel() {
+    const output = state.config.outputCurrency;
+    dom.fxOutput.textContent = output;
+    FX_ADDON_CURRENCIES.forEach((code) => {
+      const row = document.querySelector(`[data-fx-row="${code}"]`);
+      if (!row) return;
+      row.classList.toggle('hidden', code === output);
+      const live = fxToOutput(code);
+      const liveInput = row.querySelector('[data-fx-live]');
+      liveInput.value = live === null ? '' : formatNumber(live, 4);
+      liveInput.placeholder = live === null ? '…' : '';
+      const addon = row.querySelector('[data-fx-addon]');
+      if (document.activeElement !== addon) addon.value = String(state.fxAddons[code] ?? 0);
+      updateFxUsed(code);
+    });
+  }
+
+  function updateFxUsed(code) {
+    const row = document.querySelector(`[data-fx-row="${code}"]`);
+    if (!row) return;
+    const live = fxToOutput(code);
+    const typed = readNumberInput(row.querySelector('[data-fx-addon]'));
+    const addon = typed === undefined ? state.fxAddons[code] || 0 : Math.max(0, typed);
+    row.querySelector('[data-fx-used]').textContent = live === null ? '—' : formatNumber(live + addon, 4);
+  }
+
+  function bindFxPanel() {
+    document.addEventListener('input', (event) => {
+      const input = event.target.closest?.('[data-fx-addon]');
+      if (input) updateFxUsed(input.closest('[data-fx-row]').dataset.fxRow);
+    });
+    document.addEventListener('change', (event) => {
+      const input = event.target.closest?.('[data-fx-addon]');
+      if (!input) return;
+      const code = input.closest('[data-fx-row]').dataset.fxRow;
+      const value = readNumberInput(input);
+      if (value === undefined) {
+        input.value = String(state.fxAddons[code] ?? 0);
+        return;
+      }
+      const next = Math.max(0, value);
+      pushHistory(`${code} currency add-on`, () => {
+        state.fxAddons[code] = next;
+        saveSettingsSoon();
+        rebuildConsolidation();
+      });
+    });
   }
 
   /* ---------- Sales history & popularity ---------- */
@@ -2490,7 +2689,7 @@
     const purchase = sum(common, 'discountedTotal');
     const selling = sum(common, 'sellingTotal');
     dom.commonSummary.replaceChildren(
-      summaryCard('Common parts', `${common.length} of ${all.length}`),
+      summaryCard('Common parts', `${common.length} / ${all.length}`),
       summaryCard('Share of the pieces', formatPercent(share(sum(common, 'maxQuantity'), sum(all, 'maxQuantity')))),
       summaryCard(`Purchase value (${output})`, formatNumber(purchase, 2)),
       summaryCard(`Sales value (${output})`, formatNumber(sum(common, 'lineTotal'), 2)),
@@ -2553,7 +2752,7 @@
     if (foreign) {
       steps.push({
         label: 'Exchange rate',
-        detail: item.fxMargin > 0 ? `${n(item.fxLive, 4)} live rate + ${n(item.fxMargin)} buffer` : `${n(item.fxLive, 4)} live rate`,
+        detail: item.fxMargin > 0 ? `${n(item.fxLive, 4)} live rate + ${n(item.fxMargin)} add-on` : `${n(item.fxLive, 4)} live rate`,
         value: `1 ${item.currency} = ${n(item.fx, 4)} ${output}`,
       });
     }
@@ -2780,7 +2979,7 @@
     XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(kitB), 'Kit B');
     const bytes = XLSX.write(book, { type: 'array', bookType: 'xlsx' });
     const file = new File([bytes], 'Example parts list.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-    const kit = (sheet) => ({ ...newKitSettings(sheet), manufacturer: 'Example supplier', originCountry: '276', defaultCurrency: 'EUR', shippingMode: 'percent', shippingAmount: 3, fxMargin: 0.4 });
+    const kit = (sheet) => ({ ...newKitSettings(sheet), manufacturer: 'Example supplier', originCountry: '276', defaultCurrency: 'EUR', shippingMode: 'percent', shippingAmount: 3 });
     await importWorkbook(file, {
       kitSettings: { 'Kit A': kit('Kit A'), 'Kit B': kit('Kit B') },
       makerSettings: { 'Example supplier': { ...MAKER_DEFAULTS, location: 'Frankfurt', shipmentMode: 'own', shipmentCurrency: state.config.outputCurrency, clearanceCurrency: state.config.outputCurrency } },
@@ -2791,7 +2990,7 @@
   /* ---------- Manufacturers: one route each, one warehouse for all ---------- */
 
   // Kit fields a manufacturer owns: changing one on the manufacturer changes it on every kit of that manufacturer.
-  const MAKER_KIT_FIELDS = new Set(['originCountry', 'defaultCurrency', 'discountRate', 'dutyRate', 'fxMargin', 'shippingMode', 'shippingAmount', 'shippingCurrency']);
+  const MAKER_KIT_FIELDS = new Set(['originCountry', 'defaultCurrency', 'discountRate', 'dutyRate', 'shippingMode', 'shippingAmount', 'shippingCurrency']);
 
   // Reads one kit field from an input; null when the input holds nothing usable yet.
   function readKitField(field, input, fallbackName = '') {
@@ -2851,7 +3050,7 @@
     const live = fxToOutput(currency);
     if (live === null) return `${currency} → ${output}: the live rate has not loaded yet.`;
     const margin = kit ? kitFxMargin(kit) : 0;
-    return `${currency} → ${output}: ${formatNumber(live, 4)} live rate + ${formatNumber(margin, 2)} buffer = ${formatNumber(live + margin, 4)}`;
+    return `${currency} → ${output}: ${formatNumber(live, 4)} live rate + ${formatNumber(margin, 2)} add-on = ${formatNumber(live + margin, 4)}`;
   }
 
   // One labelled input bound to a manufacturer's setting; the same builder serves the sidebar and the route view.
@@ -2938,7 +3137,6 @@
       makerControl(name, 'defaultCurrency', { kind: 'currency', allowDefault: true, caption: 'Price currency' }),
       makerControl(name, 'discountRate', { kind: 'number', caption: 'Discount', suffix: '%', scale: 100, max: 100, step: '0.1' }),
       makerControl(name, 'dutyRate', { kind: 'number', caption: 'Customs duty', suffix: '%', scale: 100, max: 100, step: '0.1' }),
-      makerControl(name, 'fxMargin', { kind: 'number', caption: 'Rate buffer (added to the live rate)', step: '0.01', className: 'maker-field span-2' }),
       rate,
       ...makerFreightControls(name),
       makerControl(name, 'shipmentMode', { kind: 'select', caption: 'Consolidated shipment', options: MAKER_SHIPMENT_OPTIONS, className: 'maker-field span-2' }),
@@ -3289,7 +3487,6 @@
       miniField('Location', place),
       countryField,
       miniField('Discount', makerCell(name, 'discountRate', { kind: 'number', caption: 'Discount', suffix: '%', scale: 100, max: 100, step: '0.1' })),
-      miniField('Rate buffer', makerCell(name, 'fxMargin', { kind: 'number', caption: 'Rate buffer', step: '0.01' })),
       miniField('Freight add-on', makerCell(name, 'shippingMode', { kind: 'select', caption: 'Freight add-on', options: KIT_MODE_OPTIONS() })),
       miniField('Amount', [freightAmount, freightUnit]),
     );
@@ -3428,6 +3625,7 @@
       version: 3,
       language: state.language,
       partsMode: state.partsMode,
+      fxAddons: { ...state.fxAddons },
       config: {
         discount: state.config.discount,
         multiplier: state.config.multiplier,
@@ -3517,6 +3715,19 @@
       };
     });
     state.partsMode = settings.partsMode === 'minimal' ? 'minimal' : 'full';
+    // The currency add-on is global. Older projects kept a rate buffer per kit: take the largest one used for each currency.
+    state.fxAddons = { ...FX_ADDON_DEFAULTS };
+    if (settings.fxAddons && typeof settings.fxAddons === 'object') {
+      FX_ADDON_CURRENCIES.forEach((code) => { if (code in settings.fxAddons) state.fxAddons[code] = finiteOr(settings.fxAddons[code], FX_ADDON_DEFAULTS[code], 0); });
+    } else {
+      const largest = {};
+      Object.values(state.kits).forEach((kit) => {
+        const code = kit.defaultCurrency || state.config.sourceCurrency;
+        if (Number.isFinite(kit.fxMargin) && kit.fxMargin > 0) largest[code] = Math.max(largest[code] || 0, kit.fxMargin);
+      });
+      FX_ADDON_CURRENCIES.forEach((code) => { if (largest[code] !== undefined) state.fxAddons[code] = largest[code]; });
+    }
+    unifyMakerRates();
     state.makers = {};
     Object.entries(settings.makers || {}).forEach(([name, maker]) => {
       if (!maker || typeof maker !== 'object') return;
@@ -3594,6 +3805,7 @@
     state.warehouse.palletType = state.warehouse.palletType === 'sea' ? 'sea' : 'eu';
     state.warehouse.country = DESTINATIONS[state.warehouse.country] ? state.warehouse.country : WAREHOUSE_DEFAULTS.country;
     state.warehouse.palletHeight = state.warehouse.palletHeight === '220' ? '220' : '120';
+    normalizeStorageShares(state.warehouse);
     state.warehouse.binsPerShelf = clamp(Math.round(state.warehouse.binsPerShelf) || 1, 1, 12);
     state.warehouse.shelvesPerRack = clamp(Math.round(state.warehouse.shelvesPerRack) || 1, 1, 8);
     state.warehouse.binsHigh = clamp(Math.round(state.warehouse.binsHigh) || 1, 1, 10);
@@ -3670,6 +3882,7 @@
       supplier: { ...state.supplier },
       vat: { unlocked: state.vat.unlocked, byCountry: { ...state.vat.byCountry } },
       kits: JSON.parse(JSON.stringify(state.kits)),
+      fxAddons: { ...state.fxAddons },
       makers: JSON.parse(JSON.stringify(state.makers)),
       groups: JSON.parse(JSON.stringify(state.groups)),
       items: JSON.parse(JSON.stringify(state.items)),
@@ -3689,6 +3902,7 @@
     state.supplier = { ...snapshot.supplier };
     state.vat = { unlocked: snapshot.vat.unlocked, byCountry: { ...snapshot.vat.byCountry } };
     state.kits = JSON.parse(JSON.stringify(snapshot.kits));
+    state.fxAddons = { ...FX_ADDON_DEFAULTS, ...(snapshot.fxAddons || {}) };
     state.makers = JSON.parse(JSON.stringify(snapshot.makers || {}));
     state.groups = JSON.parse(JSON.stringify(snapshot.groups));
     state.items = JSON.parse(JSON.stringify(snapshot.items));
@@ -4132,6 +4346,8 @@
     dom.warehouseDataNote.textContent = `${model.distinctParts} part numbers · ${formatNumber(model.inventoryUnits, 2)} units from workbook quantities. Storage choices and activity values marked “Assumed” are planning inputs.${quoteScope}`;
     dom.warehousePalletShare.textContent = `${model.pallets} planned pallet${model.pallets === 1 ? '' : 's'}`;
     dom.whUnitsShelf.value = String(model.unitsPerShelf);
+    applyWarehouseVisibility();
+    renderActivityPresets();
     dom.whPlannedPallets.disabled = !state.warehouse.palletEnabled;
     dom.whPalletType.disabled = !state.warehouse.palletEnabled;
     dom.whPalletHeight.disabled = !state.warehouse.palletEnabled;
@@ -4170,7 +4386,12 @@
     dom.warehouseMonthlyTotal.textContent = formatMoney(model.monthlyTotal, model.outputCurrency);
 
     const rows = document.createDocumentFragment();
-    model.costs.forEach((item) => {
+    const costShown = (item) => !(
+      (item.label === 'Shelf storage' && !model.shelfEnabled)
+      || (item.label === 'Drawer storage' && !model.drawerEnabled)
+      || (/pallet storage$/.test(item.label) && !model.palletEnabled)
+    );
+    model.costs.filter(costShown).forEach((item) => {
       const row = document.createElement('tr');
       [item.label, item.calculation, formatNok(item.value), formatMoney(item.converted, model.outputCurrency)].forEach((value) => {
         const cell = document.createElement('td');
@@ -4784,7 +5005,7 @@
   }
 
   // The only multi-kit price list supported so far is one supplier's spare-part catalogue; the defaults below are its starting values.
-  const CATALOGUE_DEFAULTS = Object.freeze({ manufacturer: 'Häny', originCountry: '100', fxMargin: 0.4, freightPercent: 3 });
+  const CATALOGUE_DEFAULTS = Object.freeze({ manufacturer: 'Häny', originCountry: '100', freightPercent: 3 });
 
   // Sheets that hold several kits one after another (see Core.parseKitCatalogue).
   function catalogueSheetsOf(workbook) {
@@ -4907,9 +5128,7 @@
                 // Net prices are used as given, with no further discount.
                 discountRate: 0,
                 defaultCurrency: CURRENCIES.includes(catalogue.currency) ? catalogue.currency : null,
-                // Starting points that can be changed per manufacturer: a buffer on the exchange rate and a freight
-                // add-on as a percentage of each item's value.
-                fxMargin: CATALOGUE_DEFAULTS.fxMargin,
+                // A freight add-on as a percentage of each item's value; it can be changed per manufacturer.
                 shippingMode: 'percent',
                 shippingAmount: CATALOGUE_DEFAULTS.freightPercent,
               };
@@ -5004,6 +5223,7 @@
       state.selectedCell = null;
       // A new project starts without sales history; a saved project brings its own back with its settings.
       state.history = defaultHistory();
+      state.fxAddons = { ...FX_ADDON_DEFAULTS };
       state.partsMode = 'full';
       state.minimalView = { rig: null, onlyDifferences: true, search: '' };
       state.popularity = { mode: 'parts', search: '', filter: 'all', sort: null, open: new Set() };
@@ -5164,6 +5384,7 @@
       assignNumber(state.warehouse, 'unitsPerBin', 'B12', 1);
       assignNumber(state.warehouse, 'unitsPerDrawer', 'B14', 1);
       assignNumber(state.warehouse, 'unitsPerPallet', 'B15', 1);
+      normalizeStorageShares(state.warehouse);
       state.warehouse.unitsPerShelf = shelfUnitCapacity(state.warehouse);
       state.warehouse.palletType = String(sheet.B16?.v ?? '').toUpperCase() === 'SEA' ? 'sea' : 'eu';
       state.warehouse.palletHeight = String(sheet.B17?.v ?? '') === '220' ? '220' : '120';
@@ -5948,6 +6169,7 @@
     renderSaveState();
     renderSetupGuide();
     renderKitBars();
+    renderFxPanel();
     renderPartsModeControls();
     renderMakers();
     renderFreightSummary();
@@ -6129,7 +6351,7 @@
     salesPerYear: 'How many pieces you expect to sell in a year.',
     currency: 'The currency the supplier uses.',
     unitPrice: 'The supplier\'s price for one piece, in the supplier\'s currency.',
-    fx: 'The exchange rate used to change the supplier\'s currency into yours, including the safety buffer.',
+    fx: 'The exchange rate used to change the supplier\'s currency into yours, including the currency add-on.',
     convertedUnit: 'The price of one piece in your currency, before any discount.',
     discount: 'The discount you get from the supplier.',
     discountedTotal: 'What you pay the supplier for all the pieces, after the discount.',
@@ -8556,8 +8778,7 @@
       .flatMap((name) => [kitSettings(name).shippingCurrency, kitCurrency(kitSettings(name))]);
     const requestedPairs = uniqueBy([
       ...sources.map((source) => ({ from: source, to: target })),
-      { from: 'USD', to: target },
-      { from: 'NOK', to: target },
+      ...FX_ADDON_CURRENCIES.map((currency) => ({ from: currency, to: target })),
       ...kitCurrencies.map((currency) => ({ from: currency, to: target })),
       { from: state.freight.consolidatedCurrency, to: target },
       { from: state.freight.clearanceCurrency, to: target },
@@ -9769,7 +9990,7 @@
         [`${sheetName} · source currency`, kitCurrency(kit), 'Kit profile'],
         [`${sheetName} · discount`, kitDiscount(kit), 'Kit profile'],
         [`${sheetName} · customs duty`, Number.isFinite(kit.dutyRate) ? kit.dutyRate : state.freight.dutyRate, 'Kit profile'],
-        [`${sheetName} · rate buffer`, kitFxMargin(kit), 'Kit profile'],
+        [`${sheetName} · currency add-on`, kitFxMargin(kit), 'Currency'],
         [`${sheetName} · freight`, kit.shippingMode === 'percent' ? `${kit.shippingAmount} % of item value` : `${kit.shippingAmount} ${kit.shippingCurrency} · ${kit.shippingMode}`, 'Kit profile'],
       ]),
       [],

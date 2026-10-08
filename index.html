@@ -140,6 +140,34 @@
             </div>
             <button id="refresh-rates" class="button full" type="button">Refresh currency rates</button>
             <p id="rate-status" class="fine-print">Rates are loaded after import.</p>
+            <div id="fx-panel" class="fx-panel" role="group" aria-labelledby="fx-title">
+              <p id="fx-title" class="fx-title">Exchange rates to <span id="fx-output" translate="no">SEK</span></p>
+              <div class="fx-row" data-fx-row="USD">
+                <strong class="fx-code" translate="no">USD</strong>
+                <label>Today's rate <input type="text" data-fx-live readonly tabindex="-1" aria-label="Today's rate for USD"></label>
+                <label>Currency add-on <input type="number" min="0" step="0.01" inputmode="decimal" data-fx-addon aria-label="Currency add-on for USD"></label>
+                <span class="fx-used">Rate used <strong data-fx-used>—</strong></span>
+              </div>
+              <div class="fx-row" data-fx-row="EUR">
+                <strong class="fx-code" translate="no">EUR</strong>
+                <label>Today's rate <input type="text" data-fx-live readonly tabindex="-1" aria-label="Today's rate for EUR"></label>
+                <label>Currency add-on <input type="number" min="0" step="0.01" inputmode="decimal" data-fx-addon aria-label="Currency add-on for EUR"></label>
+                <span class="fx-used">Rate used <strong data-fx-used>—</strong></span>
+              </div>
+              <div class="fx-row" data-fx-row="NOK">
+                <strong class="fx-code" translate="no">NOK</strong>
+                <label>Today's rate <input type="text" data-fx-live readonly tabindex="-1" aria-label="Today's rate for NOK"></label>
+                <label>Currency add-on <input type="number" min="0" step="0.01" inputmode="decimal" data-fx-addon aria-label="Currency add-on for NOK"></label>
+                <span class="fx-used">Rate used <strong data-fx-used>—</strong></span>
+              </div>
+              <div class="fx-row" data-fx-row="DKK">
+                <strong class="fx-code" translate="no">DKK</strong>
+                <label>Today's rate <input type="text" data-fx-live readonly tabindex="-1" aria-label="Today's rate for DKK"></label>
+                <label>Currency add-on <input type="number" min="0" step="0.01" inputmode="decimal" data-fx-addon aria-label="Currency add-on for DKK"></label>
+                <span class="fx-used">Rate used <strong data-fx-used>—</strong></span>
+              </div>
+              <p class="fine-print">The rate used is today's rate plus the currency add-on, an amount in the output currency. The same add-on applies to every manufacturer that is paid in that currency.</p>
+            </div>
             <button id="reset-settings" class="button small ghost full" type="button">Reset kit, freight &amp; group settings</button>
           </section>
 
@@ -150,7 +178,7 @@
                 <h2>Manufacturers</h2>
               </div>
             </div>
-            <p class="panel-copy">Each manufacturer has its own route: country, currency, discount, exchange-rate buffer, freight and shipment. Change one without affecting the others. Only the warehouse is shared.</p>
+            <p class="panel-copy">Each manufacturer has its own route: country, currency, discount, customs duty, freight and shipment. Change one without affecting the others. Only the warehouse and the currency add-ons are shared.</p>
             <div id="maker-list" class="maker-list"></div>
           </section>
 
@@ -592,40 +620,45 @@
               <label class="storage-type-card"><input id="wh-drawer-enabled" type="checkbox" data-bind="warehouse.drawerEnabled"><span><strong>Drawer storage</strong><small>Uses the drawer capacity assumption</small></span></label>
               <label class="storage-type-card"><input id="wh-pallet-enabled" type="checkbox" data-bind="warehouse.palletEnabled"><span><strong>Pallet storage</strong><small>Enter the exact number of pallet positions</small></span></label>
             </div>
-            <label class="planned-pallets-field"><span>Planned pallet positions <span class="value-source assumed">Assumed</span></span><input id="wh-planned-pallets" type="number" min="0" step="1" value="0" data-bind="warehouse.plannedPallets"></label>
+            <label class="planned-pallets-field" data-show-when="pallet"><span>Planned pallet positions <span class="value-source assumed">Assumed</span></span><input id="wh-planned-pallets" type="number" min="0" step="1" value="0" data-bind="warehouse.plannedPallets"></label>
             <p id="warehouse-share-warning" class="warehouse-warning" role="alert"></p>
 
             <details class="warehouse-assumption-details">
               <summary>Capacity and fit assumptions <span class="value-source assumed">Assumed</span></summary>
               <p>Planning estimates—not values from the workbook or the 3PL quote.</p>
               <div class="warehouse-fields two-column-fields">
-                <label>Shelf share when drawers are used <span class="input-suffix"><input id="wh-shelf-share" type="number" min="0" max="100" step="1" value="55"><span>%</span></span></label>
-                <label>Drawer share when shelves are used <span class="input-suffix"><input id="wh-drawer-share" type="number" min="0" max="100" step="1" value="25"><span>%</span></span></label>
-                <label>Bins per shelf <input id="wh-bins-per-shelf" type="number" min="1" max="12" step="1" value="4"></label>
-                <label>Shelf levels per rack <input id="wh-shelves-per-rack" type="number" min="1" max="8" step="1" value="4"></label>
-                <label>Units per bin <input id="wh-units-per-bin" type="number" min="1" step="1" value="5"></label>
-                <label class="bin-rule"><span class="field-caption"><input id="wh-one-per-bin" type="checkbox" data-bind="warehouse.onePerBin"> One article per bin <span class="info-tip" tabindex="0" role="img" aria-label="Information: Off: several articles can share a bin. On: every article gets its own bin or bins, so a part-filled bin is not shared with another article." data-tip="Off: several articles can share a bin. On: every article gets its own bin or bins, so a part-filled bin is not shared with another article.">i</span></span></label>
-                <label>Bins stacked high (advanced) <input id="wh-bins-high" type="number" min="1" max="10" step="1" value="1"></label>
-                <label>Bins deep (advanced) <input id="wh-bins-deep" type="number" min="1" max="10" step="1" value="1"></label>
-                <label>Units per shelf <input id="wh-units-shelf" type="number" value="20" readonly></label>
-                <label>Units per drawer <input id="wh-units-drawer" type="number" min="1" step="1" value="8"></label>
-                <label>Units per pallet <input id="wh-units-pallet" type="number" min="1" step="1" value="60"></label>
-                <label>Pallet type <select id="wh-pallet-type"><option value="eu">EU pallet</option><option value="sea">Sea pallet</option></select></label>
-                <label>Pallet height <select id="wh-pallet-height"><option value="120">Up to 120 cm</option><option value="220">Up to 220 cm</option></select></label>
+                <label data-show-when="shelf+drawer">Share placed on shelves <span class="input-suffix"><input id="wh-shelf-share" type="number" min="0" max="100" step="1" value="70"><span>%</span></span></label>
+                <label data-show-when="shelf+drawer">Share placed in drawers (the rest) <span class="input-suffix"><input id="wh-drawer-share" type="number" min="0" max="100" step="1" value="30" readonly tabindex="-1"><span>%</span></span></label>
+                <label data-show-when="shelf">Bins per shelf <input id="wh-bins-per-shelf" type="number" min="1" max="12" step="1" value="4"></label>
+                <label data-show-when="shelf">Shelf levels per rack <input id="wh-shelves-per-rack" type="number" min="1" max="8" step="1" value="4"></label>
+                <label data-show-when="shelf">Units per bin <input id="wh-units-per-bin" type="number" min="1" step="1" value="5"></label>
+                <label data-show-when="shelf" class="bin-rule"><span class="field-caption"><input id="wh-one-per-bin" type="checkbox" data-bind="warehouse.onePerBin"> One article per bin <span class="info-tip" tabindex="0" role="img" aria-label="Information: Off: several articles can share a bin. On: every article gets its own bin or bins, so a part-filled bin is not shared with another article." data-tip="Off: several articles can share a bin. On: every article gets its own bin or bins, so a part-filled bin is not shared with another article.">i</span></span></label>
+                <label data-show-when="shelf">Bins stacked high (advanced) <input id="wh-bins-high" type="number" min="1" max="10" step="1" value="1"></label>
+                <label data-show-when="shelf">Bins deep (advanced) <input id="wh-bins-deep" type="number" min="1" max="10" step="1" value="1"></label>
+                <label data-show-when="shelf">Units per shelf <input id="wh-units-shelf" type="number" value="20" readonly></label>
+                <label data-show-when="drawer">Units per drawer <input id="wh-units-drawer" type="number" min="1" step="1" value="8"></label>
+                <label data-show-when="pallet">Units per pallet <input id="wh-units-pallet" type="number" min="1" step="1" value="60"></label>
+                <label data-show-when="pallet">Pallet type <select id="wh-pallet-type"><option value="eu">EU pallet</option><option value="sea">Sea pallet</option></select></label>
+                <label data-show-when="pallet">Pallet height <select id="wh-pallet-height"><option value="120">Up to 120 cm</option><option value="220">Up to 220 cm</option></select></label>
               </div>
             </details>
 
             <details class="warehouse-assumption-details">
               <summary>Monthly activity assumptions <span class="value-source assumed">Assumed</span></summary>
-              <p>Replace these examples with expected monthly receipts, orders and parcels.</p>
+              <p>Replace these examples with expected monthly receipts, orders and parcels, or start from a preset based on how the parts sell.</p>
+              <div class="activity-presets">
+                <label>Preset from the sales history <select id="activity-preset" aria-label="Preset for the monthly activity"></select></label>
+                <label>Based on the parts of <select id="activity-maker" aria-label="Manufacturer the preset is based on"></select></label>
+                <p id="activity-preset-note" class="fine-print" aria-live="polite"></p>
+              </div>
               <div class="warehouse-fields two-column-fields">
-                <label><span class="field-caption">Receipts / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Number of inbound deliveries received by the warehouse each month." data-tip="Number of inbound deliveries received by the warehouse each month.">i</span></span><input id="wh-receipts" type="number" min="0" step="1" value="2"></label>
+                <label><span class="field-caption">Receipts / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Number of inbound deliveries received by the warehouse each month." data-tip="Number of inbound deliveries received by the warehouse each month.">i</span></span><input id="wh-receipts" type="number" min="0" step="0.1" value="2"></label>
                 <label><span class="field-caption">Lines / receipt <span class="info-tip" tabindex="0" role="img" aria-label="Information: Average number of distinct item lines checked in for each receipt." data-tip="Average number of distinct item lines checked in for each receipt.">i</span></span><input id="wh-receipt-lines" type="number" min="0" step="1" value="8"></label>
-                <label><span class="field-caption">Orders / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Number of outbound orders the warehouse prepares each month." data-tip="Number of outbound orders the warehouse prepares each month.">i</span></span><input id="wh-orders" type="number" min="0" step="1" value="10"></label>
+                <label><span class="field-caption">Orders / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Number of outbound orders the warehouse prepares each month." data-tip="Number of outbound orders the warehouse prepares each month.">i</span></span><input id="wh-orders" type="number" min="0" step="0.1" value="10"></label>
                 <label><span class="field-caption">Lines / order <span class="info-tip" tabindex="0" role="img" aria-label="Information: Average number of distinct item lines picked for each outbound order." data-tip="Average number of distinct item lines picked for each outbound order.">i</span></span><input id="wh-order-lines" type="number" min="0" step="1" value="5"></label>
-                <label><span class="field-caption">EDI labels / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Number of chargeable electronic shipping or logistics labels produced each month." data-tip="Number of chargeable electronic shipping or logistics labels produced each month.">i</span></span><input id="wh-edi-labels" type="number" min="0" step="1" value="10"></label>
-                <label><span class="field-caption">Business parcels / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Business deliveries up to 35 kg charged at the quoted parcel rate." data-tip="Business deliveries up to 35 kg charged at the quoted parcel rate.">i</span></span><input id="wh-business-parcels" type="number" min="0" step="1" value="8"></label>
-                <label><span class="field-caption">Private parcels / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Consumer deliveries charged at the parcel rate plus the private-recipient surcharge." data-tip="Consumer deliveries charged at the parcel rate plus the private-recipient surcharge.">i</span></span><input id="wh-private-parcels" type="number" min="0" step="1" value="2"></label>
+                <label><span class="field-caption">EDI labels / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Number of chargeable electronic shipping or logistics labels produced each month." data-tip="Number of chargeable electronic shipping or logistics labels produced each month.">i</span></span><input id="wh-edi-labels" type="number" min="0" step="0.1" value="10"></label>
+                <label><span class="field-caption">Business parcels / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Business deliveries up to 35 kg charged at the quoted parcel rate." data-tip="Business deliveries up to 35 kg charged at the quoted parcel rate.">i</span></span><input id="wh-business-parcels" type="number" min="0" step="0.1" value="8"></label>
+                <label><span class="field-caption">Private parcels / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Consumer deliveries charged at the parcel rate plus the private-recipient surcharge." data-tip="Consumer deliveries charged at the parcel rate plus the private-recipient surcharge.">i</span></span><input id="wh-private-parcels" type="number" min="0" step="0.1" value="2"></label>
                 <label><span class="field-caption">Packaging / month <span class="info-tip" tabindex="0" role="img" aria-label="Information: Estimated monthly packaging material cost, entered in NOK." data-tip="Estimated monthly packaging material cost, entered in NOK.">i</span></span><span class="input-suffix"><input id="wh-packaging" type="number" min="0" step="1" value="0"><span>NOK</span></span></label>
               </div>
               <label class="warehouse-check"><input id="wh-wms" type="checkbox" data-bind="warehouse.includeWms"><span class="field-caption">Include WMS web license <span class="info-tip" tabindex="0" role="img" aria-label="Information: Adds the optional monthly WMS license. It is off by default." data-tip="Adds the optional monthly WMS license. It is off by default.">i</span></span></label>

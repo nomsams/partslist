@@ -1518,3 +1518,16 @@ input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; min-hei
 .cmp-table tr.cmp-total td { font-weight: 800; background: #eef4f0; }
 .common-summary { margin-top: 0; }
 #common-mode[aria-pressed="true"] { color: #fff; background: var(--green-700); border-color: var(--green-700); }
+
+/* ---------- Currency rates with the global add-on ---------- */
+.fx-panel { display: grid; gap: 8px; margin: 10px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfb; }
+.fx-title { margin: 0; font-size: 13px; font-weight: 800; }
+.fx-row { display: grid; grid-template-columns: 44px 1fr; gap: 4px 8px; align-items: end; padding-bottom: 8px; border-bottom: 1px dashed var(--line); }
+.fx-row:last-of-type { border-bottom: 0; padding-bottom: 0; }
+.fx-code { grid-row: span 2; align-self: center; font-size: 15px; }
+.fx-row label { display: grid; gap: 2px; color: var(--muted); font-size: 12px; font-weight: 700; }
+.fx-row input { min-height: 30px; font-variant-numeric: tabular-nums; }
+.fx-row input[readonly] { color: var(--ink); background: #eef2ef; }
+.fx-used { grid-column: 2; color: var(--muted); font-size: 12px; font-weight: 700; }
+.fx-used strong { color: var(--green-800); font-size: 14px; }
+.kit-by-maker { color: var(--muted); font-size: 12px; line-height: 1.4; }
