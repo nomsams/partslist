@@ -55,6 +55,15 @@ A browser-based workbook tool for consolidating parts lists from Excel files.
 - **Save project .xlsx** exports one re-importable workbook with the original source sheets, formula-driven `Consolidated`, `Profitability`, `Warehousing`, and `Assumptions` sheets, a readable `Project data` sheet, and a hidden machine-readable `PartsList settings` sheet. Re-importing restores column mappings, named variables, kit freight, freight and import costs, VAT, warehouse quote rates and assumptions, storage choices, sales groups, item overrides, removed kits, wire relationships, and layout state. Generated sheets remain outside parts consolidation and re-exporting keeps stable sheet names.
 - Keeps business data out of browser storage. Settings are restored from a re-imported consolidated workbook or a password-encrypted `.partslist` project. Legacy Caesar-14 project and warehouse entries are removed automatically.
 
+## Simple and advanced
+
+The first view is the easy one. The **Simple / Advanced** switch in the header (remembered like the language) decides how much is shown.
+
+- **Simple** (the default) shows the five views that carry the work (*Consolidated*, *Canvas*, *Popularity*, *Dashboard*, *Warehouse*), the header with Open, Undo and Save, and in the settings only the multiplier, the output currency, the warehouse country and the exchange rates. The list has a search, the common parts button and the customer price list; the dashboard shows the figures and the payback chart; the warehouse view shows the plan, the picture and the cost; the canvas hides its less common cards and tools under **More**.
+- **Advanced** adds everything else: the setup guide, *Add kits*, the manufacturers, freight and import settings, the sheet mapping, variables and the secure project in the settings; the kit bar, the column views and the columns menu on the list; the comparison of minimal and full lists, the wire view and the source sheets as tabs; VAT, sales groups and scenarios on the dashboard; the capacity and activity assumptions and the quote on the warehouse view; and the orders, receipts and quote fields in the canvas warehouse card.
+
+Switching to Simple while an advanced view is open returns to the consolidated list. Nothing is deleted or reset by the switch: hidden settings keep their values and still apply.
+
 ## Canvas
 
 The **Canvas** tab covers the whole window (with a *Full screen* button) and lays the price chain out from left to right on one large surface:

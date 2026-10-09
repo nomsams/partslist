@@ -314,6 +314,8 @@
     hiddenColumns: [...DEFAULT_HIDDEN_COLUMNS],
     columnPreset: 'simple',
     kitBarOpen: false,
+    // 'simple' shows only what is needed to get started; 'advanced' shows every setting and view.
+    level: 'simple',
     canvas: defaultCanvas(),
     outgoing: defaultOutgoing(),
     cvModel: null,
@@ -498,6 +500,7 @@
     consolidatedCount: el('consolidated-count'),
     consolidatedActions: el('consolidated-actions'),
     fxOutput: el('fx-output'),
+    levelSelect: el('level-select'),
     canvasView: el('canvas-view'),
     cvStage: el('cv-stage'),
     cvWorld: el('cv-world'),
@@ -626,6 +629,8 @@
   async function initialize() {
     purgeLegacyLocalBusinessData();
     loadUiPreferences();
+    bindLevel();
+    applyLevel();
     // Translate and render the panel state before any network wait so the page never flashes the wrong language.
     setLanguage(state.language, false);
     renderSidebarState();
@@ -2068,8 +2073,10 @@
       }
       frtBody.append(line);
     });
-    frtBody.append(cvField('Freight margin on all freight and import costs', 'margin', state.config.shippingMargin * 100, { suffix: '%', step: '0.1', max: '99', wide: true }));
-    frtBody.append(cvNode('p', 'cv-note', 'Customs duty, insurance and clearance fees (set per manufacturer) are added to the freight before the margin.'));
+    if (state.level === 'advanced') {
+      frtBody.append(cvField('Freight margin on all freight and import costs', 'margin', state.config.shippingMargin * 100, { suffix: '%', step: '0.1', max: '99', wide: true }));
+      frtBody.append(cvNode('p', 'cv-note', 'Customs duty, insurance and clearance fees (set per manufacturer) are added to the freight before the margin.'));
+    }
     frtBody.append(cvNode('p', 'cv-sum', `Freight and import costs incl. margin ${formatNumber(sum('freightWithMargin'), 0)} ${output}`));
     frt.append(frtBody);
     cards.frt = frt;
@@ -2109,18 +2116,20 @@
     if (state.warehouse.drawerEnabled) grid.append(cvField('Items per drawer', 'wh.unitsPerDrawer', state.warehouse.unitsPerDrawer, { min: '1' }));
     if (state.warehouse.palletEnabled) grid.append(cvField('Pallet positions', 'wh.plannedPallets', state.warehouse.plannedPallets), cvField('Items per pallet', 'wh.unitsPerPallet', state.warehouse.unitsPerPallet, { min: '1' }));
     const monthly = model.items.reduce((total, item) => total + (item.salesPerYear ?? 0), 0) / 12;
-    grid.append(
-      cvField('Items sold per month', 'soldPerMonth', monthly, { step: '1' }),
-      cvField('Orders per month', 'wh.orders', state.warehouse.orders, { step: '0.1' }),
-      cvField('Order lines per order', 'wh.orderLines', state.warehouse.orderLines),
-      cvField('Receipts per month', 'wh.receipts', state.warehouse.receipts, { step: '0.1' }),
-    );
+    grid.append(cvField('Items sold per month', 'soldPerMonth', monthly, { step: '1' }));
+    if (state.level === 'advanced') {
+      grid.append(
+        cvField('Orders per month', 'wh.orders', state.warehouse.orders, { step: '0.1' }),
+        cvField('Order lines per order', 'wh.orderLines', state.warehouse.orderLines),
+        cvField('Receipts per month', 'wh.receipts', state.warehouse.receipts, { step: '0.1' }),
+      );
+    }
     whBody.append(grid);
     if (state.warehouse.shelfEnabled) whBody.append(cvToggle('One article per bin', 'wh.onePerBin', state.warehouse.onePerBin));
     const quote = cvNode('div', 'cv-quote');
     quote.append(cvNode('small', '', 'Quote (NOK)'));
     quote.append(cvField('Shelf location / month', 'rate.shelf', state.warehouse.rates.shelf, { step: '0.01' }), cvField('Order base', 'rate.orderBase', state.warehouse.rates.orderBase, { step: '0.01' }), cvField('Receipt base', 'rate.receiptBase', state.warehouse.rates.receiptBase, { step: '0.01' }));
-    whBody.append(quote);
+    if (state.level === 'advanced') whBody.append(quote);
     const locations = whModel.shelfLocations + whModel.drawerLocations + whModel.pallets;
     whBody.append(cvNode('p', 'cv-sum', `${formatNumber(whModel.inventoryUnits, 0)} items · ${formatNumber(locations, 0)} locations · ${whModel.shelfEnabled ? `${formatNumber(Math.round(whModel.shelfBins), 0)} of ${formatNumber(whModel.totalBins, 0)} bins · ` : ''}${formatMoney(whModel.monthlyTotal, whModel.outputCurrency)} a month`));
     const shelvesButton = cvNode('button', 'button small cv-shelves-button', state.canvas.shelves ? 'Hide the shelves' : 'Show the shelves');
@@ -2681,6 +2690,7 @@
     });
     window.addEventListener('resize', () => { if (state.activeView === VIEW.canvas) cvDraw(); });
     dom.cvBack.addEventListener('click', () => showView(VIEW.consolidated));
+    dom.canvasView.querySelector('.cv-more-menu').addEventListener('click', (event) => { if (event.target.closest('button')) event.currentTarget.closest('details').open = false; });
     dom.cvZoomIn.addEventListener('click', () => { cvZoomAt(1.25); cvDraw(); });
     dom.cvZoomOut.addEventListener('click', () => { cvZoomAt(0.8); cvDraw(); });
     dom.cvFit.addEventListener('click', () => { cvFit(); cvDraw(); });
@@ -5210,6 +5220,33 @@
     dom.saveState.className = `save-state ${state.projectDirty ? 'dirty' : 'saved'}`;
   }
 
+  // ---------- Simple and advanced: the first view is easy, and everything else is one click away ----------
+
+  // Views that are only shown at the advanced level: the comparison of lists, the wire view and the source sheets.
+  function isAdvancedView(view) {
+    if (view === VIEW.minimal || view === VIEW.wire) return true;
+    return Boolean(state.workbook?.SheetNames.includes(view)) && !SPECIAL_VIEWS.has(view);
+  }
+
+  function applyLevel(options = {}) {
+    document.body.dataset.level = state.level;
+    document.querySelectorAll('[data-level]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.level === state.level)));
+    if (!state.workbook) return;
+    if (state.level === 'simple' && isAdvancedView(state.activeView)) showView(VIEW.consolidated);
+    else if (options.refresh) refreshViews();
+  }
+
+  function bindLevel() {
+    dom.levelSelect.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-level]');
+      if (!button || button.dataset.level === state.level) return;
+      state.level = button.dataset.level === 'advanced' ? 'advanced' : 'simple';
+      saveUiPreferences();
+      applyLevel({ refresh: true });
+      showToast(state.level === 'advanced' ? 'Advanced: every setting and view is shown.' : 'Simple: only what you need to get started.');
+    });
+  }
+
   function renderSidebarState() {
     const collapsed = state.sidebarCollapsed;
     const label = collapsed ? 'Show settings' : 'Hide settings';
@@ -5231,6 +5268,7 @@
     try {
       const stored = JSON.parse(localStorage.getItem(UI_PREFERENCES_KEY) || 'null');
       if (stored?.language === 'en' || stored?.language === 'sv') state.language = stored.language;
+      if (stored?.level === 'advanced') state.level = 'advanced';
       if (typeof stored?.sidebarCollapsed === 'boolean') state.sidebarCollapsed = stored.sidebarCollapsed;
       if (stored?.consolidatedSort && ['asc', 'desc'].includes(stored.consolidatedSort.direction) && typeof stored.consolidatedSort.key === 'string') {
         state.consolidatedSort = { key: stored.consolidatedSort.key, direction: stored.consolidatedSort.direction };
@@ -5248,6 +5286,7 @@
       // parts table is arranged. No workbook or pricing data is written here.
       localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify({
         language: state.language,
+        level: state.level,
         sidebarCollapsed: state.sidebarCollapsed,
         consolidatedSort: state.consolidatedSort,
         hiddenColumns: state.hiddenColumns,
@@ -10113,6 +10152,7 @@
     button.dataset.view = view;
     button.textContent = label;
     button.setAttribute('role', 'tab');
+    if (isAdvancedView(view)) button.classList.add('advanced-only');
     if (TAB_HELP[view]) button.title = TAB_HELP[view];
     button.setAttribute('aria-selected', String(state.activeView === view));
     button.tabIndex = state.activeView === view ? 0 : -1;
@@ -10124,7 +10164,7 @@
   function handleTabKeydown(event) {
     const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End'];
     if (!keys.includes(event.key)) return;
-    const tabs = [...dom.tabs.querySelectorAll('[role="tab"]')];
+    const tabs = [...dom.tabs.querySelectorAll('[role="tab"]')].filter((tab) => tab.offsetParent !== null);
     const current = tabs.indexOf(document.activeElement);
     if (current < 0) return;
     event.preventDefault();
@@ -10159,6 +10199,8 @@
   }
 
   function showView(view) {
+    // A view that belongs to the advanced level is not opened in the simple one.
+    if (state.level === 'simple' && isAdvancedView(view)) view = VIEW.consolidated;
     state.activeView = view;
     const isSheet = !SPECIAL_VIEWS.has(view);
     dom.welcome.classList.add('hidden');

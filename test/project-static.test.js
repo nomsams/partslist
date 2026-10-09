@@ -328,6 +328,33 @@ test('canvas: grouped compact tables, flowing wires in and out, editing, and one
   assert.match(css, /prefers-reduced-motion: reduce/);
 });
 
+test('simple first, advanced on request: one switch, the extras are tagged, and nothing needed to get started is hidden', () => {
+  assert.match(html, /id="level-select"[^>]*>[\s\S]*?data-level="simple"[\s\S]*?data-level="advanced"/);
+  const css = fs.readFileSync(path.join(root, 'styles.css'), 'utf8');
+  assert.match(css, /body\[data-level="simple"\] \.advanced-only \{ display: none !important; \}/);
+  assert.ok(app.includes("level: 'simple'") && app.includes('function applyLevel(') && app.includes('function isAdvancedView('));
+  // The choice is a harmless interface preference, remembered like the language.
+  const prefs = app.slice(app.indexOf('function saveUiPreferences('), app.indexOf('function purgeLegacyLocalBusinessData('));
+  assert.ok(prefs.includes('level: state.level'));
+  // These are advanced: everything below is a setting or a view that a first-time user does not need.
+  ['id="guide-toggle"', 'id="makers-panel"', 'id="freight-panel"', 'id="mapping-panel"', 'id="secure-panel"', 'class="kit-strip', 'id="column-presets"', 'id="column-menu"', 'warehouse-assumption-details', 'id="warehouse-rate-editor"'].forEach((marker) => {
+    const at = html.indexOf(marker);
+    assert.ok(at >= 0, marker);
+    assert.ok(/advanced-only/.test(html.slice(at - 80, at + 140)), `${marker} is advanced`);
+  });
+  // These stay: the essentials of the first view.
+  ['id="consolidated-search"', 'id="common-mode"', 'id="customer-export"', 'id="export-button"', 'id="workbook-file"'].forEach((marker) => {
+    const at = html.indexOf(marker);
+    assert.ok(at >= 0, marker);
+    assert.ok(!/advanced-only/.test(html.slice(at - 60, at + 60)), `${marker} is not advanced`);
+  });
+  // The advanced views are not opened at the simple level, and their tabs are tagged.
+  assert.ok(app.includes("if (state.level === 'simple' && isAdvancedView(view)) view = VIEW.consolidated;"));
+  assert.ok(app.includes("if (isAdvancedView(view)) button.classList.add('advanced-only');"));
+  // The canvas keeps the everyday tools in the bar and the rest under "More".
+  assert.match(html, /<details class="cv-more">[\s\S]*id="cv-edit"[\s\S]*id="cv-reset"[\s\S]*id="cv-fullscreen"/);
+});
+
 test('every manufacturer is its own route: own settings, exchange-rate buffer, percentage freight and an independent shipment', () => {
   assert.match(html, /id="makers-panel"/);
   assert.match(app, /function buildMakerCard\(/);

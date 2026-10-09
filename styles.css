@@ -1636,3 +1636,53 @@ body.canvas-open { overflow: hidden; }
 .workspace-field { display: grid; gap: 4px; margin: 8px 0; font-size: 13px; font-weight: 700; }
 .maker-setup-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 @media (prefers-reduced-motion: reduce) { .cv-pipe, .cv-wire-flow { animation: none; } }
+
+/* ---------- Simple and advanced ---------- */
+body[data-level="simple"] .advanced-only { display: none !important; }
+.cv-more { position: relative; }
+.cv-more > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; }
+.cv-more > summary::-webkit-details-marker { display: none; }
+.cv-more > summary::after { content: "▾"; margin-left: 6px; font-size: 12px; }
+.cv-more-menu { position: absolute; right: 0; top: calc(100% + 8px); z-index: 90; display: grid; gap: 6px; min-width: 200px; padding: 10px; border-radius: 14px; background: #fff; box-shadow: 0 12px 32px rgba(20, 40, 30, .28); }
+.cv-more-menu .button { justify-content: flex-start; width: 100%; color: var(--ink); }
+@media (max-width: 1150px) { .cv-legend { display: none; } }
+
+/* ---------- A calm design layer: more air, fewer lines, one clear action at a time ---------- */
+:root { --radius: 14px; --shadow: 0 1px 2px rgba(20, 40, 30, .06), 0 10px 28px rgba(20, 40, 30, .07); }
+body { font-size: 15px; background: #f4f7f5; }
+.brand p { display: none; }
+.app-header { padding-block: 10px; }
+.sidebar { background: #eef2ef; }
+.panel { padding: 18px 18px 20px; border: 0; border-radius: var(--radius); background: #fff; box-shadow: var(--shadow); }
+.panel + .panel, section.panel { margin-bottom: 14px; }
+.section-heading h2, .panel h2 { font-size: 17px; letter-spacing: -.01em; }
+.eyebrow { margin-bottom: 4px; color: var(--green-700); font-size: 12px; letter-spacing: .08em; }
+.main-panel { background: #f4f7f5; }
+.view-tabs { gap: 6px; padding: 12px 22px 8px; border-bottom: 0; background: transparent; }
+.view-tab { padding: 7px 15px; border: 0; border-radius: 999px; color: #4b5a51; font-size: 14px; font-weight: 700; }
+.view-tab:hover { background: #e3ebe5; }
+.view-tab.active { color: #fff; background: var(--green-700); }
+.content-view { padding: 10px 28px 36px; }
+.content-header h2 { font-size: 28px; letter-spacing: -.015em; }
+.content-subtitle { color: var(--muted); font-size: 14.5px; }
+.button { border-radius: 10px; }
+.button.small { min-height: 36px; padding: 6px 14px; }
+.button.primary { border-color: transparent; }
+input, select { border-radius: 10px; }
+.table-toolbar { gap: 12px; margin-bottom: 14px; }
+.summary-card { border: 0; border-radius: 12px; background: #fff; box-shadow: var(--shadow); }
+.summary-cards { gap: 12px; margin: 14px 0 18px; }
+.parts-table { background: #fff; }
+.table-shell { border: 0; border-radius: var(--radius); background: #fff; box-shadow: var(--shadow); }
+.pop-market, .fx-panel, .pop-stock, .pop-empty { border-color: transparent; box-shadow: var(--shadow); background: #fff; }
+
+/* ---------- Exchange rates on one line each ---------- */
+.fx-panel { gap: 6px; }
+.fx-head, .fx-row { display: grid; grid-template-columns: 40px minmax(0, 1fr) 76px minmax(0, 1fr); align-items: center; gap: 6px; }
+.fx-head { color: var(--muted); font-size: 12px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+.fx-row { padding: 0; border: 0; }
+.fx-row label { font-size: 0; }
+.fx-row input { width: 100%; min-height: 34px; font-size: 14px; }
+.fx-code { grid-row: auto; font-size: 14px; }
+.fx-used { grid-column: auto; font-size: 0; text-align: right; }
+.fx-used strong { font-size: 14px; }

@@ -36,6 +36,10 @@
     </div>
     <div class="header-actions">
       <span id="save-state" class="save-state" aria-live="polite">No workbook loaded</span>
+      <div id="level-select" class="segmented" role="group" aria-label="How much to show">
+        <button type="button" data-level="simple" aria-pressed="true" title="Only what you need to get started">Simple</button>
+        <button type="button" data-level="advanced" aria-pressed="false" title="Every setting and every view">Advanced</button>
+      </div>
       <div id="language-select" class="segmented" role="group" aria-label="Language / Språk">
         <button type="button" data-language="sv" aria-pressed="true" title="Svenska" translate="no">SV</button>
         <button type="button" data-language="en" aria-pressed="false" title="English" translate="no">EN</button>
@@ -44,10 +48,10 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7H15a5 5 0 0 1 0 10H8"/><path d="M11.5 3.5 8 7l3.5 3.5"/></svg>
         <span class="undo-label">Undo</span>
       </button>
-      <button id="guide-toggle" class="button header-button" type="button" aria-expanded="false" disabled>Setup guide</button>
+      <button id="guide-toggle" class="button header-button advanced-only" type="button" aria-expanded="false" disabled>Setup guide</button>
       <label class="button header-button" for="workbook-file" role="button" tabindex="0">Import workbook</label>
       <input id="workbook-file" type="file" accept=".xlsx,.xls,.xlsm,.xlsb,.ods,.csv">
-      <label id="add-kit-label" class="button header-button hidden" for="add-kit-file" role="button" tabindex="0">Add kits</label>
+      <label id="add-kit-label" class="button header-button advanced-only hidden" for="add-kit-file" role="button" tabindex="0">Add kits</label>
       <input id="add-kit-file" type="file" accept=".xlsx,.xls,.xlsm,.xlsb,.ods,.csv" multiple>
       <button id="export-button" class="button header-button" type="button" disabled title="Save source sheets, calculations, assumptions, variables and warehouse rates in one re-importable Excel file">Save project .xlsx</button>
     </div>
@@ -96,10 +100,10 @@
                 <p class="eyebrow">Workbook</p>
                 <h2 id="workbook-name" translate="no">Imported file</h2>
               </div>
-              <span id="sheet-count" class="badge">0 sheets</span>
+              <span id="sheet-count" class="badge advanced-only">0 sheets</span>
             </div>
             <div class="settings-grid">
-              <label>
+              <label class="advanced-only">
                 Discount
                 <span class="input-suffix"><input id="discount-input" type="number" value="30" min="0" max="100" step="0.1" data-bind="config.discount" data-scale="100"><span>%</span></span>
               </label>
@@ -107,11 +111,11 @@
                 Price multiplier
                 <span class="input-suffix"><input id="multiplier-input" type="number" value="2" min="0" step="0.01" data-bind="config.multiplier"><span>×</span></span>
               </label>
-              <label>
+              <label class="advanced-only">
                 Freight margin
                 <span class="input-suffix"><input id="shipping-margin-input" type="number" value="15" min="0" max="99.9" step="0.1" data-bind="config.shippingMargin" data-scale="100"><span>%</span></span>
               </label>
-              <div class="vat-setting">
+              <div class="vat-setting advanced-only">
                 <span class="field-caption">VAT rate <span class="info-tip" tabindex="0" role="img" aria-label="Information: VAT is off by default (0 %). Unlock to enter a rate; it is added to the price after margin for the sales countries that use VAT, and never counted as profit." data-tip="VAT is off by default (0 %). Unlock to enter a rate; it is added to the price after margin for the sales countries that use VAT, and never counted as profit.">i</span></span>
                 <span class="vat-field">
                   <span class="input-suffix"><input id="vat-input" type="number" value="0" min="0" max="100" step="0.1" placeholder="e.g. 25" data-bind="config.vatRate" data-scale="100" data-vat-field readonly aria-label="VAT rate"><span>%</span></span>
@@ -122,7 +126,7 @@
               </button>
                 </span>
               </div>
-              <label>
+              <label class="advanced-only">
                 Default source currency
                 <select id="source-currency"></select>
               </label>
@@ -142,6 +146,7 @@
             <p id="rate-status" class="fine-print">Rates are loaded after import.</p>
             <div id="fx-panel" class="fx-panel" role="group" aria-labelledby="fx-title">
               <p id="fx-title" class="fx-title">Exchange rates to <span id="fx-output" translate="no">SEK</span></p>
+              <div class="fx-head" aria-hidden="true"><span></span><span>Today</span><span>Add-on</span><span>Used</span></div>
               <div class="fx-row" data-fx-row="USD">
                 <strong class="fx-code" translate="no">USD</strong>
                 <label>Today's rate <input type="text" data-fx-live readonly tabindex="-1" aria-label="Today's rate for USD"></label>
@@ -166,12 +171,12 @@
                 <label>Currency add-on <input type="number" min="0" step="0.01" inputmode="decimal" data-fx-addon aria-label="Currency add-on for DKK"></label>
                 <span class="fx-used">Rate used <strong data-fx-used>—</strong></span>
               </div>
-              <p class="fine-print">The rate used is today's rate plus the currency add-on, an amount in the output currency. The same add-on applies to every manufacturer that is paid in that currency.</p>
+              <p class="fine-print advanced-only">The rate used is today's rate plus the currency add-on, an amount in the output currency. The same add-on applies to every manufacturer that is paid in that currency.</p>
             </div>
-            <button id="reset-settings" class="button small ghost full" type="button">Reset kit, freight &amp; group settings</button>
+            <button id="reset-settings" class="button small ghost full advanced-only" type="button">Reset kit, freight &amp; group settings</button>
           </section>
 
-          <section id="makers-panel" class="panel hidden">
+          <section id="makers-panel" class="advanced-only panel hidden">
             <div class="section-heading">
               <div>
                 <p class="eyebrow">Routes</p>
@@ -182,7 +187,7 @@
             <div id="maker-list" class="maker-list"></div>
           </section>
 
-          <section id="freight-panel" class="panel">
+          <section id="freight-panel" class="advanced-only panel">
             <div class="section-heading">
               <div>
                 <p class="eyebrow">Inbound logistics</p>
@@ -227,7 +232,7 @@
             </details>
           </section>
 
-          <section id="mapping-panel" class="panel">
+          <section id="mapping-panel" class="advanced-only panel">
             <div class="section-heading">
               <div>
                 <p class="eyebrow">Source mapping</p>
@@ -238,7 +243,7 @@
             <div id="mapping-list" class="mapping-list"></div>
           </section>
 
-          <section class="panel variables-panel">
+          <section class="advanced-only panel variables-panel">
             <div class="section-heading">
               <div>
                 <p class="eyebrow">Named values</p>
@@ -255,7 +260,7 @@
 
         </section>
 
-        <section id="secure-panel" class="panel secure-panel">
+        <section id="secure-panel" class="advanced-only panel secure-panel">
           <div class="section-heading">
             <div>
               <p class="eyebrow">Local access control</p>
@@ -287,7 +292,7 @@
     <section class="main-panel">
       <nav id="view-tabs" class="view-tabs hidden" role="tablist" aria-label="Workbook views"></nav>
 
-      <section id="setup-guide" class="setup-guide hidden" aria-labelledby="setup-guide-title">
+      <section id="setup-guide" class="advanced-only setup-guide hidden" aria-labelledby="setup-guide-title">
         <header class="setup-guide-head">
           <div>
             <p class="eyebrow">Guided setup</p>
@@ -337,7 +342,7 @@
             </div>
           <div class="legend"><span class="legend-swatch"></span>Common part</div>
         </div>
-        <div class="kit-strip">
+        <div class="kit-strip advanced-only">
           <div id="kit-bar" class="kit-bar" aria-label="Kits included in the consolidation"></div>
           <details id="kit-breakdown" class="kit-breakdown">
             <summary>Per-kit totals</summary>
@@ -351,7 +356,7 @@
           <input id="consolidated-search" class="search-input" type="search" placeholder="Search part, description or kit" aria-label="Search consolidated parts" autocomplete="off">
           <label>Show <select id="consolidated-filter" aria-label="Filter consolidated parts"></select></label>
           <button id="common-mode" class="button small" type="button" aria-pressed="false" title="Only the parts that are in more than one kit, with their prices and shares">Common parts list</button>
-          <div id="column-presets" class="preset-group" role="group" aria-label="Column view">
+          <div id="column-presets" class="preset-group advanced-only" role="group" aria-label="Column view">
             <button type="button" data-column-preset="simple" aria-pressed="true">Simple</button>
             <button type="button" data-column-preset="purchase" aria-pressed="false">Purchase</button>
             <button type="button" data-column-preset="sales" aria-pressed="false">Sales</button>
@@ -360,7 +365,7 @@
           </div>
           <span id="consolidated-count" class="toolbar-count"></span>
           <button id="customer-export" class="button small" type="button" title="A clean price list with prices only: no costs, margins or internal columns">Customer price list</button>
-          <details id="column-menu" class="column-menu">
+          <details id="column-menu" class="column-menu advanced-only">
             <summary class="button small ghost" title="Choose which columns to show">Columns</summary>
             <div class="column-menu-panel">
               <div class="column-menu-head">
@@ -453,12 +458,12 @@
               <button type="button" data-pop-mode="stock" aria-pressed="false" title="Suggested stock levels based on the sales history">Suggested stock</button>
             </div>
             <input id="popularity-search" class="search-input" type="search" placeholder="Search article, name or kit" aria-label="Search the popularity list" autocomplete="off">
-            <label id="popularity-filter-label">Show <select id="popularity-filter" aria-label="Filter the popularity list"></select></label>
+            <label id="popularity-filter-label" class="advanced-only">Show <select id="popularity-filter" aria-label="Filter the popularity list"></select></label>
             <span id="popularity-count" class="toolbar-count"></span>
           </div>
           <div id="popularity-stock" class="pop-stock hidden">
             <label>Months of sales to keep in stock <input id="stock-months" type="number" min="1" max="36" step="1" inputmode="numeric"></label>
-            <label>Chance of having the part in stock
+            <label class="advanced-only">Chance of having the part in stock
               <select id="stock-service">
                 <option value="0.9">90 %</option>
                 <option value="0.95">95 %</option>
@@ -466,8 +471,8 @@
               </select>
             </label>
             <label>Budget for the stock (optional) <input id="stock-budget" type="number" min="0" step="1000" inputmode="numeric" placeholder="No limit"></label>
-            <label class="pop-check"><input id="stock-complete" type="checkbox"> Keep popular kits complete</label>
-            <label class="pop-check" title="Off: several articles can share a bin. On: every article gets its own bin or bins. Set in the Warehouse tab too."><input id="stock-one-per-bin" type="checkbox" data-bind="warehouse.onePerBin"> One article per bin</label>
+            <label class="pop-check advanced-only"><input id="stock-complete" type="checkbox"> Keep popular kits complete</label>
+            <label class="pop-check advanced-only" title="Off: several articles can share a bin. On: every article gets its own bin or bins. Set in the Warehouse tab too."><input id="stock-one-per-bin" type="checkbox" data-bind="warehouse.onePerBin"> One article per bin</label>
             <button id="stock-apply" class="button small primary" type="button">Use these quantities in the project</button>
           </div>
           <p id="popularity-stock-summary" class="pop-stock-summary hidden" aria-live="polite"></p>
@@ -485,7 +490,7 @@
           </div>
           <span id="dashboard-badge" class="quote-badge">SEK · excl. VAT</span>
         </div>
-        <div id="dashboard-kit-bar" class="kit-bar dashboard-kit-bar" aria-label="Kits included in the consolidation"></div>
+        <div id="dashboard-kit-bar" class="kit-bar dashboard-kit-bar advanced-only" aria-label="Kits included in the consolidation"></div>
         <div id="dashboard-incomplete" class="calculation-warning hidden" role="alert"></div>
         <div class="dashboard-layout">
           <aside class="dashboard-side">
@@ -497,15 +502,15 @@
                   <span class="field-caption">Default expected sales <span class="info-tip" tabindex="0" role="img" aria-label="Information: Used for items without a group or item override. “× stock qty” means stock turns per year." data-tip="Used for items without a group or item override. “× stock qty” means stock turns per year.">i</span></span>
                   <span class="amount-currency wide-select"><input type="number" min="0" step="0.1" value="1" data-bind="sales.defaultValue" aria-label="Default expected sales"><select data-bind="sales.defaultMode" aria-label="Default expected sales unit"><option value="turns">× stock qty / yr</option><option value="units">units / item / yr</option></select></span>
                 </label>
-                <label>
+                <label class="advanced-only">
                   Chart horizon
                   <span class="input-suffix wide"><input type="number" min="6" max="120" step="1" value="24" data-bind="sales.horizonMonths"><span>months</span></span>
                 </label>
               </div>
-              <label class="warehouse-check"><input type="checkbox" data-bind="sales.customerPaysOutbound"><span class="field-caption">Customer pays outbound freight <span class="info-tip" tabindex="0" role="img" aria-label="Information: When checked, parcel freight from the warehouse is recharged to the customer and not counted as a cost." data-tip="When checked, parcel freight from the warehouse is recharged to the customer and not counted as a cost.">i</span></span></label>
+              <label class="warehouse-check advanced-only"><input type="checkbox" data-bind="sales.customerPaysOutbound"><span class="field-caption">Customer pays outbound freight <span class="info-tip" tabindex="0" role="img" aria-label="Information: When checked, parcel freight from the warehouse is recharged to the customer and not counted as a cost." data-tip="When checked, parcel freight from the warehouse is recharged to the customer and not counted as a cost.">i</span></span></label>
             </section>
 
-            <section class="dash-card vat-box" aria-labelledby="vat-box-title">
+            <section class="dash-card vat-box advanced-only" aria-labelledby="vat-box-title">
               <p class="eyebrow">VAT box</p>
               <h3 id="vat-box-title">VAT</h3>
               <div class="vat-rate">
@@ -528,7 +533,7 @@
               <p class="fine-print">VAT is added to the price after your margin, never to the purchase cost. By default sales to Norwegian customers carry no VAT (goods from the USA or from a Swedish warehouse), while sales to Swedish customers do (Swedish stock, goods from Norway where VAT is paid when you sell, and goods bought from Switzerland). VAT is shown separately and never counted as profit or cost.</p>
             </section>
 
-            <section class="dash-card">
+            <section class="dash-card advanced-only">
               <p class="eyebrow">Item groups</p>
               <h3>Sales groups</h3>
               <p class="fine-print">Select items in Consolidated or a kit tab and choose “Assign to sales group”. A group can override expected sales and the price multiplier. Up to 8 groups.</p>
@@ -539,7 +544,7 @@
               </form>
             </section>
 
-            <section class="dash-card">
+            <section class="dash-card advanced-only">
               <p class="eyebrow">What-if</p>
               <h3>Scenario comparison</h3>
               <p class="fine-print">Adjust the current calculated result without changing workbook prices or quantities.</p>
@@ -574,7 +579,7 @@
                 <details class="chart-table-toggle"><summary>Show as table</summary><div id="cumulative-table"></div></details>
               </section>
             </div>
-            <section class="chart-card" aria-labelledby="group-chart-title">
+            <section class="chart-card advanced-only" aria-labelledby="group-chart-title">
               <header>
                 <h3 id="group-chart-title">Net profit by sales group</h3>
                 <p>Annual, after storage, outtake and outbound freight</p>
@@ -582,7 +587,7 @@
               <div id="chart-groups" class="chart-body"></div>
               <div id="group-table" class="table-shell compact-table"></div>
             </section>
-            <section class="chart-card" aria-labelledby="item-profit-title">
+            <section class="chart-card advanced-only" aria-labelledby="item-profit-title">
               <header>
                 <h3 id="item-profit-title">Item profitability</h3>
                 <p>Sorted by annual net profit. Fixed warehouse costs are shown only in the totals.</p>
@@ -602,7 +607,7 @@
           </div>
           <div class="warehouse-header-actions">
             <span class="quote-badge">3P quote · NOK/month</span>
-            <label class="button small" for="warehouse-rates-file">Import 3PL rates JSON</label>
+            <label class="button small advanced-only" for="warehouse-rates-file">Import 3PL rates JSON</label>
           </div>
         </div>
 
@@ -623,7 +628,7 @@
             <label class="planned-pallets-field" data-show-when="pallet"><span>Planned pallet positions <span class="value-source assumed">Assumed</span></span><input id="wh-planned-pallets" type="number" min="0" step="1" value="0" data-bind="warehouse.plannedPallets"></label>
             <p id="warehouse-share-warning" class="warehouse-warning" role="alert"></p>
 
-            <details class="warehouse-assumption-details">
+            <details class="warehouse-assumption-details advanced-only">
               <summary>Capacity and fit assumptions <span class="value-source assumed">Assumed</span></summary>
               <p>Planning estimates—not values from the workbook or the 3PL quote.</p>
               <div class="warehouse-fields two-column-fields">
@@ -643,7 +648,7 @@
               </div>
             </details>
 
-            <details class="warehouse-assumption-details">
+            <details class="warehouse-assumption-details advanced-only">
               <summary>Monthly activity assumptions <span class="value-source assumed">Assumed</span></summary>
               <p>Replace these examples with expected monthly receipts, orders and parcels, or start from a preset based on how the parts sell.</p>
               <div class="activity-presets">
@@ -664,7 +669,7 @@
               <label class="warehouse-check"><input id="wh-wms" type="checkbox" data-bind="warehouse.includeWms"><span class="field-caption">Include WMS web license <span class="info-tip" tabindex="0" role="img" aria-label="Information: Adds the optional monthly WMS license. It is off by default." data-tip="Adds the optional monthly WMS license. It is off by default.">i</span></span></label>
             </details>
 
-            <details id="warehouse-rate-editor" class="rate-editor">
+            <details id="warehouse-rate-editor" class="rate-editor advanced-only">
               <summary>3PL quoted rates (NOK) <span class="value-source quoted">From quote</span></summary>
               <p>Enter the Norwegian quote values below or import a previously exported PartsList rate file. This importer accepts the app's Caesar-14 encoded JSON rate file, not the original email text.</p>
               <div class="rate-file-actions">
@@ -930,15 +935,20 @@
         <button type="button" data-parts-mode="full" aria-pressed="true" title="Use the normal kits">Normal kits</button>
         <button type="button" data-parts-mode="minimal" aria-pressed="false" title="Use the minimal kits: the least each rig needs">Minimal kits</button>
       </div>
-      <button id="cv-edit" class="button small" type="button" aria-pressed="false" title="Type new values straight into the tables">Edit values</button>
-      <button id="cv-open-all" class="button small" type="button">Open all tables</button>
-      <button id="cv-compact-all" class="button small" type="button">Compact all tables</button>
-      <button id="cv-reset" class="button small ghost" type="button">Reset the layout</button>
       <span class="cv-spacer"></span>
       <span class="cv-legend"><i class="cv-key cv-key-in"></i>Flows in: made this value <i class="cv-key cv-key-out"></i>Flows out: uses this value</span>
       <button id="cv-save" class="button small primary" type="button">Save workspace</button>
       <button id="cv-open" class="button small" type="button">Open workspace</button>
-      <button id="cv-fullscreen" class="button small" type="button">Full screen</button>
+      <details class="cv-more">
+        <summary class="button small" title="More tools">More</summary>
+        <div class="cv-more-menu">
+          <button id="cv-edit" class="button small" type="button" aria-pressed="false" title="Type new values straight into the tables">Edit values</button>
+          <button id="cv-open-all" class="button small" type="button">Open all tables</button>
+          <button id="cv-compact-all" class="button small" type="button">Compact all tables</button>
+          <button id="cv-reset" class="button small ghost" type="button">Reset the layout</button>
+          <button id="cv-fullscreen" class="button small" type="button">Full screen</button>
+        </div>
+      </details>
     </div>
     <div id="cv-stage" class="cv-stage" tabindex="0" aria-label="Surface with all parts tables. Drag to move around, scroll to zoom.">
       <div id="cv-world" class="cv-world">

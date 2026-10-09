@@ -1693,5 +1693,15 @@
     ['What it costs to bring the goods to the warehouse. Change the rule here.', 'Vad det kostar att få varorna till lagret. Ändra regeln här.'],
     ['The quantities decide how many items are stored and how many locations that takes.', 'Antalen avgör hur många artiklar som lagras och hur många platser det tar.'],
     ['Costs on the way to the customer. They are normally not calculated: the customer pays the price from the multiplier.', 'Kostnader på vägen till kunden. De räknas normalt inte: kunden betalar priset från påslagsfaktorn.'],
+    ['Advanced', 'Avancerad'],
+    ['How much to show', 'Hur mycket som ska visas'],
+    ['Only what you need to get started', 'Bara det du behöver för att komma igång'],
+    ['Every setting and every view', 'Alla inställningar och alla vyer'],
+    ['More tools', 'Fler verktyg'],
+    ['Advanced: every setting and view is shown.', 'Avancerat: alla inställningar och vyer visas.'],
+    ['Simple: only what you need to get started.', 'Enkelt: bara det du behöver för att komma igång.'],
+    ['Today', 'Idag'],
+    ['Add-on', 'Påslag'],
+    ['Used', 'Använd'],
   ];
 }));
