@@ -88,6 +88,17 @@ The exchange rate used for a foreign currency is **today's rate plus a currency 
 
 Only the fields of the storage types that are switched on are shown (shelf racks with bins, drawers, pallets); the others come back when the type is switched on again, and the cost table lists only the types in use. When shelves and drawers are both used, one number sets the share placed on shelves and the drawers get the rest, so the two always add up to 100 %. Under *Monthly activity assumptions* a **preset** (Lean, Balanced or Wide) fills in receipts, orders and parcels from the sales history of one manufacturer's parts in the Norwegian market: the best sellers that make up 80 %, 95 % or all of the pieces sold. With no order data it assumes 3 pieces per order line, 4 lines per order, one parcel per order and 10 % private customers; every value can be changed afterwards.
 
+## Bin what-if
+
+At the top of the Warehouse view (when shelves are used) the **What if** section compares two ways of filling the bins, with the same number of items per bin (changeable right there; all items are assumed to be the same size):
+
+- **Articles share bins**: the stock is poured into as few bins as possible.
+- **One article per bin**: every article number gets its own bin or bins, with several items inside. A part-filled bin is not shared with another article.
+
+Each way shows its bins, shelf locations, the monthly cost of those locations from the loaded quote and how much of the room in the bins is used; **Use this** switches the plan to it. Below, **Suggestions** analyse the stock: what one article per bin costs compared with sharing, which number of items per bin would need the fewest shelf locations, how many more items fit in the bins already paid for (and for which articles), articles that alone fill many bins, bins that hold articles that never sold in the sales history, and articles that fill less than half of their only bin. At the advanced level a table lists the articles that use the most bins and a table shows what other bin sizes would do. The canvas warehouse card shows both bin counts side by side.
+
+In *Suggested stock* the advanced option **Fill whole bins** rounds each suggested quantity up to whole bins when every article has its own bins, because the bin is paid for anyway. A sales history only speaks for the manufacturers whose parts appear in it: the popularity numbers, the suggested stock and "never sold" leave the parts of other manufacturers out instead of treating them as parts that do not sell.
+
 ## Minimal parts lists
 
 A rig can have two versions of its parts list: the full list and a **minimal list** with the least that the rig needs (same part numbers, fewer pieces). Add the minimal lists with **Add minimal lists** on the *Minimal vs full* tab, one file per rig. The file name or the title row must name the rig (for example `MR-200` for the rig sheet `MR-200`). Each file becomes a sheet called `MR-200 min` that remembers which full sheet it belongs to and starts with the same manufacturer, route, currency, discount and freight settings. Per-part freight is taken from the same part in the full list, because a minimal list has no freight columns.

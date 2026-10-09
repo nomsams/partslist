@@ -355,6 +355,18 @@ test('simple first, advanced on request: one switch, the extras are tagged, and 
   assert.match(html, /<details class="cv-more">[\s\S]*id="cv-edit"[\s\S]*id="cv-reset"[\s\S]*id="cv-fullscreen"/);
 });
 
+test('bin what-if: one article per bin against sharing, with suggestions, and a sales history only speaks for the manufacturers in it', () => {
+  assert.match(html, /id="bin-analysis"/);
+  assert.match(html, /id="bin-units"[^>]*data-bind="warehouse\.unitsPerBin"/);
+  ['binAnalysis', 'binSuggestions', 'renderBinAnalysis', 'bindBinAnalysis'].forEach((name) => assert.ok(app.includes(`function ${name}(`), name));
+  assert.ok(app.includes('Core.analyzeBins('));
+  assert.match(html, /id="stock-round"/);
+  assert.ok(app.includes('binSize: stock.roundToBins'));
+  // Parts of a manufacturer that is not in the sales history are left out of the popularity numbers, not called "never sold".
+  assert.ok(app.includes('const covered = new Set(result.rows.filter((row) => row.inKit && row.total > 0).map((row) => row.manufacturer))'));
+  assert.ok(app.includes("if (filter === 'notsold') return popularityRowOf(item)?.total === 0;"));
+});
+
 test('every manufacturer is its own route: own settings, exchange-rate buffer, percentage freight and an independent shipment', () => {
   assert.match(html, /id="makers-panel"/);
   assert.match(app, /function buildMakerCard\(/);

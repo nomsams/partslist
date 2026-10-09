@@ -340,6 +340,40 @@
   // options.onePerBin with options.itemUnits (pieces per article) gives every article its own bins; unitsPerShelf
   // is then bins per shelf location x unitsPerBin, and binsPerLocation says how many bins a shelf location holds
   // (bins across x bins stacked high x bins deep).
+  // What-if for the shelves: every article in its own bins (one article number per bin, several items inside) against
+  // articles sharing bins. All items are assumed to be the same size. items: [{ key, part, description, units, sold }],
+  // units = pieces that go on shelves. candidates: other numbers of items per bin to try.
+  function analyzeBins({ items = [], unitsPerBin = 1, binsPerLocation = 1, candidates = [] } = {}) {
+    const perBin = Math.max(1, Number(unitsPerBin) || 1);
+    const perLocation = Math.max(1, Math.round(Number(binsPerLocation) || 1));
+    const locationsFor = (bins) => (bins > 0 ? Math.ceil(bins / perLocation) : 0);
+    const binsFor = (units, size) => (units > 0 ? Math.ceil(units / size - 1e-9) : 0);
+    const list = items.filter((item) => item.units > 0).map((item) => {
+      const bins = binsFor(item.units, perBin);
+      return { ...item, bins, room: bins * perBin - item.units, fill: item.units / (bins * perBin) };
+    }).sort((a, b) => b.bins - a.bins || b.units - a.units);
+    const totalUnits = list.reduce((sum, item) => sum + item.units, 0);
+    const singleBins = list.reduce((sum, item) => sum + item.bins, 0);
+    const sharedBins = binsFor(totalUnits, perBin);
+    const sweep = [...new Set([perBin, ...candidates])].filter((size) => size >= 1).sort((a, b) => a - b).map((size) => {
+      const bins = list.reduce((sum, item) => sum + binsFor(item.units, size), 0);
+      return { unitsPerBin: size, bins, locations: locationsFor(bins) };
+    });
+    const best = sweep.reduce((winner, entry) => (!winner || entry.locations < winner.locations || (entry.locations === winner.locations && entry.bins < winner.bins) ? entry : winner), null);
+    return {
+      perBin,
+      totalUnits,
+      articles: list.length,
+      shared: { bins: sharedBins, locations: locationsFor(sharedBins), fill: sharedBins > 0 ? totalUnits / (sharedBins * perBin) : 0 },
+      single: { bins: singleBins, locations: locationsFor(singleBins), fill: singleBins > 0 ? totalUnits / (singleBins * perBin) : 0, room: list.reduce((sum, item) => sum + item.room, 0) },
+      extraBins: singleBins - sharedBins,
+      extraLocations: locationsFor(singleBins) - locationsFor(sharedBins),
+      list,
+      sweep,
+      best,
+    };
+  }
+
   function planWarehouseStorage(options = {}) {
     const inventoryUnits = Math.max(0, Number(options.inventoryUnits) || 0);
     const shelfEnabled = options.shelfEnabled !== false;
@@ -682,7 +716,7 @@
   //   unsold parts get nothing, except in kits that are mostly sold (completeKits) where one piece keeps the kit complete.
   //   budget (optional, in the same money as unitCost): trims the plan in steps until it fits:
   //   safety margins first, then the slow sellers down to one piece, then the kit-completing pieces, then the slowest parts.
-  function suggestStock({ rows = [], kits = [], years = 5, monthsCover = 6, serviceLevel = 0.95, completeKits = true, budget = null, unitCost = () => null, current = () => null } = {}) {
+  function suggestStock({ rows = [], kits = [], years = 5, monthsCover = 6, serviceLevel = 0.95, completeKits = true, budget = null, binSize = 0, unitCost = () => null, current = () => null } = {}) {
     const z = SERVICE_LEVELS[serviceLevel] ?? SERVICE_LEVELS[0.95];
     const spanYears = Math.max(years, 0.1);
     const parts = rows.filter((row) => row.inKit);
@@ -704,7 +738,9 @@
       const perYear = row.total / spanYears;
       const cover = (perYear * monthsCover) / 12;
       const safety = row.total > 0 ? z * Math.sqrt(cover) : 0;
-      const needed = row.total > 0 ? Math.max(1, Math.ceil(cover + safety)) : completers.has(row.key) ? 1 : 0;
+      const wanted = row.total > 0 ? Math.max(1, Math.ceil(cover + safety)) : completers.has(row.key) ? 1 : 0;
+      // With one article per bin, a part-filled bin is paid for anyway: the stock is filled up to whole bins.
+      const needed = binSize > 1 && wanted > 0 ? Math.ceil(wanted / binSize) * binSize : wanted;
       const cost = unitCost(row);
       return {
         row,
@@ -783,6 +819,7 @@
     historyKey,
     parseSalesHistory,
     allocationShares,
+    analyzeBins,
     binsForUnits,
     compareSortValues,
     EU_MEMBERS,

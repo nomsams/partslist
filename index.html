@@ -472,6 +472,7 @@
             </label>
             <label>Budget for the stock (optional) <input id="stock-budget" type="number" min="0" step="1000" inputmode="numeric" placeholder="No limit"></label>
             <label class="pop-check advanced-only"><input id="stock-complete" type="checkbox"> Keep popular kits complete</label>
+            <label class="pop-check advanced-only" title="With one article per bin the bins are paid for anyway: the stock is filled up to whole bins"><input id="stock-round" type="checkbox"> Fill whole bins</label>
             <label class="pop-check advanced-only" title="Off: several articles can share a bin. On: every article gets its own bin or bins. Set in the Warehouse tab too."><input id="stock-one-per-bin" type="checkbox" data-bind="warehouse.onePerBin"> One article per bin</label>
             <button id="stock-apply" class="button small primary" type="button">Use these quantities in the project</button>
           </div>
@@ -612,6 +613,26 @@
         </div>
 
         <div id="warehouse-summary-cards" class="summary-cards warehouse-summary-cards"></div>
+
+        <section id="bin-analysis" class="bin-analysis hidden" aria-labelledby="bin-title">
+          <div class="bin-head">
+            <div>
+              <p class="eyebrow">What if</p>
+              <h3 id="bin-title">One article per bin</h3>
+              <p class="fine-print">Every article number gets its own bin or bins, with several items inside. Compare it with letting articles share bins.</p>
+            </div>
+            <label class="bin-size">Items per bin <input id="bin-units" type="number" min="1" step="1" data-bind="warehouse.unitsPerBin" aria-label="Items per bin"></label>
+          </div>
+          <div id="bin-cards" class="bin-cards"></div>
+          <div class="bin-suggest">
+            <h4>Suggestions</h4>
+            <ul id="bin-suggestions" class="bin-suggestions"></ul>
+          </div>
+          <details class="bin-details advanced-only">
+            <summary>Per article and per bin size</summary>
+            <div id="bin-tables" class="bin-tables"></div>
+          </details>
+        </section>
 
         <div class="warehouse-layout">
           <section class="warehouse-control-panel" aria-labelledby="warehouse-assumptions-title">

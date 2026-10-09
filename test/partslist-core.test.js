@@ -6,6 +6,7 @@ const {
   parseSalesHistory,
   suggestStock,
   binsForUnits,
+  analyzeBins,
   planWarehouseStorage: planStorage,
   allocationShares,
   EU_MEMBERS,
@@ -442,4 +443,30 @@ test('with minimal lists a part is common only when two lists need at least one 
   assert.equal(summarizeOccurrences(rows, { requireStock: true }).common, false);
   assert.equal(summarizeOccurrences([...rows, { sheetName: 'C', quantity: 1 }], { requireStock: true }).common, true);
   assert.deepEqual(summarizeOccurrences(rows, { requireStock: true }).sources, ['A', 'B']);
+});
+
+test('the bin what-if compares one article per bin with sharing, finds the best bin size and the room left in bins', () => {
+  const items = [{ key: 'a', part: 'A', units: 12 }, { key: 'b', part: 'B', units: 3 }, { key: 'c', part: 'C', units: 3 }, { key: 'd', part: 'D', units: 10 }, { key: 'z', part: 'Z', units: 0 }];
+  const result = analyzeBins({ items, unitsPerBin: 5, binsPerLocation: 4, candidates: [3, 10, 28] });
+  assert.equal(result.articles, 4);                                   // no stock, no bin
+  assert.equal(result.totalUnits, 28);
+  assert.equal(result.shared.bins, 6);                                // 28 / 5 rounded up
+  assert.equal(result.single.bins, 3 + 1 + 1 + 2);                    // A needs 3, B and C one each, D two
+  assert.equal(result.extraBins, 1);
+  assert.equal(result.shared.locations, 2);                           // 6 bins / 4 per location
+  assert.equal(result.single.locations, 2);                           // 7 bins / 4 per location
+  assert.equal(result.single.room, 35 - 28);                          // room left in the bins in use
+  assert.equal(result.list[0].part, 'A');
+  assert.equal(result.list[0].room, 3);
+  // Bigger bins mean fewer bins: 28 items per bin is one bin per article.
+  const big = result.sweep.find((entry) => entry.unitsPerBin === 28);
+  assert.equal(big.bins, 4);
+  assert.equal(result.best.locations, 1);
+  assert.ok(result.best.unitsPerBin >= 10);
+  // Stock can be filled up to whole bins.
+  const rows = [{ key: 'a', part: 'A', altParts: [], description: '', kits: ['K'], inKit: true, total: 500, sold: [500] }];
+  const plain = suggestStock({ rows, kits: [], years: 5, unitCost: () => 1 }).lines[0].target;
+  const filled = suggestStock({ rows, kits: [], years: 5, binSize: 25, unitCost: () => 1 }).lines[0].target;
+  assert.equal(filled % 25, 0);
+  assert.ok(filled >= plain && filled - plain < 25);
 });

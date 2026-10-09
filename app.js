@@ -131,7 +131,7 @@
   const VIEW = Object.freeze({ consolidated: ':consolidated', canvas: ':canvas', minimal: ':minimal', popularity: ':popularity', dashboard: ':dashboard', warehouse: ':warehouse', wire: ':wire' });
   const SPECIAL_VIEWS = new Set(Object.values(VIEW));
   // Starting points for the stock suggestion: half a year of sales, a 95 % chance of having a part, no budget.
-  const STOCK_DEFAULTS = Object.freeze({ months: 6, service: 0.95, budget: null, complete: true });
+  const STOCK_DEFAULTS = Object.freeze({ months: 6, service: 0.95, budget: null, complete: true, roundToBins: false });
   // The currency add-on: an amount in the output currency added to today's rate, one per foreign currency and the same for every manufacturer.
   const FX_ADDON_CURRENCIES = Object.freeze(['USD', 'EUR', 'NOK', 'DKK']);
   const FX_ADDON_DEFAULTS = Object.freeze({ USD: 0.5, EUR: 0.4, NOK: 0, DKK: 0 });
@@ -569,6 +569,12 @@
     stockBudget: el('stock-budget'),
     stockComplete: el('stock-complete'),
     stockApply: el('stock-apply'),
+    stockRound: el('stock-round'),
+    binAnalysis: el('bin-analysis'),
+    binUnits: el('bin-units'),
+    binCards: el('bin-cards'),
+    binSuggestions: el('bin-suggestions'),
+    binTables: el('bin-tables'),
     dashboardView: el('dashboard-view'),
     dashboardSubtitle: el('dashboard-subtitle'),
     dashboardBadge: el('dashboard-badge'),
@@ -693,6 +699,7 @@
     bindFxPanel();
     bindCanvas();
     bindActivityPresets();
+    bindBinAnalysis();
     dom.commonMode.addEventListener('click', toggleCommonMode);
     bindToast();
     document.addEventListener('click', (event) => {
@@ -1407,6 +1414,128 @@
         kit.discountRate = first[maker].discountRate;
         kit.dutyRate = first[maker].dutyRate;
       }
+    });
+  }
+
+  /* -- Bin what-if: one article per bin against sharing, with suggestions -- */
+
+  const BIN_SIZES = Object.freeze([1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40, 50, 75, 100]);
+
+  // The stock that goes on shelves, article by article, put into bins in both ways.
+  function binAnalysis() {
+    const warehouse = state.warehouse;
+    const model = calculateWarehouseModel();
+    const share = model.inventoryUnits > 0 ? model.shelfUnits / model.inventoryUnits : 0;
+    const popularity = state.history.markets.length ? popularityResult() : null;
+    const sold = popularity ? popularity.byKey : null;
+    const items = state.consolidated.map((item) => ({
+      key: item.key,
+      part: item.part,
+      description: item.description,
+      units: (item.maxQuantity || 0) * share,
+      sold: sold && popularity.covered.has(item.manufacturer || '') ? (sold.get(item.key)?.total ?? 0) : null,
+    }));
+    const analysis = Core.analyzeBins({ items, unitsPerBin: warehouse.unitsPerBin, binsPerLocation: binsPerLocation(warehouse), candidates: BIN_SIZES });
+    const perMonth = (locations) => (model.nokToOutput === null ? null : locations * warehouse.rates.shelf * model.nokToOutput);
+    return { analysis, model, perMonth };
+  }
+
+  function binSuggestions({ analysis: a, model, perMonth }) {
+    const output = model.outputCurrency;
+    const lines = [];
+    const n = (value) => formatNumber(value, 0);
+    if (a.extraBins <= 0) lines.push('One article per bin needs no more bins than letting articles share.');
+    else if (a.extraLocations > 0) {
+      const extra = perMonth(a.single.locations) !== null ? perMonth(a.single.locations) - perMonth(a.shared.locations) : null;
+      lines.push(`One article per bin needs ${n(a.extraBins)} more bins than sharing (${n(a.single.bins)} instead of ${n(a.shared.bins)}), which is ${n(a.extraLocations)} more shelf locations.`);
+      if (extra !== null) lines.push(`That costs about ${formatMoney(extra, output)} more a month.`);
+    } else {
+      lines.push(`One article per bin needs ${n(a.extraBins)} more bins, but everything still fits in the same ${n(a.single.locations)} shelf locations: it costs nothing extra.`);
+    }
+    if (a.best && a.best.unitsPerBin !== a.perBin && a.best.locations < a.single.locations) {
+      lines.push(`With ${n(a.best.unitsPerBin)} items per bin, one article per bin would need ${n(a.best.locations)} shelf locations instead of ${n(a.single.locations)}.`);
+    }
+    const roomy = a.list.filter((item) => item.room >= 1).sort((x, y) => y.room - x.room).slice(0, 3);
+    if (a.single.room >= 3 && roomy.length) {
+      lines.push(`${n(a.single.room)} more items fit in the bins that are already in use. The stock can grow at no extra space, for example by ${roomy.map((item) => `${item.part} (+${n(item.room)})`).join(', ')}.`);
+    }
+    const heavy = a.list[0];
+    if (heavy && heavy.bins >= 3 && a.single.bins > 0 && heavy.bins / a.single.bins >= 0.15) {
+      lines.push(`${heavy.part} alone fills ${n(heavy.bins)} bins, ${n((heavy.bins / a.single.bins) * 100)} % of all bins. A bigger bin or a pallet would suit it better.`);
+    }
+    const never = a.list.filter((item) => item.sold === 0);
+    if (never.length) {
+      const bins = never.reduce((sum, item) => sum + item.bins, 0);
+      lines.push(`${n(bins)} bins hold ${n(never.length)} articles that never sold in the sales history.`);
+    }
+    const thin = a.list.filter((item) => item.bins === 1 && item.fill < 0.5);
+    if (thin.length >= 4) lines.push(`${n(thin.length)} articles fill less than half of their only bin. If they shared bins in pairs, up to ${n(Math.floor(thin.length / 2))} bins would be free.`);
+    return lines.slice(0, 6);
+  }
+
+  function renderBinAnalysis() {
+    const section = dom.binAnalysis;
+    if (!section) return;
+    const show = state.warehouse.shelfEnabled && state.consolidated.length > 0;
+    section.classList.toggle('hidden', !show);
+    if (!show) return;
+    const data = binAnalysis();
+    const { analysis: a, model, perMonth } = data;
+    if (document.activeElement !== dom.binUnits) dom.binUnits.value = String(state.warehouse.unitsPerBin);
+    const single = state.warehouse.onePerBin;
+    const card = (mode, title, note, figures) => {
+      const active = (mode === 'single') === single;
+      const box = cvNode('article', `bin-card${active ? ' is-active' : ''}`);
+      box.append(cvNode('h4', '', title), cvNode('p', 'bin-big', formatNumber(figures.bins, 0)), cvNode('p', 'bin-unit', 'bins'));
+      const cost = perMonth(figures.locations);
+      box.append(
+        cvNode('p', '', `${formatNumber(figures.locations, 0)} shelf locations`),
+        cvNode('p', '', cost === null ? '—' : `${formatMoney(cost, model.outputCurrency)} a month`),
+        cvNode('p', 'bin-note', note),
+      );
+      if (active) box.append(cvNode('span', 'bin-tag', 'In use'));
+      else {
+        const button = cvNode('button', 'button small', 'Use this');
+        button.type = 'button';
+        button.dataset.binMode = mode;
+        box.append(button);
+      }
+      return box;
+    };
+    dom.binCards.replaceChildren(
+      card('shared', 'Articles share bins', `${formatNumber(a.shared.fill * 100, 0)} % of the room in the bins is used`, { bins: a.shared.bins, locations: a.shared.locations }),
+      card('single', 'One article per bin', `${formatNumber(a.single.fill * 100, 0)} % of the room in the bins is used`, { bins: a.single.bins, locations: a.single.locations }),
+    );
+    dom.binSuggestions.replaceChildren(...binSuggestions(data).map((text) => cvNode('li', '', text)));
+    // The detail for those who want it: the articles that use the most bins, and what other bin sizes would do.
+    const table = (headings, rows, className) => {
+      const grid = document.createElement('table');
+      grid.className = `parts-table ${className}`;
+      const head = grid.createTHead().insertRow();
+      headings.forEach((label, index) => { const th = cvNode('th', index > 1 || className === 'bin-sizes' ? 'number' : '', label); th.scope = 'col'; head.append(th); });
+      const body = grid.createTBody();
+      rows.forEach((values, rowIndex) => {
+        const tr = body.insertRow();
+        if (values.highlight) tr.className = 'is-active';
+        values.cells.forEach((value, index) => { const td = tr.insertCell(); td.textContent = value; if (index > 1 || className === 'bin-sizes') td.className = 'number'; });
+      });
+      return grid;
+    };
+    const articleRows = a.list.slice(0, 12).map((item) => ({ cells: [item.part, item.description, formatNumber(item.units, 0), formatNumber(item.bins, 0), formatNumber(item.room, 0)] }));
+    const sizeRows = a.sweep.map((entry) => ({ highlight: entry.unitsPerBin === a.perBin, cells: [formatNumber(entry.unitsPerBin, 0) + (a.best && entry.unitsPerBin === a.best.unitsPerBin && entry.unitsPerBin !== a.perBin ? ' ★' : ''), formatNumber(entry.bins, 0), formatNumber(entry.locations, 0)] }));
+    dom.binTables.replaceChildren(
+      table(['Article', 'Article name', 'Items', 'Bins', 'Room left'], articleRows, 'bin-articles'),
+      table(['Items per bin', 'Bins', 'Shelf locations'], sizeRows, 'bin-sizes'),
+    );
+  }
+
+  function bindBinAnalysis() {
+    dom.binCards.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-bin-mode]');
+      if (!button) return;
+      state.warehouse.onePerBin = button.dataset.binMode === 'single';
+      markProjectDirty();
+      refreshViews();
     });
   }
 
@@ -2132,6 +2261,10 @@
     if (state.level === 'advanced') whBody.append(quote);
     const locations = whModel.shelfLocations + whModel.drawerLocations + whModel.pallets;
     whBody.append(cvNode('p', 'cv-sum', `${formatNumber(whModel.inventoryUnits, 0)} items · ${formatNumber(locations, 0)} locations · ${whModel.shelfEnabled ? `${formatNumber(Math.round(whModel.shelfBins), 0)} of ${formatNumber(whModel.totalBins, 0)} bins · ` : ''}${formatMoney(whModel.monthlyTotal, whModel.outputCurrency)} a month`));
+    if (state.warehouse.shelfEnabled && model.items.length) {
+      const { analysis } = binAnalysis();
+      whBody.append(cvNode('p', 'cv-sum', `Sharing bins: ${formatNumber(analysis.shared.bins, 0)} bins · One article per bin: ${formatNumber(analysis.single.bins, 0)} bins`));
+    }
     const shelvesButton = cvNode('button', 'button small cv-shelves-button', state.canvas.shelves ? 'Hide the shelves' : 'Show the shelves');
     shelvesButton.type = 'button';
     shelvesButton.dataset.cvAction = 'shelves';
@@ -2798,6 +2931,7 @@
       service: [0.9, 0.95, 0.99].includes(stock.service) ? stock.service : STOCK_DEFAULTS.service,
       budget: Number.isFinite(stock.budget) && stock.budget > 0 ? stock.budget : null,
       complete: stock.complete !== false,
+      roundToBins: stock.roundToBins === true,
     };
     (Array.isArray(saved.markets) ? saved.markets : []).slice(0, MAX_MARKETS).forEach((market, index) => {
       if (!market || !Array.isArray(market.items)) return;
@@ -2930,7 +3064,16 @@
       kits: item.sources,
       manufacturer: item.manufacturer || '',
     }));
-    const result = Core.buildPopularity({ parts, markets: state.history.markets, kitOrder });
+    let result = Core.buildPopularity({ parts, markets: state.history.markets, kitOrder });
+    const covered = new Set(result.rows.filter((row) => row.inKit && row.total > 0).map((row) => row.manufacturer));
+    if (covered.size) {
+      result = Core.buildPopularity({
+        parts: parts.filter((part) => covered.has(part.manufacturer)),
+        markets: state.history.markets,
+        kitOrder: kitOrder.filter((name) => covered.has(kitSettings(name).manufacturer || '')),
+      });
+    }
+    result.covered = covered;
     result.byKey = new Map(result.rows.filter((row) => row.inKit).map((row) => [row.key, row]));
     state.popularityCache = result;
     return result;
@@ -3067,6 +3210,8 @@
       serviceLevel: stock.service,
       completeKits: stock.complete,
       budget: stock.budget,
+      // One article per bin: the stock is filled up to whole bins.
+      binSize: stock.roundToBins && state.warehouse.onePerBin && state.warehouse.shelfEnabled ? state.warehouse.unitsPerBin : 0,
       unitCost: (row) => {
         const item = itemByKey.get(row.key);
         if (!item) return null;
@@ -3239,6 +3384,7 @@
       dom.stockService.value = String(state.history.stock.service);
       dom.stockBudget.value = state.history.stock.budget === null ? '' : String(state.history.stock.budget);
       dom.stockComplete.checked = state.history.stock.complete;
+      dom.stockRound.checked = state.history.stock.roundToBins;
     }
     dom.popularityNote.textContent = popularity.mode === 'stock'
       ? 'For each part that sold: the sales of the months you choose, plus a safety margin, and at least one piece. Parts are in class A, B or C by how much they sell. With a budget the plan is trimmed step by step: safety margins first, then slow sellers.'
@@ -3395,10 +3541,11 @@
       const budget = toNumber(dom.stockBudget.value);
       stock.budget = budget !== null && budget > 0 ? budget : null;
       stock.complete = dom.stockComplete.checked;
+      stock.roundToBins = dom.stockRound.checked;
       markProjectDirty();
       renderPopularity();
     };
-    [dom.stockMonths, dom.stockService, dom.stockBudget, dom.stockComplete].forEach((input) => input.addEventListener('change', stockChanged));
+    [dom.stockMonths, dom.stockService, dom.stockBudget, dom.stockComplete, dom.stockRound].forEach((input) => input.addEventListener('change', stockChanged));
     dom.stockApply.addEventListener('click', applyStockPlan);
     dom.popularityModes.addEventListener('click', (event) => {
       const button = event.target.closest('[data-pop-mode]');
@@ -5589,6 +5736,7 @@
     dom.whUnitsShelf.value = String(model.unitsPerShelf);
     applyWarehouseVisibility();
     renderActivityPresets();
+    renderBinAnalysis();
     dom.whPlannedPallets.disabled = !state.warehouse.palletEnabled;
     dom.whPalletType.disabled = !state.warehouse.palletEnabled;
     dom.whPalletHeight.disabled = !state.warehouse.palletEnabled;
@@ -7630,13 +7778,13 @@
     const rowOf = (item) => popularityRowOf(item);
     return [
       { key: 'popRank', label: 'Popularity rank', number: true, sortValue: (item) => rowOf(item)?.rank ?? null, value: (item) => (rowOf(item)?.rank ? `#${rowOf(item).rank}` : '—') },
-      { key: 'soldTotal', label: 'Sold, all markets', number: true, sortValue: (item) => rowOf(item)?.total ?? null, value: (item) => formatQuantity(rowOf(item)?.total ?? 0) },
+      { key: 'soldTotal', label: 'Sold, all markets', number: true, sortValue: (item) => rowOf(item)?.total ?? null, value: (item) => (rowOf(item) ? formatQuantity(rowOf(item).total) : '—') },
       ...markets.map((market, index) => ({
         key: `sold:${market.name}`,
         label: `Sold in ${market.name}`,
         number: true,
         sortValue: (item) => rowOf(item)?.sold[index] ?? null,
-        value: (item) => formatQuantity(rowOf(item)?.sold[index] ?? 0),
+        value: (item) => (rowOf(item) ? formatQuantity(rowOf(item).sold[index]) : '—'),
       })),
     ];
   }
@@ -7706,7 +7854,7 @@
     if (filter === 'overridden') return item.quantityOverridden || item.salesOverridden || item.multiplierOverridden;
     if (filter === 'missing') return Core.hasMissingInputs(item);
     if (filter === 'soldall') return Boolean(popularityRowOf(item)?.inAll);
-    if (filter === 'notsold') return !popularityRowOf(item)?.total;
+    if (filter === 'notsold') return popularityRowOf(item)?.total === 0;
     if (filter.startsWith('group:')) return item.groupId === filter.slice(6);
     if (filter.startsWith('maker:')) return makerOf(item) === filter.slice(6);
     if (filter.startsWith('makercommon:')) return item.common && makerOf(item) === filter.slice(12);
